@@ -58,11 +58,7 @@ def routes_from_env(
     resolution instead of mid-run.
     """
     environment = os.environ if environment is None else environment
-    names = tuple(
-        name.strip().lower()
-        for name in environment.get(ROUTES_ENV, "").split(",")
-        if name.strip()
-    )
+    names = tuple(name.strip().lower() for name in environment.get(ROUTES_ENV, "").split(",") if name.strip())
     if not names:
         return ()
     return tuple(_route(environment, name, transport) for name in names)
@@ -89,8 +85,10 @@ def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
             + (f" (or SYSTEM_ONE_{upper}=1 for the hosted {name} defaults)" if name in KNOWN_ROUTES else "")
         )
 
-    return Route(name=name, client=SystemOneClient(
-        model=model, api_key=api_key, base_url=endpoint, transport=transport))
+    return Route(
+        name=name,
+        client=SystemOneClient(model=model, api_key=api_key, base_url=endpoint, transport=transport),
+    )
 
 
 class SystemOneClient:
@@ -105,8 +103,14 @@ class SystemOneClient:
     in `_send_raw`, so an SDK version bump is a one-function fix.
     """
 
-    def __init__(self, model: str | None = None, *, api_key: str | None = None,
-                 base_url: str | None = None, transport=None) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        transport=None,
+    ) -> None:
         import httpx2
         from typesafe_sdk import TypeSafeClient
 
@@ -143,8 +147,9 @@ class SystemOneClient:
             def _decode(cls, response):
                 return cls.model_validate_json(response.content)
 
-        request = prepare_system_one(self._sdk._config, dict(state), dict(questions),
-                                     None, None, None, None, LenientResponse)  # noqa: SLF001
+        request = prepare_system_one(
+            self._sdk._config, dict(state), dict(questions), None, None, None, None, LenientResponse
+        )  # noqa: SLF001
         sdk_send(self._sdk._http_client, self._sdk._retry, request)  # noqa: SLF001
 
     def send(self, state: Mapping, questions: Mapping) -> RawResponse:

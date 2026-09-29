@@ -26,19 +26,22 @@ def test_unknown_route_needs_endpoint_and_model():
 
 
 def test_known_route_shorthand_needs_only_the_flag():
-    routes = routes_from_env({"SYSTEM_ONE_ROUTES": "drex", "SYSTEM_ONE_DREX": "1",
-                              "TYPESAFE_API_KEY": "test-key"})
+    routes = routes_from_env(
+        {"SYSTEM_ONE_ROUTES": "drex", "SYSTEM_ONE_DREX": "1", "TYPESAFE_API_KEY": "test-key"}
+    )
     assert routes[0].name == "drex"
     assert routes[0].client.model == "drex-latest"
 
 
 def test_per_route_settings_beat_the_shorthand():
-    routes = routes_from_env({
-        "SYSTEM_ONE_ROUTES": "drex",
-        "SYSTEM_ONE_DREX": "1",
-        "SYSTEM_ONE_DREX_MODEL": "drex-v1.1",
-        "TYPESAFE_API_KEY": "test-key",
-    })
+    routes = routes_from_env(
+        {
+            "SYSTEM_ONE_ROUTES": "drex",
+            "SYSTEM_ONE_DREX": "1",
+            "SYSTEM_ONE_DREX_MODEL": "drex-v1.1",
+            "TYPESAFE_API_KEY": "test-key",
+        }
+    )
     assert routes[0].client.model == "drex-v1.1"
 
 
@@ -96,11 +99,13 @@ def _server(exchanges: list[tuple[bytes, bytes]], model: str = "jev-1.13.0") -> 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             sent = self.rfile.read(int(self.headers["content-length"]))
             answers = {id_: {"type": "noul", "noul": 0.9} for id_ in json.loads(sent)["questions"]}
-            served = json.dumps({
-                "model": model,
-                "usage": {"input_tokens": 12, "output_tokens": 1},
-                "answers": answers,
-            }).encode()
+            served = json.dumps(
+                {
+                    "model": model,
+                    "usage": {"input_tokens": 12, "output_tokens": 1},
+                    "answers": answers,
+                }
+            ).encode()
             exchanges.append((sent, served))
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -115,11 +120,9 @@ def _server(exchanges: list[tuple[bytes, bytes]], model: str = "jev-1.13.0") -> 
     port = httpd.server_address[1]
     threading_daemon = __import__("threading").Thread(target=httpd.serve_forever, daemon=True)
     threading_daemon.start()
-    return SystemOneClient(model="test", api_key="test-key",
-                           base_url=f"http://127.0.0.1:{port}")
+    return SystemOneClient(model="test", api_key="test-key", base_url=f"http://127.0.0.1:{port}")
 
 
 def _dead_server() -> SystemOneClient:
-    client = SystemOneClient(model="test", api_key="test-key",
-                             base_url="http://127.0.0.1:1")
+    client = SystemOneClient(model="test", api_key="test-key", base_url="http://127.0.0.1:1")
     return client

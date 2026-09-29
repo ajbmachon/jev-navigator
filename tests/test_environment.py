@@ -52,8 +52,9 @@ def test_the_legacy_config_fills_what_both_left_open(tmp_path, monkeypatch):
     from jev_navigator.environment import LEGACY_CONFIG
 
     (tmp_path / ".env").write_text("TYPESAFE_BASE_URL=https://drex.nace.ai\n")
-    monkeypatch.setattr("jev_navigator.environment.LEGACY_CONFIG",
-                        _written(tmp_path, {"TYPESAFE_API_KEY": "legacy-key"}))
+    monkeypatch.setattr(
+        "jev_navigator.environment.LEGACY_CONFIG", _written(tmp_path, {"TYPESAFE_API_KEY": "legacy-key"})
+    )
 
     load_typesafe_environment(root=tmp_path)
 
@@ -69,8 +70,9 @@ def test_a_missing_key_everywhere_raises_with_every_source_named(tmp_path, monke
 
 
 def test_env_file_parsing_is_tolerant(tmp_path):
-    path = _written(tmp_path, {"A": "plain", "B": "quoted"},
-                    extra=["", "# comment", "no equals sign", "=novalue"])
+    path = _written(
+        tmp_path, {"A": "plain", "B": "quoted"}, extra=["", "# comment", "no equals sign", "=novalue"]
+    )
     assert _env_file(path) == {"A": "plain", "B": "quoted", "": "novalue"}
 
 
