@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextvars
+import os
 import threading
 from collections.abc import Coroutine, Mapping
 from typing import Any
@@ -140,12 +141,16 @@ class _AsyncRunner:
 
 
 class TypeSafeJevClient:
-    def __init__(self, sdk_client=None, model: str = LATEST_JEV, *, transport=None) -> None:
+    def __init__(self, sdk_client=None, model: str | None = LATEST_JEV, *, transport=None) -> None:
         """``transport`` is a sync test or host transport. The default uses the official async SDK
-        behind the synchronous JevClient interface so ``cancel`` can abort active HTTP requests."""
+        behind the synchronous JevClient interface so ``cancel`` can abort active HTTP requests.
+        ``model=None`` resolves `TYPESAFE_DEFAULT_MODEL` from the environment, falling back to
+        `LATEST_JEV` — how consumers point the client at Drex or a finetuned endpoint."""
         self._capture: CapturingTransport | CapturingAsyncTransport | None = None
         self._runner: _AsyncRunner | None = None
         self._async_sdk = False
+        if model is None:
+            model = os.environ.get("TYPESAFE_DEFAULT_MODEL", "").strip() or LATEST_JEV
         if sdk_client is None:
             import httpx2
 
