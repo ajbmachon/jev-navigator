@@ -236,6 +236,7 @@ def test_user_dotenv_key_is_loaded_without_shell_evaluation(tmp_path: Path) -> N
     assert environment == {
         "TYPESAFE_API_KEY": "file-value",
         "TYPESAFE_BASE_URL": "http://127.0.0.1:4777/jvn",
+        "UNRELATED": "$(touch should-not-run)",  # loaded literally, never shell-evaluated
     }
     assert not (tmp_path / "should-not-run").exists()
 

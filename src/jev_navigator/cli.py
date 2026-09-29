@@ -61,7 +61,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     client: TypeSafeJevClient | None = None
     try:
         _load_typesafe_environment(os.environ)
-        client = TypeSafeJevClient()
+        client = TypeSafeJevClient()  # model=None resolves TYPESAFE_DEFAULT_MODEL in the adapter
         manifest = create_evidence_pack(
             repository,
             tuple(args.prefix),
@@ -458,19 +458,11 @@ def _load_typesafe_environment(
     environment: MutableMapping[str, str],
     path: Path | None = None,
 ) -> None:
-    """Load official TypeSafe SDK settings, with each process value taking precedence."""
-    from dotenv import dotenv_values
+    """Load official TypeSafe SDK settings: process environment, then checkout `.env`,
+    then the legacy `~/.config/jvn/env`; a process value always takes precedence."""
+    from .environment import load_typesafe_environment
 
-    path = path or Path.home() / ".config/jvn/env"
-    configured = dotenv_values(path) if path.is_file() else {}
-    for name in ("TYPESAFE_API_KEY", "TYPESAFE_BASE_URL"):
-        if environment.get(name, "").strip():
-            continue
-        value = configured.get(name)
-        if isinstance(value, str) and value.strip():
-            environment[name] = value
-    if not environment.get("TYPESAFE_API_KEY", "").strip():
-        raise RuntimeError("TYPESAFE_API_KEY is unset and ~/.config/jvn/env does not provide it")
+    load_typesafe_environment(environment, legacy=path)
 
 
 def _parse_start(index: CodeIndex, value: str) -> Place:
