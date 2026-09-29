@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from git_repos import commit_all, write_files
 
+from jev_navigator import operations
+from jev_navigator.directives.places import neighbours
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.imports import (
     imported_modules,
@@ -584,3 +587,97 @@ def test_package_json_outside_the_root_or_behind_a_symbolic_link_is_not_read(tmp
     # Assert
     assert through_link == ()
     assert from_above == ()
+
+
+def test_guessed_package_source_stays_discoverable_without_proving_a_call(tmp_path: Path) -> None:
+    index = indexed(
+        tmp_path,
+        {
+            "packages/shared/package.json": '{"name": "@acme/shared", "main": "./bundle/index.mjs"}',
+            "packages/shared/src/index.ts": "export function handle() { return 1; }\n",
+            "other/handle.ts": "export function handle() { return 2; }\n",
+            "apps/web/page.ts": (
+                'import { handle } from "@acme/shared";\nexport function run() { return handle(); }\n'
+            ),
+        },
+    )
+    run = index.find_definition("run")[0]
+    edge = index.callee_edges(run)[0]
+
+    # The original package mapping and its dependents remain useful for discovery.
+    assert index.imports("apps/web/page.ts") == ("packages/shared/src/index.ts",)
+    assert index.dependents("packages/shared/src/index.ts") == ("apps/web/page.ts",)
+    assert edge.binding.status == "candidate"
+    assert edge.binding.target is None
+    assert "package.json mapping for @acme/shared" in edge.binding.reason
+
+    offered = neighbours(index, index.read_slice(run))
+    handle_files = {place.open().span.file for place in offered if place.open().span.name == "handle"}
+    assert handle_files == {"packages/shared/src/index.ts", "other/handle.ts"}
+    links = [link for link in operations.trace_graph(index, [run]).links if link.name == "handle"]
+    assert {link.target.file for link in links if link.target} == handle_files
+    assert all(link.binding.status == "candidate" for link in links)
+
+
+def test_duplicate_package_proximity_is_a_candidate_without_losing_its_path(tmp_path: Path) -> None:
+    ui = '{"name": "@ws/ui", "exports": {"./button": "./src/button.ts"}}'
+    index = indexed(
+        tmp_path,
+        {
+            "templates/next/packages/ui/package.json": ui,
+            "templates/next/packages/ui/src/button.ts": "export function button() { return 1; }\n",
+            "templates/next/apps/web/page.ts": (
+                'import { button } from "@ws/ui/button";\nexport function render() { return button(); }\n'
+            ),
+            "templates/vite/packages/ui/package.json": ui,
+            "templates/vite/packages/ui/src/button.ts": "export function button() { return 2; }\n",
+        },
+    )
+
+    assert index.imports("templates/next/apps/web/page.ts") == ("templates/next/packages/ui/src/button.ts",)
+    edge = index.callee_edges(index.find_definition("render")[0])[0]
+    assert edge.binding.status == "candidate"
+    assert edge.binding.target is None
+    assert "@ws/ui/button" in edge.binding.reason
+
+
+def test_package_uncertainty_propagates_through_a_relative_barrel(tmp_path: Path) -> None:
+    index = indexed(
+        tmp_path,
+        {
+            "package.json": '{"name": "@ws/ui", "exports": {"./button": "./src/button.ts"}}',
+            "src/button.ts": "export function button() { return 1; }\n",
+            "src/services/index.ts": 'export { button } from "@ws/ui/button";\n',
+            "src/page.ts": (
+                'import { button } from "./services";\nexport function render() { return button(); }\n'
+            ),
+        },
+    )
+
+    assert index.imports("src/page.ts") == ("src/services/index.ts",)
+    edge = index.callee_edges(index.find_definition("render")[0])[0]
+    assert edge.binding.status == "candidate"
+    assert edge.binding.target is None
+    assert "package.json mapping for @ws/ui/button" in edge.binding.reason
+
+
+def test_package_redirects_continue_past_four_links_and_stop_cycles(tmp_path: Path) -> None:
+    redirects = {f"#hop{i}": f"#hop{i + 1}" for i in range(6)}
+    redirects["#hop6"] = "./src/answer.ts"
+    redirects["#cycle"] = "#cycle"
+    index = indexed(
+        tmp_path,
+        {
+            "package.json": json.dumps({"imports": redirects}),
+            "src/answer.ts": "export function answer() { return 42; }\n",
+            "src/page.ts": (
+                'import { answer } from "#hop0";\nimport "#cycle";\n'
+                "export function run() { return answer(); }\n"
+            ),
+        },
+    )
+
+    assert index.imports("src/page.ts") == ("src/answer.ts",)
+    edge = index.callee_edges(index.find_definition("run")[0])[0]
+    assert edge.binding.status == "candidate"
+    assert edge.binding.target is None

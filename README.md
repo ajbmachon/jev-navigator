@@ -197,6 +197,11 @@ config that extends or points outside the index root, is not read: its aliases s
 bindings stay `candidate`. Package `extends` and tsconfig `references` are not followed.
 package.json files are found in the folders that hold scope files. `CodeIndex.at_commit` brings the
 commit's tsconfig, jsconfig and package.json files along, outside the scope.
+`CodeIndex.imports()` and `dependents()` include suggested repository package paths for navigation,
+including source paths inferred from build output. A call reached through such a package mapping is
+`candidate`, with the package mapping named as its reason; it is not a proven target. Relative imports,
+Python imports and declared script-config paths keep their resolved bindings. Package redirects follow
+acyclic chains of any length and stop when a specifier repeats.
 File lists come from git with NUL separators, so
 names with non-ASCII characters enter the scope as they are on disk, and lines split at newlines only,
 as the parser counts them. A line that is not valid UTF-8 is read with its invalid bytes replaced, the

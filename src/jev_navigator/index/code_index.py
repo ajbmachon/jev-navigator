@@ -18,6 +18,7 @@ from . import tools
 from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
 from .fact_cache import FactCache
 from .imports import (
+    ImportFact,
     imported_modules,
     imported_names,
     reexported_names,
@@ -456,35 +457,46 @@ class CodeIndex:
             if not any(other != span and other.contains(span.start) for other in symbols)
         )
 
-    def _imported_from(self, file: str, name: str) -> tuple[str, ...]:
+    def _imported_from(self, file: str, name: str) -> tuple[ImportFact, ...]:
         specifier = self._names_imported(file).get(name)
         if specifier is None:
             return ()
         resolved = resolve_import(specifier, file, self._scope, self._script_paths(file), self._packages())
         if resolved is None:
             return ()
-        found = [resolved]
+        found = {resolved.path: resolved}
         pending = [resolved]
-        seen = {resolved}
+        seen = {(resolved.path, resolved.proven)}
         while pending:
             exporter = pending.pop()
-            source = "\n".join(self._lines_of(exporter))
-            for names, target_specifier in reexported_names(source, exporter):
+            source = "\n".join(self._lines_of(exporter.path))
+            for names, target_specifier in reexported_names(source, exporter.path):
                 if names is not None and name not in names:
                     continue
                 target = resolve_import(
                     target_specifier,
-                    exporter,
+                    exporter.path,
                     self._scope,
-                    self._script_paths(exporter),
+                    self._script_paths(exporter.path),
                     self._packages(),
                 )
-                if target is not None and target not in seen:
-                    seen.add(target)
-                    if name in self._facts_in(target).export_names:
-                        found.append(target)
-                    pending.append(target)
-        return tuple(found)
+                if target is None:
+                    continue
+                inherited = ImportFact(
+                    target.path,
+                    exporter.proven and target.proven,
+                    target.reason if exporter.proven else exporter.reason,
+                )
+                identity = (inherited.path, inherited.proven)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                if name in self._facts_in(inherited.path).export_names:
+                    prior = found.get(inherited.path)
+                    if prior is None or inherited.proven:
+                        found[inherited.path] = inherited
+                pending.append(inherited)
+        return tuple(found.values())
 
     def _read_imported_names(self, file: str) -> dict[str, str]:
         return imported_names("\n".join(self._lines_of(file)), file)
@@ -518,7 +530,7 @@ class CodeIndex:
             resolve_import(specifier, file, self._scope, script_paths, packages)
             for specifier in imported_modules(source, file)
         )
-        return tuple(dict.fromkeys(path for path in resolved if path))
+        return tuple(dict.fromkeys(fact.path for fact in resolved if fact))
 
     def dependents(self, file: str) -> tuple[str, ...]:
         self._require_in_scope(file)

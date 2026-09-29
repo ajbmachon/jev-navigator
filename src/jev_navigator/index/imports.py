@@ -9,6 +9,7 @@ is build output and resolves to the source it is built from."""
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from .packages import Packages, package_name
@@ -33,9 +34,16 @@ _SOURCES_OF_OUTPUT = {
     ".mjs": (".mts", ".d.mts"),
     ".cjs": (".cts", ".d.cts"),
 }
-# A package.json target may name another package, which may map on again; a longer chain stays unresolved.
-_MAX_REDIRECTS = 4
 _PYTHON_ROOTS = ("", "src/")
+
+
+@dataclass(frozen=True)
+class ImportFact:
+    """A discoverable repository path and whether its import mapping proves that path."""
+
+    path: str
+    proven: bool
+    reason: str
 
 
 def imported_modules(source: str, path: str) -> list[str]:
@@ -56,12 +64,13 @@ def resolve_import(
     scope: frozenset[str],
     script_paths: ScriptPaths | None = None,
     packages: Packages | None = None,
-) -> str | None:
-    """The scope file a specifier names, or None for packages and files outside the scope.
+) -> ImportFact | None:
+    """The scope file a specifier suggests, with its evidence, or None when none is in scope.
     ``script_paths`` are the importer's config aliases and ``packages`` the repository's
     package.json files, both used for non-relative script specifiers."""
     if importer.endswith(".py"):
-        return _resolve_python(specifier, importer, scope)
+        path = _resolve_python(specifier, importer, scope)
+        return ImportFact(path, True, "Python import") if path else None
     return _resolve_script(specifier, importer, scope, script_paths, packages)
 
 
@@ -86,13 +95,17 @@ def _resolve_script(
     scope: frozenset[str],
     script_paths: ScriptPaths | None,
     packages: Packages | None,
-    redirects: int = 0,
-) -> str | None:
+    seen: frozenset[str] = frozenset(),
+) -> ImportFact | None:
     if specifier.startswith("."):
-        return _scope_file([normalised(f"{PurePosixPath(importer).parent}/{specifier}")], scope)
+        path = _scope_file([normalised(f"{PurePosixPath(importer).parent}/{specifier}")], scope)
+        return ImportFact(path, True, "relative import") if path else None
     found = _scope_file(script_paths.candidates(specifier) if script_paths else [], scope)
-    if found is not None or packages is None or redirects >= _MAX_REDIRECTS:
-        return found
+    if found is not None:
+        return ImportFact(found, True, "script config path mapping")
+    if packages is None or specifier in seen:
+        return None
+    seen = seen | {specifier}
     if specifier.startswith("#"):
         manifest = packages.scope_of(importer)
         targets = manifest.import_targets(specifier) if manifest else []
@@ -102,11 +115,12 @@ def _resolve_script(
         targets = manifest.export_targets(subpath) if manifest else []
     for target in targets:
         if target.startswith("."):
-            found = _scope_file(packages.target_bases(manifest.directory, target), scope)
+            path = _scope_file(packages.target_bases(manifest.directory, target), scope)
         else:
-            found = _resolve_script(target, importer, scope, script_paths, packages, redirects + 1)
-        if found is not None:
-            return found
+            redirected = _resolve_script(target, importer, scope, script_paths, packages, seen)
+            path = redirected.path if redirected else None
+        if path is not None:
+            return ImportFact(path, False, f"repository package.json mapping for {specifier}")
     return None
 
 
