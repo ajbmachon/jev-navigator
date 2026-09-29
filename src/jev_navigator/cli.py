@@ -29,6 +29,8 @@ from .progress import ProgressJournal, TerminalProgress
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
 POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
+# Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
+DEFAULT_MAX_CALLS = 24
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -237,7 +239,8 @@ A completed search can have a non-found outcome; inspect search.outcome in JSON 
   jvn find "the order limit" --preview-lines 8 --max-slice-chars 12000 --max-line-chars 240
   jvn find "the order limit" --verbose
 
-All flags are optional. No default depth, step, call or neighbour-count cap.
+All flags are optional. Live calls stop at 24 unless --max-calls sets another cap ('none' lifts it);
+there is no default depth, step or neighbour-count cap.
 Explicit limits may leave work unexplored; inspect the result's outcome and not_inspected entries.
 Find stops on a match; it is not an exhaustive find-all or an end-to-end trace.
 For JSON field names, types and defaults: jvn schema find. Full examples: docs/cli.md.""",
@@ -284,9 +287,13 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     limits.add_argument(
         "--max-calls",
-        type=int,
-        default=defaults.max_calls,
-        help="Maximum model requests, including entry selection (default: unlimited; not a token cap)",
+        type=_count_or_none,
+        default=DEFAULT_MAX_CALLS,
+        metavar="N|none",
+        help=(
+            f"Maximum model requests, including entry selection (default: {DEFAULT_MAX_CALLS}; "
+            "'none' for no cap; not a token cap)"
+        ),
     )
     evidence.add_argument(
         "--beam-width",
@@ -359,6 +366,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action = actions.get(name)
         if action is None:
             parser.error(f"unknown JSON field: {name}")
+        if value is None and action.type is _count_or_none:
+            arguments.append(f"{action.option_strings[0]}=none")
+            continue
         if value is None and action.default is None and action.option_strings:
             continue
         if isinstance(action, argparse._StoreTrueAction):
@@ -370,7 +380,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         values = value if isinstance(action, argparse._AppendAction) else [value]
         if not isinstance(values, list):
             parser.error(f"JSON field {name} must be an array")
-        expected_type = action.type or str
+        expected_type = int if action.type is _count_or_none else action.type or str
         for item in values:
             if expected_type is int and isinstance(item, float) and item.is_integer():
                 item = int(item)
@@ -399,14 +409,15 @@ def _request_schema(parser: argparse.ArgumentParser) -> dict:
     properties = {"command": {"type": "string", "const": "find", "default": "find"}}
     required = []
     for name, action in _request_actions(parser).items():
-        field = {"description": action.help, "type": "integer" if action.type is int else "string"}
+        numeric = action.type in (int, _count_or_none)
+        field = {"description": action.help, "type": "integer" if numeric else "string"}
         if isinstance(action, argparse._StoreTrueAction):
             field["type"] = "boolean"
         elif isinstance(action, argparse._AppendAction):
             field.update(type="array", items={"type": field["type"]})
         if action.option_strings:
             field["default"] = action.default
-            if action.default is None:
+            if action.default is None or action.type is _count_or_none:
                 field["type"] = [field["type"], "null"]
         else:
             required.append(name)
@@ -424,6 +435,16 @@ def _request_schema(parser: argparse.ArgumentParser) -> dict:
         "additionalProperties": False,
         "examples": [{"target": "the check that limits how many items an order may have"}],
     }
+
+
+def _count_or_none(value: str) -> int | None:
+    """A ``--max-calls`` value: a number, or ``none`` for no cap."""
+    if value == "none":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number or 'none', got {value!r}") from None
 
 
 def _validate_budget(budget: SearchBudget) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import os
@@ -172,10 +173,10 @@ def test_cancelled_navigation_writes_a_resumable_evidence_pack(tmp_path: Path) -
     assert records[-1]["outcome"] == "cancelled"
 
 
-def test_main_maps_a_cancelled_pack_to_the_shell_interrupt_status(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Arrange
+@pytest.fixture
+def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """``main`` without credentials or a search: each pack request is recorded by parameter name and
+    answered with ``outcome``."""
     from jev_navigator import cli
 
     class Client:
@@ -184,19 +185,60 @@ def test_main_maps_a_cancelled_pack_to_the_shell_interrupt_status(
         def close(self) -> None:
             pass
 
+    signature = inspect.signature(cli.create_evidence_pack)
+    calls: dict = {"outcome": "found", "packs": []}
+
+    def create_evidence_pack(*args, **kwargs):
+        calls["packs"].append(signature.bind(*args, **kwargs).arguments)
+        return {"search": {"outcome": calls["outcome"], "calls": 1}, "provider": {"requested_model": "test"}}
+
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
     monkeypatch.setattr(cli, "TypeSafeJevClient", Client)
-    monkeypatch.setattr(
-        cli,
-        "create_evidence_pack",
-        lambda *args, **kwargs: {"search": {"outcome": "cancelled", "calls": 1}},
-    )
+    monkeypatch.setattr(cli, "create_evidence_pack", create_evidence_pack)
+    return calls
+
+
+def test_main_maps_a_cancelled_pack_to_the_shell_interrupt_status(tmp_path: Path, offline_main: dict) -> None:
+    # Arrange
+    offline_main["outcome"] = "cancelled"
 
     # Act
     status = main(["find", "the policy", "--repo", str(tmp_path), "--out", str(tmp_path / "out")])
 
     # Assert
     assert status == 130
+
+
+@pytest.mark.parametrize(
+    ("request_options", "max_calls"),
+    [
+        ({}, 24),
+        ({"--max-calls": "5"}, 5),
+        ({"--max-calls": "none"}, None),
+    ],
+    ids=["capped-by-default", "explicit-cap", "explicitly-uncapped"],
+)
+@pytest.mark.parametrize("input_mode", ["flags", "json"])
+def test_live_calls_are_capped_unless_the_caller_lifts_the_cap(
+    tmp_path: Path, offline_main: dict, input_mode: str, request_options: dict, max_calls: int | None
+) -> None:
+    # Arrange
+    if input_mode == "flags":
+        arguments = ["find", "the policy", "--repo", str(tmp_path), "--out", str(tmp_path / "out")]
+        arguments += [part for option in request_options.items() for part in option]
+    else:
+        request = {"target": "the policy", "repo": str(tmp_path), "out": str(tmp_path / "out")}
+        if request_options:
+            value = request_options["--max-calls"]
+            request["max_calls"] = None if value == "none" else int(value)
+        arguments = ["--json", json.dumps(request)]
+
+    # Act
+    status = main(arguments)
+
+    # Assert
+    assert status == 0
+    assert offline_main["packs"][0]["budget"].max_calls == max_calls
 
 
 def repository_commit(repository: Path) -> str:
@@ -396,6 +438,7 @@ def test_report_distinguishes_included_lines_from_an_unopened_candidate(tmp_path
         ('{"target": "policy", "max_steps": "two"}', "max_steps"),
         ('{"target": "policy", "max_steps": true}', "max_steps"),
         ('{"target": "policy", "max_steps": -1}', "max_steps"),
+        ('{"target": "policy", "max_calls": "none"}', "max_calls"),
         ('{"target": "policy", "beam_width": 0}', "beam_width"),
         ('{"target": "policy", "prefix": "app/"}', "prefix"),
         ('{"target": "policy", "verbose": "yes"}', "verbose"),
@@ -539,7 +582,7 @@ def test_schema_discovery_needs_no_credentials_or_model(monkeypatch, capsys):
     assert fields["start"]["items"] == {"type": "string"}
     assert fields["beam_width"]["default"] == 3
     assert fields["beam_width"]["minimum"] == 1
-    assert fields["max_calls"]["default"] is None
+    assert fields["max_calls"]["default"] == 24
     assert fields["max_calls"]["type"] == ["integer", "null"]
     assert fields["repo"]["default"] == "."
     assert fields["verbose"]["type"] == "boolean"

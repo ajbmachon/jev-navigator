@@ -42,7 +42,8 @@ schema instead of inventing arguments. It describes the request, not the evidenc
 ## Every find option
 
 Each example below is complete. The numbers demonstrate optional controls; they are not a required
-configuration. Depth, steps, calls and neighbour counts are unlimited unless you set a limit.
+configuration. Live calls stop at 24 unless you set another cap; depth, steps and neighbour counts are
+unlimited unless you set a limit.
 
 | Option | Default and purpose | Example |
 |---|---|---|
@@ -52,7 +53,7 @@ configuration. Depth, steps, calls and neighbour counts are unlimited unless you
 | `--out PATH` | A unique directory under `./jvn-results/`. Choose another new or empty directory. | `jvn find "the order limit" --out ./order-evidence` |
 | `--max-depth N` | Unlimited. Maximum relationship hops from the starting places; `0` opens only those places. | `jvn find "the order limit" --max-depth 3` |
 | `--max-steps N` | Unlimited. Maximum distinct code openings during navigation; entry selection is separate. | `jvn find "the order limit" --max-steps 8` |
-| `--max-calls N` | Unlimited. Maximum model requests, including automatic entry selection. One request may contain many questions. This is not a token or monetary cap. | `jvn find "the order limit" --max-calls 8` |
+| `--max-calls N\|none` | `24`. Maximum model requests, including automatic entry selection; each is a paid request. `none` lifts the cap. One request may contain many questions. This is not a token or monetary cap. A search that reaches it ends with outcome `budget` and its unexplored places in `not_inspected`. | `jvn find "the order limit" --max-calls 8` |
 | `--beam-width N` | `3`. Places opened together in a navigation round. `1` makes navigation sequential. A wider round may do more work before a match stops the search. | `jvn find "the order limit" --beam-width 1` |
 | `--neighbours-per-kind N` | Unlimited. Retain at most this many candidates per relationship kind from each opened place. Explicitly omitted candidates stay visible in the result. | `jvn find "the order limit" --neighbours-per-kind 8` |
 | `--preview-lines N` | `8`. Leading source lines shown with a neighbour candidate's signature; `0` omits its code preview. | `jvn find "the order limit" --preview-lines 12` |
@@ -110,8 +111,9 @@ All the options in the longer example can also be supplied as one object:
 
 Omit fields you do not need. `command` defaults to `find`. JSON field names use underscores in place
 of flag hyphens. `prefix` and `start` are arrays even for one item. Numbers and booleans are JSON
-values, not strings. Unknown fields are errors. `null` is accepted for `out` and the four optional
-limits (`max_depth`, `max_steps`, `max_calls`, `neighbours_per_kind`), whose defaults are unset.
+values, not strings. Unknown fields are errors. `null` is accepted for `out` and the optional limits
+`max_depth`, `max_steps` and `neighbours_per_kind`, whose defaults are unset, and for `max_calls`,
+where it lifts the default cap of 24.
 
 Paths are relative to the invocation directory, not the JSON file's directory. Prefixes and start
 paths are relative to `repo`. Use `--json` on its own and put search settings inside the request.

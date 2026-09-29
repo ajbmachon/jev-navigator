@@ -108,8 +108,10 @@ Use `--prefix app/` to narrow the scope, `--start app/orders.py:42` to supply a 
 point, and `--out /path/to/new-pack` to select the result directory. Prefixes and starts are repeatable.
 Without a start, `jvn` uses typed Jev judgments to select entry candidates from the source inventory.
 
-Depth, step and call limits are unset by default. If you want an explicit allowance for a particular
-search, you can supply one:
+Every live call is a paid request, so `--max-calls` defaults to 24 for the whole run, choosing an entry
+point included; a search that reaches it ends with outcome `budget` and a resumable `not_inspected`
+frontier. `--max-calls none` lifts the cap. Depth and step limits are unset by default. If you want an
+explicit allowance for a particular search, you can supply one:
 
 ```sh
 jvn find "the check that limits how many items an order may have" \
