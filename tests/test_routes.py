@@ -26,6 +26,7 @@ def test_unknown_route_needs_endpoint_and_model():
 
 
 def test_known_route_shorthand_needs_only_the_flag():
+    _requires_typesafe()
     routes = routes_from_env(
         {"SYSTEM_ONE_ROUTES": "drex", "SYSTEM_ONE_DREX": "1", "TYPESAFE_API_KEY": "test-key"}
     )
@@ -34,6 +35,7 @@ def test_known_route_shorthand_needs_only_the_flag():
 
 
 def test_per_route_settings_beat_the_shorthand():
+    _requires_typesafe()
     routes = routes_from_env(
         {
             "SYSTEM_ONE_ROUTES": "drex",
@@ -94,7 +96,14 @@ def test_a_route_client_hits_its_own_endpoint_not_the_default():
 # --- local System-One endpoints -------------------------------------------------------------
 
 
+def _requires_typesafe() -> None:
+    pytest.importorskip("httpx2")
+    pytest.importorskip("typesafe_sdk")
+
+
 def _server(exchanges: list[tuple[bytes, bytes]], model: str = "jev-1.13.0") -> SystemOneClient:
+    _requires_typesafe()
+
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             sent = self.rfile.read(int(self.headers["content-length"]))
@@ -124,5 +133,6 @@ def _server(exchanges: list[tuple[bytes, bytes]], model: str = "jev-1.13.0") -> 
 
 
 def _dead_server() -> SystemOneClient:
+    _requires_typesafe()
     client = SystemOneClient(model="test", api_key="test-key", base_url="http://127.0.0.1:1")
     return client
