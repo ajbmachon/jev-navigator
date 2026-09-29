@@ -181,6 +181,41 @@ def test_resume_rejects_changed_source_before_reusing_the_frontier(tmp_path: Pat
     assert next_client.requests == []
 
 
+def test_budget_pack_survives_an_unreadable_unopened_file(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/live.py": "def live():\n    return 1\n",
+            "app/unreadable.py": "def unavailable():\n    return 2\n",
+        },
+    )
+    unreadable = repository / "app/unreadable.py"
+    unreadable.chmod(0)
+    try:
+        output = tmp_path / "evidence"
+        client = ScriptedJevClient()
+        manifest = create_evidence_pack(
+            repository,
+            (),
+            "live behavior",
+            ("app/live.py:1",),
+            output,
+            SearchBudget(max_calls=0, max_depth=0),
+            client,
+        )
+        assert manifest["search"]["outcome"] == "budget"
+        assert manifest["search"]["unavailable_files"]["app/unreadable.py"]
+        assert (output / "resume.json").is_file()
+        assert (
+            "PermissionError"
+            in json.loads((output / "resume.json").read_text())["unavailable_files"]["app/unreadable.py"]
+        )
+        assert client.requests == []
+    finally:
+        unreadable.chmod(0o600)
+
+
 def test_evidence_pack_chooses_a_real_entry_when_no_start_is_supplied(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     commit_files(

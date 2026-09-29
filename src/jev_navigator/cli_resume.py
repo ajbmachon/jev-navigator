@@ -16,28 +16,49 @@ from .judgments.thresholds import NoulVerdict
 STATE_VERSION = 1
 
 
-def scope_digest(index: CodeIndex) -> str:
-    """Identity of every scoped path and its bytes, including worktree changes."""
+def scope_identity(index: CodeIndex) -> tuple[str, dict[str, str]]:
+    """Identity of scoped bytes, with explicit markers for files that cannot be read."""
     digest = hashlib.sha256()
+    available = set(index.available_files)
+    unavailable = index.unavailable_files
     for file in sorted(index.files):
+        if file in available:
+            try:
+                file_hash = index.read_slice(Span(file, 1, 1)).file_sha256
+            except OSError as error:
+                unavailable[file] = f"{type(error).__name__}: {error}"
+                file_hash = ""
+            if file_hash:
+                unavailable.pop(file, None)
+            else:
+                unavailable.setdefault(
+                    file, index.unavailable_files.get(file, "unavailable during resume snapshot")
+                )
+        else:
+            file_hash = ""
+            unavailable[file] = index.unavailable_files.get(file, "unavailable during resume snapshot")
         digest.update(file.encode())
         digest.update(b"\0")
-        digest.update(index.read_slice(Span(file, 1, 1)).file_sha256.encode())
+        identity = f"unavailable:{unavailable[file]}" if file in unavailable else f"sha256:{file_hash}"
+        digest.update(identity.encode())
         digest.update(b"\0")
-    return digest.hexdigest()
+    return digest.hexdigest(), unavailable
 
 
-def save_resume(path: Path, index: CodeIndex, result: FindResult, *, entry_pending: bool) -> None:
+def save_resume(path: Path, index: CodeIndex, result: FindResult, *, entry_pending: bool) -> dict[str, str]:
     """Save only the state find_code needs to reopen its frontier; manifest owns past evidence."""
+    digest, unavailable = scope_identity(index)
     state = {
         "version": STATE_VERSION,
-        "scope_digest": scope_digest(index),
+        "scope_digest": digest,
+        "unavailable_files": unavailable,
         "stage": "entry" if entry_pending else "navigation",
         "result": None if entry_pending else _result_record(result),
     }
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
     temporary.replace(path)
+    return unavailable
 
 
 def load_resume(path: Path, index: CodeIndex) -> FindResult | None:
@@ -45,7 +66,7 @@ def load_resume(path: Path, index: CodeIndex) -> FindResult | None:
     state = json.loads(path.read_text())
     if state.get("version") != STATE_VERSION:
         raise ValueError("unsupported find resume state version")
-    if state.get("scope_digest") != scope_digest(index):
+    if state.get("scope_digest") != scope_identity(index)[0]:
         raise ValueError("repository source or scope changed since the evidence pack")
     if state.get("stage") == "entry":
         return None

@@ -214,8 +214,11 @@ def create_evidence_pack(
             )
             duration_seconds = monotonic() - started
         progress.phase("writing evidence pack")
+        scope_unavailable: dict[str, str] = {}
         if result.outcome in (Outcome.BUDGET, Outcome.CANCELLED):
-            save_resume(output / "resume.json", index, result, entry_pending=entry_pending)
+            scope_unavailable = save_resume(
+                output / "resume.json", index, result, entry_pending=entry_pending
+            )
         manifest = _manifest(
             repository,
             prefixes,
@@ -234,6 +237,7 @@ def create_evidence_pack(
             previous=previous,
             resume_from=resume_from,
             entry_pending=entry_pending,
+            scope_unavailable=scope_unavailable,
         )
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(_report(manifest))
@@ -604,6 +608,7 @@ def _manifest(
     previous: dict | None = None,
     resume_from: Path | None = None,
     entry_pending: bool = False,
+    scope_unavailable: dict[str, str] | None = None,
 ) -> dict:
     old_search = previous["search"] if previous else {}
     entry_receipt = entry_selection.to_json() if entry_selection else None
@@ -661,7 +666,7 @@ def _manifest(
                 "completed": list(result.parser_scans_completed),
                 "pending": list(result.parser_scans_pending),
             },
-            "unavailable_files": dict(result.unavailable_files),
+            "unavailable_files": {**result.unavailable_files, **(scope_unavailable or {})},
             "history": [
                 *old_search.get("history", []),
                 *([step.to_json() for step in result.history.steps] if result.history else []),
