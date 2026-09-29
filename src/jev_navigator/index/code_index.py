@@ -26,6 +26,7 @@ from .imports import (
 from .languages import (
     language_of,
 )
+from .packages import Packages
 from .scope_scan import FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
@@ -86,6 +87,7 @@ class CodeIndex:
         self._lines_of = cache(self._read_lines)
         self._file_sha256 = cache(self._read_file_sha256)
         self._script_paths_in = cache(self._read_script_paths)
+        self._packages = cache(self._read_packages)
         self._unparsed = Unparsed()
         self._unavailable: dict[str, str] = {}
         self._facts: dict[str, FileFacts] = {}
@@ -458,7 +460,7 @@ class CodeIndex:
         specifier = self._names_imported(file).get(name)
         if specifier is None:
             return ()
-        resolved = resolve_import(specifier, file, self._scope, self._script_paths(file))
+        resolved = resolve_import(specifier, file, self._scope, self._script_paths(file), self._packages())
         if resolved is None:
             return ()
         found = [resolved]
@@ -475,6 +477,7 @@ class CodeIndex:
                     exporter,
                     self._scope,
                     self._script_paths(exporter),
+                    self._packages(),
                 )
                 if target is not None and target not in seen:
                     seen.add(target)
@@ -510,8 +513,9 @@ class CodeIndex:
     def imports(self, file: str) -> tuple[str, ...]:
         source = "\n".join(self._lines_of(file))
         script_paths = self._script_paths(file)
+        packages = self._packages()
         resolved = (
-            resolve_import(specifier, file, self._scope, script_paths)
+            resolve_import(specifier, file, self._scope, script_paths, packages)
             for specifier in imported_modules(source, file)
         )
         return tuple(dict.fromkeys(path for path in resolved if path))
@@ -555,11 +559,15 @@ class CodeIndex:
         return self._lines_of(file)
 
     def _script_paths(self, file: str) -> ScriptPaths | None:
-        """The path aliases of the tsconfig.json nearest to a script file, read once per directory."""
+        """The path aliases of the configs nearest to a script file, read once per directory."""
         return None if file.endswith(".py") else self._script_paths_in(str(PurePosixPath(file).parent))
 
     def _read_script_paths(self, directory: str) -> ScriptPaths | None:
-        return nearest_script_paths(self.root, directory)
+        return nearest_script_paths(self.root, directory, self._packages().config_file)
+
+    def _read_packages(self) -> Packages:
+        """The package.json files of the folders holding scope files, read once, on first use."""
+        return Packages(self.root, self.files)
 
     def _read_lines(self, file: str) -> tuple[str, ...]:
         self._require_in_scope(file)
@@ -595,7 +603,8 @@ class CodeIndex:
 
 
 def _blobs_to_export(repository: Path, commit: str, listed: Sequence[str]) -> dict[str, str]:
-    """Object ids of the listed files and of every tsconfig file in ``commit``, keyed by path."""
+    """Object ids of the listed files and of every script config (tsconfig, jsconfig, package.json)
+    in ``commit``, keyed by path."""
     tree = _tree_blobs(tools.git(["ls-tree", "-r", "-z", commit], repository))
     return {path: tree[path] for path in [*listed, *_script_configs(tree)]}
 
@@ -615,8 +624,10 @@ def _script_configs(paths: Iterable[str]) -> list[str]:
     return [
         path
         for path in paths
-        if PurePosixPath(path).name.startswith("tsconfig")
-        and path.endswith(".json")
+        if (
+            (PurePosixPath(path).name.startswith(("tsconfig", "jsconfig")) and path.endswith(".json"))
+            or PurePosixPath(path).name == "package.json"
+        )
         and "node_modules/" not in path
     ]
 
