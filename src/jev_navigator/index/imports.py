@@ -1,12 +1,10 @@
 """Import statements, including ones that span several lines, resolved to files inside the index's
 scope.
 
-TypeScript and JavaScript specifiers resolve the way TypeScript resolves them, from what the
-repository declares: relative paths with TypeScript's suffix rules (``./x.js`` names ``x.ts``), the
-path aliases of the nearest tsconfig/jsconfig files, the nearest package.json ``imports`` map
-(``#src/*``), and the repository's own packages by name through their ``exports`` map or entry
-fields. A declared target in build output that is not in the scope (``dist/index.js``) resolves to
-the source it is built from. A specifier none of these explain stays unresolved."""
+Script specifiers resolve in TypeScript's order from what the repository declares: a relative path,
+the nearest config's path aliases, then the ``imports`` map of the importer's package.json for a
+``#`` specifier or a repository package by name. A declared target the repository does not contain
+is build output and resolves to the source it is built from."""
 
 from __future__ import annotations
 
@@ -35,7 +33,7 @@ _SOURCES_OF_OUTPUT = {
     ".mjs": (".mts", ".d.mts"),
     ".cjs": (".cts", ".d.cts"),
 }
-# `#x` may map to another package, which may map on again; a longer chain is left unresolved.
+# A package.json target may name another package, which may map on again; a longer chain stays unresolved.
 _MAX_REDIRECTS = 4
 _PYTHON_ROOTS = ("", "src/")
 
@@ -60,11 +58,11 @@ def resolve_import(
     packages: Packages | None = None,
 ) -> str | None:
     """The scope file a specifier names, or None for packages and files outside the scope.
-    ``script_paths`` are the importer's tsconfig aliases and ``packages`` the repository's
+    ``script_paths`` are the importer's config aliases and ``packages`` the repository's
     package.json files, both used for non-relative script specifiers."""
     if importer.endswith(".py"):
         return _resolve_python(specifier, importer, scope)
-    return _resolve_script(specifier.split("?", 1)[0], importer, scope, script_paths, packages)
+    return _resolve_script(specifier, importer, scope, script_paths, packages)
 
 
 def _resolve_python(specifier: str, importer: str, scope: frozenset[str]) -> str | None:
@@ -90,11 +88,9 @@ def _resolve_script(
     packages: Packages | None,
     redirects: int = 0,
 ) -> str | None:
-    """TypeScript's order: a relative path; else the tsconfig aliases, then a ``#`` import of the
-    importer's package or a repository package by name."""
     if specifier.startswith("."):
-        return _scope_file([normalised(f"{PurePosixPath(importer).parent}/{specifier}")], scope, packages)
-    found = _scope_file(script_paths.candidates(specifier) if script_paths else [], scope, packages)
+        return _scope_file([normalised(f"{PurePosixPath(importer).parent}/{specifier}")], scope)
+    found = _scope_file(script_paths.candidates(specifier) if script_paths else [], scope)
     if found is not None or packages is None or redirects >= _MAX_REDIRECTS:
         return found
     if specifier.startswith("#"):
@@ -105,29 +101,18 @@ def _resolve_script(
         manifest = packages.named(name, importer)
         targets = manifest.export_targets(subpath) if manifest else []
     for target in targets:
-        if not target.startswith("."):
-            found = _resolve_script(target, importer, scope, script_paths, packages, redirects + 1)
+        if target.startswith("."):
+            found = _scope_file(packages.target_bases(manifest.directory, target), scope)
         else:
-            base = normalised(f"{manifest.directory}/{target}" if manifest.directory else target)
-            found = _scope_file([base], scope, packages) or _scope_file(
-                packages.sources_of(manifest, target), scope, packages
-            )
+            found = _resolve_script(target, importer, scope, script_paths, packages, redirects + 1)
         if found is not None:
             return found
     return None
 
 
-def _scope_file(bases: list[str], scope: frozenset[str], packages: Packages | None) -> str | None:
-    """The first scope file a base names under TypeScript's suffix rules, or through the entry
-    fields of a package.json in a base that is a folder."""
-    for base in bases:
-        found = next((file for file in _script_files(base) if file in scope), None)
-        if found is None and packages is not None and (manifest := packages.at(base)) is not None:
-            entries = [normalised(f"{base}/{entry}") for entry in manifest.entries]
-            found = next((file for entry in entries for file in _script_files(entry) if file in scope), None)
-        if found is not None:
-            return found
-    return None
+def _scope_file(bases: list[str], scope: frozenset[str]) -> str | None:
+    """The first scope file a base names under TypeScript's suffix rules."""
+    return next((file for base in bases for file in _script_files(base) if file in scope), None)
 
 
 def _script_files(base: str) -> list[str]:

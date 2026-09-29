@@ -563,7 +563,7 @@ class CodeIndex:
         return None if file.endswith(".py") else self._script_paths_in(str(PurePosixPath(file).parent))
 
     def _read_script_paths(self, directory: str) -> ScriptPaths | None:
-        return nearest_script_paths(self.root, directory, self._packages().config_file)
+        return nearest_script_paths(self.root, directory)
 
     def _read_packages(self) -> Packages:
         """The package.json files of the folders holding scope files, read once, on first use."""

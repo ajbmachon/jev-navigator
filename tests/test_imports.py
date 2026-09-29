@@ -234,7 +234,7 @@ def test_a_path_alias_from_the_nearest_tsconfig_resolves_to_a_scope_file(tmp_pat
     assert call.binding.status == "resolved"
 
 
-def test_the_nearest_tsconfig_wins_and_extends_inherits_paths(tmp_path: Path) -> None:
+def test_the_nearest_config_wins_and_extends_inherits_paths(tmp_path: Path) -> None:
     # Arrange
     index = indexed(
         tmp_path,
@@ -246,16 +246,21 @@ def test_the_nearest_tsconfig_wins_and_extends_inherits_paths(tmp_path: Path) ->
             "packages/web/app/page.ts": 'import { local } from "@/util";\n',
             "packages/api/tsconfig.json": '{"extends": "../../tsconfig.json"}',
             "packages/api/handler.ts": 'import { shared } from "@/lib/utils";\n',
+            "packages/docs/jsconfig.json": '{"compilerOptions": {"paths": {"@/*": ["./lib/*"]}}}',
+            "packages/docs/lib/util.js": "export const local = 1;\n",
+            "packages/docs/page.js": 'import { local } from "@/util";\n',
         },
     )
 
     # Act
     web = index.imports("packages/web/app/page.ts")
     api = index.imports("packages/api/handler.ts")
+    docs = index.imports("packages/docs/page.js")
 
     # Assert
     assert web == ("packages/web/app/util.ts",)
     assert api == ("src/lib/utils.ts",)
+    assert docs == ("packages/docs/lib/util.js",)
 
 
 def test_a_parenthesised_python_import_over_several_lines_lists_every_name() -> None:
@@ -269,14 +274,16 @@ def test_a_parenthesised_python_import_over_several_lines_lists_every_name() -> 
     assert names == {"send_invoice": "app.jobs", "give_back": "app.jobs"}
 
 
-def test_an_index_at_an_old_commit_still_reads_the_tsconfig_outside_its_scope(tmp_path: Path) -> None:
+def test_an_index_at_an_old_commit_still_reads_configs_outside_its_scope(tmp_path: Path) -> None:
     # Arrange
     write_files(
         tmp_path,
         {
             "tsconfig.json": ROOT_TSCONFIG,
+            "package.json": '{"imports": {"#lib/*": "./src/lib/*.ts"}}',
             "src/lib/utils.ts": "export const shared = 1;\n",
-            "src/app/page.ts": 'import { shared } from "@/lib/utils";\n',
+            "src/lib/money.ts": "export const cents = 1;\n",
+            "src/app/page.ts": 'import { shared } from "@/lib/utils";\nimport { cents } from "#lib/money";\n',
         },
     )
     commit_all(tmp_path)
@@ -285,8 +292,9 @@ def test_an_index_at_an_old_commit_still_reads_the_tsconfig_outside_its_scope(tm
     index = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("src/",))
 
     # Assert
-    assert index.imports("src/app/page.ts") == ("src/lib/utils.ts",)
+    assert index.imports("src/app/page.ts") == ("src/lib/utils.ts", "src/lib/money.ts")
     assert "tsconfig.json" not in index.files
+    assert "package.json" not in index.files
 
 
 def test_a_multi_line_import_with_comments_inside_keeps_its_module_and_names() -> None:
@@ -484,7 +492,7 @@ def test_hash_imports_follow_the_nearest_package_json_through_fallbacks_and_cond
             "packages/shared/src/format.ts",
         ),
         (
-            {"packages/shared/package.json": '{"name": "@acme/shared", "main": "./dist/index.js"}'},
+            {"packages/shared/package.json": '{"name": "@acme/shared", "main": "./bundle/index.mjs"}'},
             "@acme/shared",
             "packages/shared/src/index.ts",
         ),
@@ -498,7 +506,7 @@ def test_hash_imports_follow_the_nearest_package_json_through_fallbacks_and_cond
             "packages/shared/lib/index.ts",
         ),
     ],
-    ids=["exports-types-before-bundle", "main-in-build-output", "outdir-onto-rootdir"],
+    ids=["exports-types-before-bundle", "main-in-any-build-folder", "outdir-onto-rootdir"],
 )
 def test_a_repository_package_resolves_by_name_to_its_source(
     tmp_path: Path, package: dict[str, str], specifier: str, expected: str
@@ -548,36 +556,6 @@ def test_a_name_several_packages_claim_resolves_within_the_importers_workspace(t
     assert outside == ()  # two claimants equally far: neither is guessed
 
 
-def test_aliases_come_from_every_config_in_the_nearest_folder_and_through_package_bases(
-    tmp_path: Path,
-) -> None:
-    # Arrange: every file is in scope, as from_git and from_directory list them, so the config-only
-    # package is found by its package.json
-    files = {
-        "apps/web/tsconfig.json": '{"files": [], "references": [{"path": "./tsconfig.app.json"}]}',
-        "apps/web/tsconfig.app.json": (
-            '{"extends": "@acme/tsconfig/base.json", "compilerOptions": {"baseUrl": "."}}'
-        ),
-        "packages/tsconfig/package.json": '{"name": "@acme/tsconfig"}',
-        "packages/tsconfig/base.json": '{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}',
-        "apps/web/src/lib/util.ts": "export const util = 1;\n",
-        "apps/web/src/page.ts": 'import { util } from "@/lib/util";\n',
-        "apps/docs/jsconfig.json": '{"compilerOptions": {"paths": {"~/*": ["./src/*"]}}}',
-        "apps/docs/src/lib/util.js": "export const util = 1;\n",
-        "apps/docs/src/page.js": 'import { util } from "~/lib/util";\n',
-    }
-    write_files(tmp_path, files)
-    index = CodeIndex(tmp_path, list(files))
-
-    # Act
-    web = index.imports("apps/web/src/page.ts")
-    docs = index.imports("apps/docs/src/page.js")
-
-    # Assert
-    assert web == ("apps/web/src/lib/util.ts",)
-    assert docs == ("apps/docs/src/lib/util.js",)
-
-
 def test_package_json_outside_the_root_or_behind_a_symbolic_link_is_not_read(tmp_path: Path) -> None:
     # Arrange
     outside = tmp_path / "outside"
@@ -606,23 +584,3 @@ def test_package_json_outside_the_root_or_behind_a_symbolic_link_is_not_read(tmp
     # Assert
     assert through_link == ()
     assert from_above == ()
-
-
-def test_an_index_at_an_old_commit_still_reads_package_json_outside_its_scope(tmp_path: Path) -> None:
-    # Arrange
-    write_files(
-        tmp_path,
-        {
-            "package.json": '{"imports": {"#app/*": "./app/*.ts"}}',
-            "app/util.ts": "export const util = 1;\n",
-            "app/page.ts": 'import { util } from "#app/util";\n',
-        },
-    )
-    commit_all(tmp_path)
-
-    # Act
-    index = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("app/",))
-
-    # Assert
-    assert index.imports("app/page.ts") == ("app/util.ts",)
-    assert "package.json" not in index.files
