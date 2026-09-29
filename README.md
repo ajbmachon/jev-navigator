@@ -175,15 +175,36 @@ comments.code_above_comment(index, file, line)  # CodeAbove(code or None, reason
 ```
 
 Imports are read per statement, so an import spanning several lines counts like any other.
-TypeScript and JavaScript specifiers also resolve through the path aliases (`compilerOptions.paths` and
-`baseUrl`) of the nearest `tsconfig.json`, following relative `extends`; comments and trailing commas in
-the config are fine. A named import follows transitive `export * from` barrel files inside the index;
-cycles terminate, and more than one matching definition remains a `candidate`. Like TypeScript, an
-exact alias wins, otherwise the wildcard with the longest
-prefix; only its targets are tried, then `baseUrl`. A config that is a symbolic link, or that extends or
-points outside the index root, is not read: its aliases stay unknown and those bindings stay
-`candidate`. `jsconfig.json` and tsconfig `references` are not read. `CodeIndex.at_commit` brings the
-commit's tsconfig files along, outside the scope. File lists come from git with NUL separators, so
+Script specifiers resolve in TypeScript's order, from what the repository declares:
+
+- a relative path, with TypeScript's suffix rules: a specifier naming compiled output (`.js`, `.jsx`,
+  `.mjs`, `.cjs`) names its TypeScript source when that exists, and a folder names its `index` file;
+- the path aliases (`compilerOptions.paths` and `baseUrl`) of the nearest tsconfig.json, or
+  jsconfig.json in a folder without one, following relative `extends`. Like TypeScript, an exact alias
+  wins, otherwise the wildcard with the longest prefix; only its targets are tried, then `baseUrl`;
+- a `#` specifier through the `imports` field of the importer's nearest package.json;
+- any other bare specifier through the repository's own package of that name, whatever tool manages
+  the workspace: its `exports` field (patterns, fallback lists and conditions, `types` before runtime
+  conditions, since a bundle may serve every subpath), else its entry fields. When several
+  package.json files claim a name, the one the importer lies in wins, else the one sharing the most
+  leading folders with it; a tie resolves to neither.
+
+A declared target the repository does not contain is build output. It resolves to the path under
+`rootDir` when the package's tsconfig puts it in `outDir` or `declarationDir`, else to the same path
+with leading folders dropped under the package's `src` folder or the package. A specifier none of
+these explain stays unresolved. Comments and trailing commas in configs are fine. A named import
+follows transitive `export * from` barrel files inside the index; cycles terminate, and more than one
+matching definition remains a `candidate`. A config or package.json that is a symbolic link, or a
+config that extends or points outside the index root, is not read: its aliases stay unknown and those
+bindings stay `candidate`. Package `extends` and tsconfig `references` are not followed.
+package.json files are found in the folders that hold scope files. `CodeIndex.at_commit` brings the
+commit's tsconfig, jsconfig and package.json files along, outside the scope.
+`CodeIndex.imports()` and `dependents()` include suggested repository package paths for navigation,
+including source paths inferred from build output. A call reached through such a package mapping is
+`candidate`, with the package mapping named as its reason; it is not a proven target. Relative imports,
+Python imports and declared script-config paths keep their resolved bindings. Package redirects follow
+acyclic chains of any length and stop when a specifier repeats.
+File lists come from git with NUL separators, so
 names with non-ASCII characters enter the scope as they are on disk, and lines split at newlines only,
 as the parser counts them. A line that is not valid UTF-8 is read with its invalid bytes replaced, the
 same way by `search_text` and by every other lookup. A scope path that is a symbolic link, or that leads

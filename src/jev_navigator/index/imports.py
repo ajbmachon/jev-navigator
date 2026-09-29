@@ -1,12 +1,18 @@
 """Import statements, including ones that span several lines, resolved to files inside the index's
-scope. TypeScript and JavaScript specifiers also resolve through the path aliases of the nearest
-tsconfig.json when the caller passes them."""
+scope.
+
+Script specifiers resolve in TypeScript's order from what the repository declares: a relative path,
+the nearest config's path aliases, then the ``imports`` map of the importer's package.json for a
+``#`` specifier or a repository package by name. A declared target the repository does not contain
+is build output and resolves to the source it is built from."""
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+from .packages import Packages, package_name
 from .tsconfig import ScriptPaths, normalised
 
 _PYTHON_FROM = re.compile(r"^[ \t]*from\s+(\.*[\w.]*)\s+import\s+(\([^)]*\)|[^\n]*)", re.M)
@@ -20,8 +26,24 @@ _SCRIPT_COMMENT_OR_STRING = re.compile(
     r""""(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`|//[^\n]*|/\*.*?\*/""", re.S
 )
 _SCRIPT_BARE = re.compile(r"""(?:\brequire\(\s*|\bimport\s*\(\s*|^[ \t]*import\s+)['"]([^'"]+)['"]""", re.M)
-_SCRIPT_SUFFIXES = (".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx")
+_SCRIPT_SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".mjs", ".cjs", ".jsx")
+# ESM TypeScript imports a module by the name it compiles to, so `./x.js` names `x.ts` when it exists.
+_SOURCES_OF_OUTPUT = {
+    ".js": (".ts", ".tsx", ".d.ts"),
+    ".jsx": (".tsx",),
+    ".mjs": (".mts", ".d.mts"),
+    ".cjs": (".cts", ".d.cts"),
+}
 _PYTHON_ROOTS = ("", "src/")
+
+
+@dataclass(frozen=True)
+class ImportFact:
+    """A discoverable repository path and whether its import mapping proves that path."""
+
+    path: str
+    proven: bool
+    reason: str
 
 
 def imported_modules(source: str, path: str) -> list[str]:
@@ -37,13 +59,19 @@ def imported_modules(source: str, path: str) -> list[str]:
 
 
 def resolve_import(
-    specifier: str, importer: str, scope: frozenset[str], script_paths: ScriptPaths | None = None
-) -> str | None:
-    """The scope file a specifier names, or None for packages and files outside the scope.
-    ``script_paths`` are the importer's tsconfig aliases, used for non-relative script specifiers."""
+    specifier: str,
+    importer: str,
+    scope: frozenset[str],
+    script_paths: ScriptPaths | None = None,
+    packages: Packages | None = None,
+) -> ImportFact | None:
+    """The scope file a specifier suggests, with its evidence, or None when none is in scope.
+    ``script_paths`` are the importer's config aliases and ``packages`` the repository's
+    package.json files, both used for non-relative script specifiers."""
     if importer.endswith(".py"):
-        return _resolve_python(specifier, importer, scope)
-    return _resolve_script(specifier, importer, scope, script_paths)
+        path = _resolve_python(specifier, importer, scope)
+        return ImportFact(path, True, "Python import") if path else None
+    return _resolve_script(specifier, importer, scope, script_paths, packages)
 
 
 def _resolve_python(specifier: str, importer: str, scope: frozenset[str]) -> str | None:
@@ -62,17 +90,50 @@ def _resolve_python(specifier: str, importer: str, scope: frozenset[str]) -> str
 
 
 def _resolve_script(
-    specifier: str, importer: str, scope: frozenset[str], script_paths: ScriptPaths | None
-) -> str | None:
+    specifier: str,
+    importer: str,
+    scope: frozenset[str],
+    script_paths: ScriptPaths | None,
+    packages: Packages | None,
+    seen: frozenset[str] = frozenset(),
+) -> ImportFact | None:
     if specifier.startswith("."):
-        bases = [normalised(f"{PurePosixPath(importer).parent}/{specifier}")]
+        path = _scope_file([normalised(f"{PurePosixPath(importer).parent}/{specifier}")], scope)
+        return ImportFact(path, True, "relative import") if path else None
+    found = _scope_file(script_paths.candidates(specifier) if script_paths else [], scope)
+    if found is not None:
+        return ImportFact(found, True, "script config path mapping")
+    if packages is None or specifier in seen:
+        return None
+    seen = seen | {specifier}
+    if specifier.startswith("#"):
+        manifest = packages.scope_of(importer)
+        targets = manifest.import_targets(specifier) if manifest else []
     else:
-        bases = script_paths.candidates(specifier) if script_paths else []
+        name, subpath = package_name(specifier)
+        manifest = packages.named(name, importer)
+        targets = manifest.export_targets(subpath) if manifest else []
+    for target in targets:
+        if target.startswith("."):
+            path = _scope_file(packages.target_bases(manifest.directory, target), scope)
+        else:
+            redirected = _resolve_script(target, importer, scope, script_paths, packages, seen)
+            path = redirected.path if redirected else None
+        if path is not None:
+            return ImportFact(path, False, f"repository package.json mapping for {specifier}")
+    return None
+
+
+def _scope_file(bases: list[str], scope: frozenset[str]) -> str | None:
+    """The first scope file a base names under TypeScript's suffix rules."""
     return next((file for base in bases for file in _script_files(base) if file in scope), None)
 
 
 def _script_files(base: str) -> list[str]:
+    extension = PurePosixPath(base).suffix
+    stem = base[: -len(extension)] if extension else base
     return [
+        *(stem + source for source in _SOURCES_OF_OUTPUT.get(extension, ())),
         base,
         *(base + suffix for suffix in _SCRIPT_SUFFIXES),
         *(f"{base}/index{suffix}" for suffix in _SCRIPT_SUFFIXES),

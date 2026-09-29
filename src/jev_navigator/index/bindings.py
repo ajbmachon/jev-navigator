@@ -2,8 +2,8 @@
 
 Calls are found by name in the syntax tree; a name match is not a resolved binding. Each call gets a
 status: ``resolved`` when a definition in the same file or an import naming it proves the target,
-``candidate`` when only the name matches (a method on an unknown receiver, or a definition elsewhere
-with no import), and ``unresolved`` when no definition exists in the index scope. A host with a real
+``candidate`` when a name or a repository import mapping suggests a target without proving it, and
+``unresolved`` when no definition exists in the index scope. A host with a real
 resolver (a code-intelligence service, a TypeScript alias resolver, an LSP) injects it as a
 ``BindingResolver``; its answer wins whenever it returns one.
 """
@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from .imports import ImportFact
 from .spans import Span
 
 
@@ -49,14 +50,14 @@ class CallFacts:
     receiver: str | None
     definitions: Sequence[Span]
     top_level_in_file: Sequence[Span]
-    imported_from: Sequence[str]
+    imported_from: Sequence[ImportFact]
     unparsed: frozenset[str] = frozenset()
 
 
 def binding_from_facts(facts: CallFacts) -> Binding:
     """``unknown`` when the definition may sit in a file the index could not parse: no definition
     was found, or the file the import names was not parsed. Missing evidence is never absence."""
-    unparsed_import = [file for file in facts.imported_from if file in facts.unparsed]
+    unparsed_import = [fact.path for fact in facts.imported_from if fact.path in facts.unparsed]
     unparsed_definitions = [span.file for span in facts.definitions if span.file in facts.unparsed]
     if facts.unparsed and (not facts.definitions or unparsed_import or unparsed_definitions):
         files = ", ".join(sorted(unparsed_import or unparsed_definitions or facts.unparsed)[:5])
@@ -72,9 +73,17 @@ def binding_from_facts(facts: CallFacts) -> Binding:
     same_file = [span for span in facts.top_level_in_file if span.file == facts.file]
     if same_file:
         return Binding(BindingStatus.RESOLVED, "defined in the same file", same_file[0])
-    imported = [span for span in facts.definitions if span.file in facts.imported_from]
+    imported = [
+        (span, fact) for span in facts.definitions for fact in facts.imported_from if span.file == fact.path
+    ]
     if len(imported) == 1:
-        return Binding(BindingStatus.RESOLVED, f"imported from {imported[0].file}", imported[0])
+        span, fact = imported[0]
+        if fact.proven:
+            return Binding(BindingStatus.RESOLVED, f"imported from {span.file}", span)
+        return Binding(BindingStatus.CANDIDATE, f"import suggests {span.file}: {fact.reason}")
+    if imported:
+        paths = ", ".join(dict.fromkeys(span.file for span, _ in imported))
+        return Binding(BindingStatus.CANDIDATE, f"import suggests multiple definitions: {paths}")
     count = len(facts.definitions)
     return Binding(
         BindingStatus.CANDIDATE, f"name match only; {count} definitions in scope and no import names it"

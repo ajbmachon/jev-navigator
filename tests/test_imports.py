@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
 from git_repos import commit_all, write_files
 
+from jev_navigator import operations
+from jev_navigator.directives.places import neighbours
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.imports import (
     imported_modules,
@@ -233,7 +237,7 @@ def test_a_path_alias_from_the_nearest_tsconfig_resolves_to_a_scope_file(tmp_pat
     assert call.binding.status == "resolved"
 
 
-def test_the_nearest_tsconfig_wins_and_extends_inherits_paths(tmp_path: Path) -> None:
+def test_the_nearest_config_wins_and_extends_inherits_paths(tmp_path: Path) -> None:
     # Arrange
     index = indexed(
         tmp_path,
@@ -245,16 +249,21 @@ def test_the_nearest_tsconfig_wins_and_extends_inherits_paths(tmp_path: Path) ->
             "packages/web/app/page.ts": 'import { local } from "@/util";\n',
             "packages/api/tsconfig.json": '{"extends": "../../tsconfig.json"}',
             "packages/api/handler.ts": 'import { shared } from "@/lib/utils";\n',
+            "packages/docs/jsconfig.json": '{"compilerOptions": {"paths": {"@/*": ["./lib/*"]}}}',
+            "packages/docs/lib/util.js": "export const local = 1;\n",
+            "packages/docs/page.js": 'import { local } from "@/util";\n',
         },
     )
 
     # Act
     web = index.imports("packages/web/app/page.ts")
     api = index.imports("packages/api/handler.ts")
+    docs = index.imports("packages/docs/page.js")
 
     # Assert
     assert web == ("packages/web/app/util.ts",)
     assert api == ("src/lib/utils.ts",)
+    assert docs == ("packages/docs/lib/util.js",)
 
 
 def test_a_parenthesised_python_import_over_several_lines_lists_every_name() -> None:
@@ -268,14 +277,16 @@ def test_a_parenthesised_python_import_over_several_lines_lists_every_name() -> 
     assert names == {"send_invoice": "app.jobs", "give_back": "app.jobs"}
 
 
-def test_an_index_at_an_old_commit_still_reads_the_tsconfig_outside_its_scope(tmp_path: Path) -> None:
+def test_an_index_at_an_old_commit_still_reads_configs_outside_its_scope(tmp_path: Path) -> None:
     # Arrange
     write_files(
         tmp_path,
         {
             "tsconfig.json": ROOT_TSCONFIG,
+            "package.json": '{"imports": {"#lib/*": "./src/lib/*.ts"}}',
             "src/lib/utils.ts": "export const shared = 1;\n",
-            "src/app/page.ts": 'import { shared } from "@/lib/utils";\n',
+            "src/lib/money.ts": "export const cents = 1;\n",
+            "src/app/page.ts": 'import { shared } from "@/lib/utils";\nimport { cents } from "#lib/money";\n',
         },
     )
     commit_all(tmp_path)
@@ -284,8 +295,9 @@ def test_an_index_at_an_old_commit_still_reads_the_tsconfig_outside_its_scope(tm
     index = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("src/",))
 
     # Assert
-    assert index.imports("src/app/page.ts") == ("src/lib/utils.ts",)
+    assert index.imports("src/app/page.ts") == ("src/lib/utils.ts", "src/lib/money.ts")
     assert "tsconfig.json" not in index.files
+    assert "package.json" not in index.files
 
 
 def test_a_multi_line_import_with_comments_inside_keeps_its_module_and_names() -> None:
@@ -412,3 +424,260 @@ def test_configs_outside_the_root_or_behind_a_symbolic_link_are_not_read(tmp_pat
     # Assert
     assert through_extends == ()
     assert through_link == ()
+
+
+def test_an_esm_specifier_names_the_typescript_source_it_compiles_from(tmp_path: Path) -> None:
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            "src/format.ts": "export function formatPrice(cents: number) {\n  return cents / 100;\n}\n",
+            "src/view.tsx": "export const View = 1;\n",
+            "src/job.mts": "export const job = 1;\n",
+            "src/legacy.cts": "export const legacy = 1;\n",
+            "src/page.ts": (
+                'import { formatPrice } from "./format.js";\nimport { View } from "./view.jsx";\n'
+                'import { job } from "./job.mjs";\nimport { legacy } from "./legacy.cjs";\n\n'
+                "export function show() {\n  return formatPrice(1);\n}\n"
+            ),
+        },
+    )
+
+    # Act
+    imports = index.imports("src/page.ts")
+    call = index.find_callers("formatPrice")[0]
+
+    # Assert
+    assert imports == ("src/format.ts", "src/view.tsx", "src/job.mts", "src/legacy.cts")
+    assert call.binding.status == "resolved"
+    assert call.binding.target == Span("src/format.ts", 1, 3, "formatPrice")
+
+
+def test_hash_imports_follow_the_nearest_package_json_through_fallbacks_and_conditions(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            "app/package.json": (
+                '{"imports": {"#src/*": ["./src/*.tsx", "./src/*.ts"],'
+                ' "#config": {"types": "./src/config.ts", "default": "./dist/config.js"}}}'
+            ),
+            "app/src/lib/util.ts": "export const util = 1;\n",
+            "app/src/config.ts": "export const config = 1;\n",
+            "app/src/page.ts": 'import { util } from "#src/lib/util";\nimport { config } from "#config";\n',
+            "app/tools/package.json": '{"name": "tools"}',
+            "app/tools/run.ts": 'import { util } from "#src/lib/util";\n',
+        },
+    )
+
+    # Act
+    page = index.imports("app/src/page.ts")
+    nested = index.imports("app/tools/run.ts")
+
+    # Assert
+    assert page == ("app/src/lib/util.ts", "app/src/config.ts")
+    assert nested == ()  # Node reads `#` imports from the nearest package.json only
+
+
+@pytest.mark.parametrize(
+    ("package", "specifier", "expected"),
+    [
+        (
+            {
+                "packages/shared/package.json": (
+                    '{"name": "@acme/shared", "exports": {"./*": {"types": "./dist/types/*.d.ts",'
+                    ' "development": "./dist/dev/index.js", "default": "./dist/index.js"}}}'
+                ),
+            },
+            "@acme/shared/format",
+            "packages/shared/src/format.ts",
+        ),
+        (
+            {"packages/shared/package.json": '{"name": "@acme/shared", "main": "./bundle/index.mjs"}'},
+            "@acme/shared",
+            "packages/shared/src/index.ts",
+        ),
+        (
+            {
+                "packages/shared/package.json": '{"name": "@acme/shared", "exports": "./build/index.js"}',
+                "packages/shared/tsconfig.json": '{"compilerOptions": {"outDir": "build", "rootDir": "lib"}}',
+                "packages/shared/lib/index.ts": "export const index = 1;\n",
+            },
+            "@acme/shared",
+            "packages/shared/lib/index.ts",
+        ),
+    ],
+    ids=["exports-types-before-bundle", "main-in-any-build-folder", "outdir-onto-rootdir"],
+)
+def test_a_repository_package_resolves_by_name_to_its_source(
+    tmp_path: Path, package: dict[str, str], specifier: str, expected: str
+) -> None:
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            **package,
+            "packages/shared/src/index.ts": "export const index = 1;\n",
+            "packages/shared/src/format.ts": "export const format = 1;\n",
+            "apps/web/page.ts": f'import {{ index }} from "{specifier}";\n',
+        },
+    )
+
+    # Act
+    imports = index.imports("apps/web/page.ts")
+
+    # Assert
+    assert imports == (expected,)
+
+
+def test_a_name_several_packages_claim_resolves_within_the_importers_workspace(tmp_path: Path) -> None:
+    # Arrange
+    ui = '{"name": "@ws/ui", "exports": {"./*": "./src/*.ts"}}'
+    index = indexed(
+        tmp_path,
+        {
+            "templates/next/packages/ui/package.json": ui,
+            "templates/next/packages/ui/src/button.ts": "export const button = 1;\n",
+            "templates/next/apps/web/page.ts": 'import { button } from "@ws/ui/button";\n',
+            "templates/vite/packages/ui/package.json": ui,
+            "templates/vite/packages/ui/src/button.ts": "export const button = 2;\n",
+            "templates/vite/apps/web/page.ts": 'import { button } from "@ws/ui/button";\n',
+            "scripts/check.ts": 'import { button } from "@ws/ui/button";\n',
+        },
+    )
+
+    # Act
+    next_page = index.imports("templates/next/apps/web/page.ts")
+    vite_page = index.imports("templates/vite/apps/web/page.ts")
+    outside = index.imports("scripts/check.ts")
+
+    # Assert
+    assert next_page == ("templates/next/packages/ui/src/button.ts",)
+    assert vite_page == ("templates/vite/packages/ui/src/button.ts",)
+    assert outside == ()  # two claimants equally far: neither is guessed
+
+
+def test_package_json_outside_the_root_or_behind_a_symbolic_link_is_not_read(tmp_path: Path) -> None:
+    # Arrange
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "package.json").write_text('{"name": "@acme/shared", "exports": "./src/index.ts"}')
+    write_files(
+        tmp_path / "repo",
+        {
+            # Read from inside packages/web by mistake, this would map #src/util onto its src/util.ts.
+            "package.json": '{"imports": {"#src/*": "./src/*.ts"}}',
+            "packages/shared/src/index.ts": "export const shared = 1;\n",
+            "packages/web/src/util.ts": "export const util = 1;\n",
+            "packages/web/src/page.ts": (
+                'import { shared } from "@acme/shared";\nimport { util } from "#src/util";\n'
+            ),
+        },
+    )
+    (tmp_path / "repo/packages/shared/package.json").symlink_to(outside / "package.json")
+    linked = CodeIndex(tmp_path / "repo", ["packages/shared/src/index.ts", "packages/web/src/page.ts"])
+    above = CodeIndex(tmp_path / "repo/packages/web", ["src/util.ts", "src/page.ts"])
+
+    # Act
+    through_link = linked.imports("packages/web/src/page.ts")
+    from_above = above.imports("src/page.ts")
+
+    # Assert
+    assert through_link == ()
+    assert from_above == ()
+
+
+def test_guessed_package_source_stays_discoverable_without_proving_a_call(tmp_path: Path) -> None:
+    index = indexed(
+        tmp_path,
+        {
+            "packages/shared/package.json": '{"name": "@acme/shared", "main": "./bundle/index.mjs"}',
+            "packages/shared/src/index.ts": "export function handle() { return 1; }\n",
+            "other/handle.ts": "export function handle() { return 2; }\n",
+            "apps/web/page.ts": (
+                'import { handle } from "@acme/shared";\nexport function run() { return handle(); }\n'
+            ),
+        },
+    )
+    run = index.find_definition("run")[0]
+    edge = index.callee_edges(run)[0]
+
+    # The original package mapping and its dependents remain useful for discovery.
+    assert index.imports("apps/web/page.ts") == ("packages/shared/src/index.ts",)
+    assert index.dependents("packages/shared/src/index.ts") == ("apps/web/page.ts",)
+    assert edge.binding.status == "candidate"
+    assert edge.binding.target is None
+    assert "package.json mapping for @acme/shared" in edge.binding.reason
+
+    offered = neighbours(index, index.read_slice(run))
+    handle_files = {place.open().span.file for place in offered if place.open().span.name == "handle"}
+    assert handle_files == {"packages/shared/src/index.ts", "other/handle.ts"}
+    links = [link for link in operations.trace_graph(index, [run]).links if link.name == "handle"]
+    assert {link.target.file for link in links if link.target} == handle_files
+    assert all(link.binding.status == "candidate" for link in links)
+
+
+def test_duplicate_package_proximity_is_a_candidate_without_losing_its_path(tmp_path: Path) -> None:
+    ui = '{"name": "@ws/ui", "exports": {"./button": "./src/button.ts"}}'
+    index = indexed(
+        tmp_path,
+        {
+            "templates/next/packages/ui/package.json": ui,
+            "templates/next/packages/ui/src/button.ts": "export function button() { return 1; }\n",
+            "templates/next/apps/web/page.ts": (
+                'import { button } from "@ws/ui/button";\nexport function render() { return button(); }\n'
+            ),
+            "templates/vite/packages/ui/package.json": ui,
+            "templates/vite/packages/ui/src/button.ts": "export function button() { return 2; }\n",
+        },
+    )
+
+    assert index.imports("templates/next/apps/web/page.ts") == ("templates/next/packages/ui/src/button.ts",)
+    edge = index.callee_edges(index.find_definition("render")[0])[0]
+    assert edge.binding.status == "candidate"
+    assert edge.binding.target is None
+    assert "@ws/ui/button" in edge.binding.reason
+
+
+def test_package_uncertainty_propagates_through_a_relative_barrel(tmp_path: Path) -> None:
+    index = indexed(
+        tmp_path,
+        {
+            "package.json": '{"name": "@ws/ui", "exports": {"./button": "./src/button.ts"}}',
+            "src/button.ts": "export function button() { return 1; }\n",
+            "src/services/index.ts": 'export { button } from "@ws/ui/button";\n',
+            "src/page.ts": (
+                'import { button } from "./services";\nexport function render() { return button(); }\n'
+            ),
+        },
+    )
+
+    assert index.imports("src/page.ts") == ("src/services/index.ts",)
+    edge = index.callee_edges(index.find_definition("render")[0])[0]
+    assert edge.binding.status == "candidate"
+    assert edge.binding.target is None
+    assert "package.json mapping for @ws/ui/button" in edge.binding.reason
+
+
+def test_package_redirects_continue_past_four_links_and_stop_cycles(tmp_path: Path) -> None:
+    redirects = {f"#hop{i}": f"#hop{i + 1}" for i in range(6)}
+    redirects["#hop6"] = "./src/answer.ts"
+    redirects["#cycle"] = "#cycle"
+    index = indexed(
+        tmp_path,
+        {
+            "package.json": json.dumps({"imports": redirects}),
+            "src/answer.ts": "export function answer() { return 42; }\n",
+            "src/page.ts": (
+                'import { answer } from "#hop0";\nimport "#cycle";\n'
+                "export function run() { return answer(); }\n"
+            ),
+        },
+    )
+
+    assert index.imports("src/page.ts") == ("src/answer.ts",)
+    edge = index.callee_edges(index.find_definition("run")[0])[0]
+    assert edge.binding.status == "candidate"
+    assert edge.binding.target is None
