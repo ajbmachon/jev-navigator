@@ -280,7 +280,8 @@ class _Search:
 
     def next_beam(self, calls_left: int | None) -> list[_Queued]:
         beam = []
-        width = self.budget.beam_width if calls_left is None else min(self.budget.beam_width, calls_left)
+        # A spent live-call budget still permits answers already in the store.
+        width = self.budget.beam_width if calls_left in (None, 0) else min(self.budget.beam_width, calls_left)
         while self.queue and len(beam) < width:
             item = heapq.heappop(self.queue)
             if item.place.key not in self.visited:
@@ -328,7 +329,7 @@ def find_code(
     search, judge = _begin(index, judge, target_description, start, options)
     stop = None
     try:
-        while (stop := _stop_reason(search, judge, index)) is None:
+        while (stop := _stop_reason(search, index)) is None:
             opened = _open_round(index, search, judge)
             if not opened:
                 continue
@@ -366,7 +367,7 @@ async def find_code_async(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
     )
     search, judge = _begin(index, judge, target_description, start, options)
-    while (stop := _stop_reason(search, judge, index)) is None:
+    while (stop := _stop_reason(search, index)) is None:
         opened = _open_round(index, search, judge)
         if not opened:
             continue
@@ -418,7 +419,9 @@ def _begin(
     for position, (place, probability) in enumerate(options.initial_candidates):
         tier = QueueTier.PICK if position == 0 else QueueTier.DISCOVERED
         search.push(place, probability, 0, (place.key,), tier)
-    return search, judge.scope()
+    scoped_judge = judge.scope()
+    scoped_judge.max_calls = search.budget.max_calls
+    return search, scoped_judge
 
 
 def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Opening]:
@@ -427,7 +430,7 @@ def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Openin
     processed = 0
     try:
         with _defer_keyboard_interrupts():
-            beam = search.next_beam(_calls_left(search, judge))
+            beam = search.next_beam(judge.calls_left())
         _record_choice(search, beam)
         for item in beam:
             if opening := _open(index, search, item):
@@ -566,15 +569,17 @@ def _restore(search: _Search, previous: FindResult) -> None:
         search.push(entry.place, entry.priority, entry.depth, entry.path, entry.tier)
 
 
-def _stop_reason(search: _Search, judge: Judge, index: CodeIndex) -> Outcome | None:
+def _stop_reason(search: _Search, index: CodeIndex) -> Outcome | None:
     if search.found:
         return Outcome.FOUND
     if search.stop_judgment is not None and search.stop_judgment.outcome == HistoryOutcome.FOUND:
         return Outcome.STOP_RULE
     steps_used = search.budget.max_steps is not None and search.steps >= search.budget.max_steps
-    if search.cap_reached or steps_used or _calls_left(search, judge) == 0:
+    if steps_used:
         return Outcome.BUDGET
     if not search.worth_opening():
+        if search.cap_reached:
+            return Outcome.BUDGET
         return _nothing_worth_opening(search, index)
     return None
 
@@ -587,14 +592,6 @@ def _nothing_worth_opening(search: _Search, index: CodeIndex) -> Outcome:
     return (
         Outcome.SCOPE_INCOMPLETE if index.unparsed_files or index.unavailable_files else Outcome.NOTHING_LEFT
     )
-
-
-def _calls_left(search: _Search, judge: Judge) -> int | None:
-    own = None if search.budget.max_calls is None else max(0, search.budget.max_calls - judge.calls)
-    shared = judge.calls_left()
-    if own is None:
-        return shared
-    return own if shared is None else min(own, shared)
 
 
 @dataclass(frozen=True)

@@ -7,6 +7,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import MutableMapping, Sequence
@@ -16,12 +17,13 @@ from pathlib import Path
 from time import monotonic
 
 from .adapters.typesafe import TypeSafeJevClient
+from .cli_resume import load_resume, save_resume
 from .directives.entry import EntrySelection, choose_initial_candidates
-from .directives.find_code import FindResult, SearchBudget, Visit, find_code
+from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
 from .directives.places import Place, place_for_line
 from .index.code_index import CodeIndex
 from .judgments.client import JevClient
-from .judgments.judge import Judge
+from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import JsonlAnswerStore
 from .judgments.thresholds import Thresholds
 from .progress import ProgressJournal, TerminalProgress
@@ -74,6 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             client,
             thresholds=Thresholds.from_env(),
             verbose=args.verbose,
+            resume_from=Path(args.resume).expanduser() if args.resume else None,
         )
     except Exception as error:
         print(f"jvn find: {error}", file=sys.stderr)
@@ -94,12 +97,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "report": str(output.resolve() / "report.md"),
                     "search": manifest["search"],
                     "provider": manifest["provider"],
+                    "resume": (str(output.resolve()) if search_outcome in ("budget", "cancelled") else None),
                 }
             )
         )
     else:
         print(f"evidence pack: {output.resolve()}")
         print(f"outcome: {search_outcome} ({manifest['search']['calls']} live calls)")
+        if search_outcome in ("budget", "cancelled"):
+            print(f"resume: use --resume {output.resolve()} with the same target and repository")
     return 130 if search_outcome == "cancelled" else 0
 
 
@@ -115,12 +121,20 @@ def create_evidence_pack(
     thresholds: Thresholds | None = None,
     verbose: bool = False,
     fact_cache_dir: Path | None = None,
+    resume_from: Path | None = None,
 ) -> dict:
     """Run the real index/search owners and persist their reviewable evidence."""
     repository = repository.resolve()
     output = output.resolve()
     _validate_budget(budget)
+    thresholds = thresholds or Thresholds()
+    previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client)
     _prepare_output(output)
+    if resume_from is not None:
+        for name in ("answers.jsonl", "journal.jsonl"):
+            source = resume_from.resolve() / name
+            if source.is_file():
+                shutil.copyfile(source, output / name)
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
@@ -129,51 +143,79 @@ def create_evidence_pack(
     outcome = "failed"
     try:
         progress.phase("indexing files")
+        excluded = (output, Path.cwd() / "jvn-results")
+        if resume_from is not None:
+            excluded += (resume_from.resolve(),)
         index = CodeIndex.from_directory(
             repository,
             prefixes=prefixes,
-            exclude_paths=(output, Path.cwd() / "jvn-results"),
+            exclude_paths=excluded,
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
-        thresholds = thresholds or Thresholds()
+        resume = None
+        if previous is not None:
+            if previous["source"]["revision"] != index.commit:
+                raise ValueError("repository revision changed since the evidence pack")
+            resume = load_resume(resume_from.resolve() / "resume.json", index)
         judge = Judge(
             client,
             thresholds=thresholds,
             max_calls=budget.max_calls,
+            served_model=previous["provider"]["served_model"] if previous else None,
             journal=journal,
             store=JsonlAnswerStore(output / "answers.jsonl"),
         )
         selection: EntrySelection | None = None
-        if starts:
+        entry_pending = False
+        if resume is not None:
+            start_places = []
+            initial_candidates = ()
+        elif starts:
             start_places = [_parse_start(index, start) for start in starts]
             initial_candidates: tuple[tuple[Place, float], ...] = ()
         else:
             progress.phase("choosing an entry point")
             start_places = []
-            selection = choose_initial_candidates(index, judge, target)
-            initial_candidates = tuple(
-                (
-                    candidate.place,
-                    candidate.selection_probability if candidate.selection_probability is not None else 0.0,
+            try:
+                selection = choose_initial_candidates(index, judge, target)
+            except CallCapReachedError:
+                entry_pending = True
+            initial_candidates = (
+                tuple(
+                    (
+                        candidate.place,
+                        candidate.selection_probability
+                        if candidate.selection_probability is not None
+                        else 0.0,
+                    )
+                    for candidate in selection.candidates
                 )
-                for candidate in selection.candidates
+                if selection
+                else ()
             )
-        progress.phase("navigating code")
-        started = monotonic()
-        result = find_code(
-            index,
-            judge,
-            target,
-            start_places,
-            budget=budget,
-            commit=None,
-            initial_candidates=initial_candidates,
-        )
-        duration_seconds = monotonic() - started
+        if entry_pending:
+            result = FindResult(Outcome.BUDGET, (), (), (), (), 0, 0)
+            duration_seconds = 0.0
+        else:
+            progress.phase("navigating code")
+            started = monotonic()
+            result = find_code(
+                index,
+                judge,
+                target,
+                start_places,
+                budget=budget,
+                commit=None,
+                initial_candidates=initial_candidates,
+                resume=resume,
+            )
+            duration_seconds = monotonic() - started
         progress.phase("writing evidence pack")
+        if result.outcome in (Outcome.BUDGET, Outcome.CANCELLED):
+            save_resume(output / "resume.json", index, result, entry_pending=entry_pending)
         manifest = _manifest(
             repository,
             prefixes,
@@ -189,6 +231,9 @@ def create_evidence_pack(
             duration_seconds=duration_seconds,
             total_calls=judge.calls,
             entry_selection=selection,
+            previous=previous,
+            resume_from=resume_from,
+            entry_pending=entry_pending,
         )
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(_report(manifest))
@@ -271,6 +316,10 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     scope.add_argument(
         "--out",
         help="New or empty output directory (default: a unique run under ./jvn-results)",
+    )
+    scope.add_argument(
+        "--resume",
+        help="Prior budget-stopped evidence pack; continue its saved frontier into a new output pack",
     )
     defaults = SearchBudget()
     limits.add_argument(
@@ -464,6 +513,35 @@ def _prepare_output(output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
 
 
+def _previous_pack(
+    resume_from: Path | None,
+    repository: Path,
+    prefixes: tuple[str, ...],
+    target: str,
+    starts: tuple[str, ...],
+    thresholds: Thresholds,
+    client: JevClient,
+) -> dict | None:
+    if resume_from is None:
+        return None
+    source = resume_from.resolve()
+    previous = json.loads((source / "manifest.json").read_text())
+    if not (source / "resume.json").is_file():
+        raise ValueError(f"no saved find frontier in {source}")
+    if previous["search"]["outcome"] not in ("budget", "cancelled"):
+        raise ValueError("only a budget-stopped or cancelled find can resume")
+    if (
+        previous["source"]["repository"] != str(repository)
+        or previous["source"]["prefixes"] != list(prefixes)
+        or previous["target"] != target
+        or previous["requested_starts"] != list(starts)
+        or previous["thresholds"] != thresholds.as_dict()
+        or previous["provider"]["requested_model"] != getattr(client, "model", "unknown")
+    ):
+        raise ValueError("resume must use the same repository, scope, target, starts, thresholds and model")
+    return previous
+
+
 def _default_output(repository: Path) -> Path:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     return Path.cwd() / "jvn-results" / f"{repository.name}-{stamp}"
@@ -523,7 +601,14 @@ def _manifest(
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
+    previous: dict | None = None,
+    resume_from: Path | None = None,
+    entry_pending: bool = False,
 ) -> dict:
+    old_search = previous["search"] if previous else {}
+    entry_receipt = entry_selection.to_json() if entry_selection else None
+    if entry_receipt is None and previous:
+        entry_receipt = previous.get("entry_selection")
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -536,21 +621,23 @@ def _manifest(
         },
         "target": target,
         "requested_starts": list(starts),
-        "entry_selection": entry_selection.to_json() if entry_selection else None,
+        "entry_selection": entry_receipt,
+        "resume_from": str(resume_from.resolve()) if resume_from else None,
         "budget": asdict(budget),
         "thresholds": thresholds.as_dict(),
         "provider": {
             "requested_model": requested_model,
             "served_model": served_model,
-            "input_tokens": input_tokens,
+            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_tokens,
         },
         "search": {
             "outcome": result.outcome,
-            "steps": result.steps,
-            "calls": total_calls,
-            "entry_calls": total_calls - result.calls,
-            "navigation_calls": result.calls,
-            "duration_seconds": round(duration_seconds, 3),
+            "entry_selection_pending": entry_pending,
+            "steps": old_search.get("steps", 0) + result.steps,
+            "calls": old_search.get("calls", 0) + total_calls,
+            "entry_calls": old_search.get("entry_calls", 0) + total_calls - result.calls,
+            "navigation_calls": old_search.get("navigation_calls", 0) + result.calls,
+            "duration_seconds": round(old_search.get("duration_seconds", 0) + duration_seconds, 3),
             "moves": list(result.moves),
             "found": [_visit(visit) for visit in result.found],
             "starts": [_visit(visit) for visit in result.starts],
@@ -575,7 +662,10 @@ def _manifest(
                 "pending": list(result.parser_scans_pending),
             },
             "unavailable_files": dict(result.unavailable_files),
-            "history": [step.to_json() for step in result.history.steps] if result.history else [],
+            "history": [
+                *old_search.get("history", []),
+                *([step.to_json() for step in result.history.steps] if result.history else []),
+            ],
         },
     }
 
@@ -663,6 +753,7 @@ def _report(manifest: dict) -> str:
         f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes']) or 'whole directory'}",
         f"- Target: {manifest['target']}",
         f"- Outcome: **{search['outcome']}**",
+        *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
         f"`{manifest['provider']['served_model']}`",

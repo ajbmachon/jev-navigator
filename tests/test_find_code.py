@@ -22,6 +22,7 @@ from jev_navigator.directives.places import (
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
 TARGET = "the check that limits how many items an order may have"
@@ -513,6 +514,52 @@ def test_a_global_call_cap_on_the_judge_ends_a_search_as_budget(sample_index: Co
     assert result.outcome == Outcome.BUDGET
     assert result.calls == 2
     assert len(client.requests) == 2
+
+
+def test_cached_search_answer_is_free_at_zero_live_call_budget(
+    sample_index: CodeIndex, tmp_path: Path
+) -> None:
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    first_client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1)
+    )
+    first = find_code(
+        sample_index, Judge(first_client, store=store), TARGET, start_at_place(sample_index), moves={}
+    )
+    assert len(first_client.requests) == 1
+
+    second_client = ScriptedJevClient()
+    replayed = find_code(
+        sample_index,
+        Judge(
+            second_client,
+            store=JsonlAnswerStore(store.path),
+            served_model=first_client.model,
+            max_calls=0,
+        ),
+        TARGET,
+        start_at_place(sample_index),
+        budget=SearchBudget(max_calls=0),
+        moves={},
+    )
+
+    assert replayed.outcome == first.outcome
+    assert replayed.starts == first.starts
+    assert replayed.calls == 0
+    assert second_client.requests == []
+
+    uncached_client = ScriptedJevClient()
+    uncached = find_code(
+        sample_index,
+        Judge(uncached_client, max_calls=0),
+        TARGET,
+        start_at_place(sample_index),
+        budget=SearchBudget(max_calls=0),
+        moves={},
+    )
+    assert uncached.outcome == Outcome.BUDGET
+    assert uncached.not_inspected[0].reason == "budget"
+    assert uncached_client.requests == []
 
 
 def test_find_code_with_no_moves_opens_only_its_start(sample_index: CodeIndex) -> None:

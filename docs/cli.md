@@ -10,6 +10,7 @@ that are absent from the source?” rather than “find everything important”.
 - [Start with one command](#start-with-one-command)
 - [Discover commands and request fields](#discover-commands-and-request-fields)
 - [Every find option](#every-find-option)
+- [Continue after a call limit](#continue-after-a-call-limit)
 - [JSON requests](#json-requests)
 - [Results, progress and exit status](#results-progress-and-exit-status)
 - [Agent workflow](#agent-workflow)
@@ -51,6 +52,7 @@ unlimited unless you set a limit.
 | `--prefix PATH` | Whole source inventory. Limit scope to a file or directory, relative to the search root. Repeat for multiple scopes. | `jvn find "the order limit" --prefix app/ --prefix tests/` |
 | `--start PATH:LINE` | Automatic entry selection. Start from a known caller or entry point; repeat for multiple starts. Lines are 1-based, paths are relative to the search root. | `jvn find "the order limit" --start app/orders.py:42 --start app/routes.py:18` |
 | `--out PATH` | A unique directory under `./jvn-results/`. Choose another new or empty directory. | `jvn find "the order limit" --out ./order-evidence` |
+| `--resume PATH` | Off. Continue a budget-stopped or cancelled evidence pack into a new output directory. | `jvn find "the order limit" --resume ./order-evidence` |
 | `--max-depth N` | Unlimited. Maximum relationship hops from the starting places; `0` opens only those places. | `jvn find "the order limit" --max-depth 3` |
 | `--max-steps N` | Unlimited. Maximum distinct code openings during navigation; entry selection is separate. | `jvn find "the order limit" --max-steps 8` |
 | `--max-calls N\|none` | `24`. Maximum model requests, including automatic entry selection; each is a paid request. `none` lifts the cap. One request may contain many questions. This is not a token or monetary cap. A search that reaches it ends with outcome `budget` and its unexplored places in `not_inspected`. | `jvn find "the order limit" --max-calls 8` |
@@ -70,6 +72,23 @@ information that matters to the judgment.
 A supplied `--start` is navigation context: the library records its judgment in `search.starts` and
 continues looking for a target reached from it. Supply a caller or entry point rather than the
 function you already believe is the answer. Automatic entry selection can find a target directly.
+
+## Continue after a call limit
+
+When `search.outcome` is `budget` or `cancelled`, the pack contains `resume.json`. Supply that pack to a follow-up
+invocation with the same target, repository, prefixes and starts:
+
+```sh
+jvn find "the order limit" --repo /path/to/repository --out ./first-pack
+jvn find "the order limit" --repo /path/to/repository --resume ./first-pack --out ./continued-pack
+```
+
+The follow-up invocation gets a fresh 24-live-call allowance by default; `--max-calls N` or
+`--max-calls none` changes that allowance. Stored answers and the journal carry forward, so replayed
+answers cost no live calls. The new manifest combines earlier and new visits, history and call counts;
+the previous pack remains intact. A cap reached during automatic entry selection saves that stage,
+and the next invocation replays its stored decisions before continuing. Resume requires unchanged
+source and scope, the same thresholds and requested model. If the source changed, start a new search.
 
 ## JSON requests
 
@@ -129,6 +148,7 @@ JSON mode writes one result object to stdout. It contains:
 | `report` | Absolute path to the readable `report.md`. |
 | `search` | Outcome, matched spans, source code, decisions, request counts and coverage details. |
 | `provider` | Requested/served model and recorded input-token usage. |
+| `resume` | Evidence pack path to pass to `--resume` when the outcome is `budget` or `cancelled`; otherwise `null`. |
 
 Progress, expanded requests and errors go to stderr, so stdout remains parseable. For example:
 
@@ -147,6 +167,7 @@ Check the command's exit status before reading a result file:
 | `130` | Cancelled with Ctrl-C. Existing journal records remain available. |
 
 The evidence directory contains `report.md`, `manifest.json`, `journal.jsonl` and `answers.jsonl`.
+Budget-stopped and cancelled packs also contain `resume.json`.
 The manifest retains the full record even if a pipeline selects only a few output fields. Journal
 records preserve request/response evidence; inspect their exact-capture flags when auditing bytes.
 

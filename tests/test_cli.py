@@ -70,6 +70,117 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
     assert (output / "journal.jsonl").read_text()
 
 
+def test_budget_pack_reopens_its_saved_frontier_in_a_second_cli_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jev_navigator import cli
+
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/entry.py": "from .policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "app/policy.py": "def admit(item):\n    return len(item) <= 3\n",
+        },
+    )
+    clients: list[ScriptedJevClient] = []
+
+    def client() -> ScriptedJevClient:
+        instance = ScriptedJevClient(
+            nouls=lambda question_id, question, state: (
+                0.96 if "len(item) <= 3" in state["slice"]["code"] else 0.04
+            ),
+            choices={"open_first": {"0": 1.0}},
+        )
+        instance.close = lambda: None
+        clients.append(instance)
+        return instance
+
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    common = ["find", "the item limit", "--repo", str(repository), "--start", "app/entry.py:4"]
+
+    assert main([*common, "--max-calls", "1", "--beam-width", "1", "--out", str(first)]) == 0
+    cap = json.loads((first / "manifest.json").read_text())
+    assert cap["search"]["outcome"] == "budget"
+    assert cap["search"]["calls"] == len(clients[0].requests) == 1
+    assert cap["search"]["not_inspected"]
+    assert (first / "resume.json").is_file()
+    cap_bytes = (first / "manifest.json").read_bytes()
+    capsys.readouterr()
+
+    assert (
+        main([*common, "--max-calls", "1", "--beam-width", "1", "--resume", str(first), "--out", str(second)])
+        == 0
+    )
+    resumed = json.loads((second / "manifest.json").read_text())
+    assert resumed["search"]["outcome"] == "found"
+    assert resumed["search"]["found"][0]["source"]["file"] == "app/policy.py"
+    assert resumed["search"]["starts"] == cap["search"]["starts"]
+    assert resumed["search"]["calls"] == 2
+    assert resumed["search"]["steps"] == 2
+    assert len(resumed["search"]["history"]) > len(cap["search"]["history"])
+    assert len(clients[1].requests) == 1
+    assert (first / "manifest.json").read_bytes() == cap_bytes
+    assert (second / "answers.jsonl").read_text().count("\n") == 2
+
+
+def test_entry_selection_replays_cached_calls_after_its_cap(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/one.py": "def one():\n    return 1\n",
+            "app/two.py": "def two():\n    return 2\n",
+            "tests/test_one.py": "def test_one():\n    assert True\n",
+        },
+    )
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    budget = SearchBudget(max_calls=1, beam_width=1)
+    client1 = ScriptedJevClient()
+    cap = create_evidence_pack(repository, (), "find one", (), first, budget, client1)
+
+    assert cap["search"]["outcome"] == "budget"
+    assert cap["entry_selection"] is None
+    assert json.loads((first / "resume.json").read_text())["stage"] == "entry"
+    assert len(client1.requests) == 1
+
+    client2 = ScriptedJevClient()
+    resumed = create_evidence_pack(repository, (), "find one", (), second, budget, client2, resume_from=first)
+    assert resumed["entry_selection"] is not None
+    assert resumed["search"]["calls"] == 2
+    assert resumed["search"]["entry_calls"] == 2
+    assert len(client2.requests) == 1  # the first entry decision came from answers.jsonl
+    assert json.loads((second / "resume.json").read_text())["stage"] == "navigation"
+
+
+def test_resume_rejects_changed_source_before_reusing_the_frontier(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    commit_files(repository, {"policy.py": "def policy():\n    return 1\n"})
+    first = tmp_path / "first"
+    create_evidence_pack(
+        repository, (), "policy", ("policy.py:1",), first, SearchBudget(max_calls=0), ScriptedJevClient()
+    )
+    (repository / "policy.py").write_text("def policy():\n    return 2\n")
+    next_client = ScriptedJevClient()
+
+    with pytest.raises(ValueError, match="source or scope changed"):
+        create_evidence_pack(
+            repository,
+            (),
+            "policy",
+            ("policy.py:1",),
+            tmp_path / "second",
+            SearchBudget(max_calls=1),
+            next_client,
+            resume_from=first,
+        )
+    assert next_client.requests == []
+
+
 def test_evidence_pack_chooses_a_real_entry_when_no_start_is_supplied(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     commit_files(
