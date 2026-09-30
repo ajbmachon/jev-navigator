@@ -39,7 +39,7 @@ from ..history import (
     judge_history_async,
 )
 from ..index.code_index import CodeIndex
-from ..index.spans import CodeSlice
+from ..index.spans import CodeSlice, Span
 from ..judgments.judge import CallCapReachedError, Judge
 from ..judgments.questions import Check, Criterion, Pick, content_hash
 from ..judgments.thresholds import NoulVerdict, Thresholds
@@ -182,7 +182,8 @@ class NotInspected:
     """A place the search did not open. ``reason`` is ``budget`` (still worth opening when the budget
     ran out), ``cancelled`` (the caller interrupted before it was opened), ``deprioritized`` (its
     signature scored low; that only lowered its priority, it was never judged), ``capped`` (cut by
-    an explicit per-kind neighbour cap) or ``depth`` (beyond an explicit depth limit).
+    a per-kind neighbour cap: the budget's, or the tighter one an opening needs for its neighbours to
+    fit one ``open_first`` Choice) or ``depth`` (beyond an explicit depth limit).
     ``tier`` preserves starts, picked places and scored neighbours through Resume."""
 
     place_key: str
@@ -626,9 +627,7 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     try:
         if search.budget.max_depth is not None and item.depth >= search.budget.max_depth:
             return _Opening(item, shown, code.key, fingerprint, [])
-        candidates, omitted = neighbours_and_omissions(
-            index, code, search.budget.neighbours_per_kind, search.moves, shown.span
-        )
+        candidates, omitted = _neighbours_that_fit(index, search, code, shown.span)
         capped = tuple(
             NotInspected(
                 place.key,
@@ -652,6 +651,38 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
         search.visited -= {item.place.key, code.key}
         search.steps -= 1
         raise
+
+
+def _neighbours_that_fit(
+    index: CodeIndex, search: _Search, code: CodeSlice, shown: Span
+) -> tuple[list[Place], list[Place]]:
+    """The neighbours under the budget's per-kind cap. When they are more than one ``open_first``
+    Choice can offer, the cap tightens to the largest one under which they fit: a move that lists few
+    places keeps all of them, and the longest lists are cut to one length."""
+    listed = {name: move(index, code) for name, move in search.moves.items()}
+    moves = {name: _already_listed(places) for name, places in listed.items()}
+
+    def under(cap: int | None) -> tuple[list[Place], list[Place]]:
+        return neighbours_and_omissions(index, code, cap, moves, shown)
+
+    per_kind = search.budget.neighbours_per_kind
+    neighbours = under(per_kind)
+    pick = search.questions.open_first
+    if pick is None or len(neighbours[0]) <= pick.max_options:
+        return neighbours
+    fits = 0
+    too_many = max(map(len, listed.values())) if per_kind is None else per_kind
+    while too_many - fits > 1:
+        cap = (fits + too_many) // 2
+        if len(under(cap)[0]) <= pick.max_options:
+            fits = cap
+        else:
+            too_many = cap
+    return under(fits)
+
+
+def _already_listed(places: list[Place]) -> Move:
+    return lambda _index, _opened: places
 
 
 @dataclass(frozen=True)

@@ -429,7 +429,11 @@ definitions are also offered from anonymous functions and windows. For an anonym
 same-file navigation first offers the nearest named containing symbol. By default the finite,
 deduplicated frontier decides when the search is complete: depth, step, call and per-move neighbour
 limits are `None`. A caller can set any of those fields on `SearchBudget` when it has an explicit
-operational limit. Each round opens
+operational limit. The one limit the search sets itself comes from the API: a Choice offers at most 255
+options, so an opened place that lists more neighbours than `open_first` can offer tightens the per-move
+limit, for that opening only, to the largest one under which they fit. A move that lists fewer places
+keeps all of them; the places cut are `not_inspected` with reason `capped`, and Resume queues them
+again. Each round opens
 `beam_width` places concurrently: start places first, then the neighbours Jev picked to open next, in
 the order it picked them, then the other neighbours by falling `could_contain` probability, with a
 visited set and a content cache. An `open_first` Choice picks the neighbour to open next, with the

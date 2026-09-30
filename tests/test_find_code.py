@@ -22,6 +22,7 @@ from jev_navigator.directives.places import (
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.questions import MAX_CHOICE_OPTIONS
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
@@ -416,6 +417,43 @@ def test_capped_neighbours_are_reported_as_not_inspected(sample_index: CodeIndex
 
     # Assert
     assert any(entry.reason == "capped" for entry in result.not_inspected)
+
+
+def hub_index(root: Path, callers: int) -> CodeIndex:
+    """``hub`` calls two helpers and is called by ``callers`` functions."""
+    calling = "".join(f"def caller_{number}():\n    return hub()\n\n\n" for number in range(callers))
+    files = {
+        "hub.py": "from helpers import first, second\n\n\ndef hub():\n    return first() + second()\n",
+        "helpers.py": "def first():\n    return 1\n\n\ndef second():\n    return 2\n",
+        "callers.py": "from hub import hub\n\n\n" + calling,
+    }
+    commit_files(root, files)
+    return CodeIndex(root, sorted(files))
+
+
+def test_a_hub_is_cut_to_fit_one_choice_and_its_small_moves_keep_every_place(tmp_path: Path) -> None:
+    # Arrange
+    index = hub_index(tmp_path, callers=300)
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))
+
+    # Act
+    result = find_code(
+        index,
+        Judge(client),
+        TARGET,
+        [place_for_line(index, "hub.py", 5, "start")],
+        budget=SearchBudget(max_steps=1),
+    )
+
+    # Assert
+    state, questions = client.requests[0]
+    offered = [candidate["signature"] for candidate in state["candidates"]]
+    capped = [entry.signature for entry in result.not_inspected if entry.reason == "capped"]
+    assert len(questions[OPEN_FIRST.question_id]["criteria"]) <= MAX_CHOICE_OPTIONS
+    assert any("def first" in signature for signature in offered)
+    assert any("def second" in signature for signature in offered)
+    assert sum("def caller_" in signature for signature in [*offered, *capped]) == 300
+    assert any("def caller_" in signature for signature in capped)
 
 
 def test_a_requested_revision_that_the_index_does_not_hold_is_an_error(sample_index: CodeIndex) -> None:

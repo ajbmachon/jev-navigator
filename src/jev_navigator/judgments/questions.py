@@ -72,6 +72,11 @@ class Pick:
             wording["extra_options"] = dict(self.extra_options)
         return f"{self.name}@{wording_hash(wording)}"
 
+    @property
+    def max_options(self) -> int:
+        """How many options code may supply: the API's limit less the fixed options."""
+        return MAX_CHOICE_OPTIONS - len(dict(self.extra_options))
+
     def to_question(self, options: Mapping[str, str]) -> dict:
         extra = dict(self.extra_options)
         if set(options) & set(extra):
