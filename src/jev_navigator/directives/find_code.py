@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
+import json
 import os
 import signal
 import threading
@@ -29,19 +30,21 @@ from enum import IntEnum, StrEnum
 from ..history import (
     DEFAULT_QUESTION_RESERVE,
     DEFAULT_STOP_SECTIONS,
+    JEV_REQUEST_TOKEN_LIMIT,
     JEV_STATE_TOKEN_LIMIT,
     FetchedSpan,
     History,
     HistoryJudgment,
     HistoryOutcome,
     HistoryStep,
+    estimate_tokens,
     judge_history,
     judge_history_async,
 )
 from ..index.code_index import CodeIndex
-from ..index.spans import CodeSlice, Span
+from ..index.spans import CodeSlice
 from ..judgments.judge import CallCapReachedError, Judge
-from ..judgments.questions import Check, Criterion, Pick, content_hash
+from ..judgments.questions import Check, Criterion, Pick, content_hash, request_body
 from ..judgments.thresholds import NoulVerdict, Thresholds
 from .places import MOVES, Move, Place, neighbours_and_omissions
 from .shown import MAX_LINE_CHARS, MAX_SLICE_CHARS, cut_long_line, shown_slice
@@ -183,7 +186,7 @@ class NotInspected:
     ran out), ``cancelled`` (the caller interrupted before it was opened), ``deprioritized`` (its
     signature scored low; that only lowered its priority, it was never judged), ``capped`` (cut by
     a per-kind neighbour cap: the budget's, or the tighter one an opening needs for its neighbours to
-    fit one ``open_first`` Choice) or ``depth`` (beyond an explicit depth limit).
+    fit one request) or ``depth`` (beyond an explicit depth limit).
     ``tier`` preserves starts, picked places and scored neighbours through Resume."""
 
     place_key: str
@@ -627,7 +630,7 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     try:
         if search.budget.max_depth is not None and item.depth >= search.budget.max_depth:
             return _Opening(item, shown, code.key, fingerprint, [])
-        candidates, omitted = _neighbours_that_fit(index, search, code, shown.span)
+        candidates, omitted = _neighbours_that_fit(index, search, code, shown)
         capped = tuple(
             NotInspected(
                 place.key,
@@ -654,31 +657,44 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
 
 
 def _neighbours_that_fit(
-    index: CodeIndex, search: _Search, code: CodeSlice, shown: Span
+    index: CodeIndex, search: _Search, code: CodeSlice, shown: CodeSlice
 ) -> tuple[list[Place], list[Place]]:
-    """The neighbours under the budget's per-kind cap. When they are more than one ``open_first``
-    Choice can offer, the cap tightens to the largest one under which they fit: a move that lists few
-    places keeps all of them, and the longest lists are cut to one length."""
+    """The neighbours under the budget's per-kind cap, when one request can carry them. Otherwise the
+    cap tightens to the largest one under which they fit: a move that lists few places keeps all of
+    them, and the longest lists are cut to one length."""
     listed = {name: move(index, code) for name, move in search.moves.items()}
     moves = {name: _already_listed(places) for name, places in listed.items()}
 
     def under(cap: int | None) -> tuple[list[Place], list[Place]]:
-        return neighbours_and_omissions(index, code, cap, moves, shown)
+        return neighbours_and_omissions(index, code, cap, moves, shown.span)
 
     per_kind = search.budget.neighbours_per_kind
     neighbours = under(per_kind)
-    pick = search.questions.open_first
-    if pick is None or len(neighbours[0]) <= pick.max_options:
+    if _fits_one_request(search, shown, neighbours[0]):
         return neighbours
     fits = 0
     too_many = max(map(len, listed.values())) if per_kind is None else per_kind
     while too_many - fits > 1:
         cap = (fits + too_many) // 2
-        if len(under(cap)[0]) <= pick.max_options:
+        if _fits_one_request(search, shown, under(cap)[0]):
             fits = cap
         else:
             too_many = cap
     return under(fits)
+
+
+def _fits_one_request(search: _Search, shown: CodeSlice, candidates: list[Place]) -> bool:
+    """At most as many candidates as one ``open_first`` Choice offers, and a request within Jev's
+    state and request token limits, estimated as the history estimates them."""
+    pick = search.questions.open_first
+    if pick is not None and len(candidates) > pick.max_options:
+        return False
+    request = _request(search, shown, candidates)
+    state = json.dumps(request.state, ensure_ascii=False)
+    body = request_body(request.state, request.questions).decode()
+    return (
+        estimate_tokens(state) <= JEV_STATE_TOKEN_LIMIT and estimate_tokens(body) <= JEV_REQUEST_TOKEN_LIMIT
+    )
 
 
 def _already_listed(places: list[Place]) -> Move:
@@ -693,7 +709,10 @@ class _OpeningRequest:
 
 
 def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
-    code, candidates = opening.code, opening.candidates
+    return _request(search, opening.code, opening.candidates)
+
+
+def _request(search: _Search, code: CodeSlice, candidates: list[Place]) -> _OpeningRequest:
     state = {
         "target": search.target,
         "slice": {"file": code.span.file, "lines": f"{code.span.start}-{code.span.end}", "code": code.text},

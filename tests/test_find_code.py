@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -19,10 +20,11 @@ from jev_navigator.directives.places import (
     place_for_line,
     range_place,
 )
+from jev_navigator.history import JEV_REQUEST_TOKEN_LIMIT, JEV_STATE_TOKEN_LIMIT, estimate_tokens
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
 from jev_navigator.judgments.judge import Judge
-from jev_navigator.judgments.questions import MAX_CHOICE_OPTIONS
+from jev_navigator.judgments.questions import MAX_CHOICE_OPTIONS, request_body
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
@@ -419,9 +421,11 @@ def test_capped_neighbours_are_reported_as_not_inspected(sample_index: CodeIndex
     assert any(entry.reason == "capped" for entry in result.not_inspected)
 
 
-def hub_index(root: Path, callers: int) -> CodeIndex:
-    """``hub`` calls two helpers and is called by ``callers`` functions."""
-    calling = "".join(f"def caller_{number}():\n    return hub()\n\n\n" for number in range(callers))
+def hub_index(root: Path, callers: int, filler_lines: int = 0) -> CodeIndex:
+    """``hub`` calls two helpers and is called by ``callers`` functions, each padded with
+    ``filler_lines`` long lines."""
+    filler = f"    note = '{'a long line of filler text ' * 8}'\n" * filler_lines
+    calling = "".join(f"def caller_{number}():\n{filler}    return hub()\n\n\n" for number in range(callers))
     files = {
         "hub.py": "from helpers import first, second\n\n\ndef hub():\n    return first() + second()\n",
         "helpers.py": "def first():\n    return 1\n\n\ndef second():\n    return 2\n",
@@ -431,9 +435,15 @@ def hub_index(root: Path, callers: int) -> CodeIndex:
     return CodeIndex(root, sorted(files))
 
 
-def test_a_hub_is_cut_to_fit_one_choice_and_its_small_moves_keep_every_place(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("callers", "filler_lines"),
+    [pytest.param(300, 0, id="more-options-than-a-choice"), pytest.param(150, 7, id="over-the-token-limits")],
+)
+def test_a_hub_is_cut_to_fit_one_request_and_its_small_moves_keep_every_place(
+    tmp_path: Path, callers: int, filler_lines: int
+) -> None:
     # Arrange
-    index = hub_index(tmp_path, callers=300)
+    index = hub_index(tmp_path, callers, filler_lines)
     client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))
 
     # Act
@@ -450,9 +460,11 @@ def test_a_hub_is_cut_to_fit_one_choice_and_its_small_moves_keep_every_place(tmp
     offered = [candidate["signature"] for candidate in state["candidates"]]
     capped = [entry.signature for entry in result.not_inspected if entry.reason == "capped"]
     assert len(questions[OPEN_FIRST.question_id]["criteria"]) <= MAX_CHOICE_OPTIONS
+    assert estimate_tokens(json.dumps(state, ensure_ascii=False)) <= JEV_STATE_TOKEN_LIMIT
+    assert estimate_tokens(request_body(state, questions).decode()) <= JEV_REQUEST_TOKEN_LIMIT
     assert any("def first" in signature for signature in offered)
     assert any("def second" in signature for signature in offered)
-    assert sum("def caller_" in signature for signature in [*offered, *capped]) == 300
+    assert sum("def caller_" in signature for signature in [*offered, *capped]) == callers
     assert any("def caller_" in signature for signature in capped)
 
 
