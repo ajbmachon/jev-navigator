@@ -1,7 +1,9 @@
 # Extending jev-navigator
 
 The library is a set of small pieces you import and compose in your own functions. There is no plugin
-system, registry or base class: a new use case is a plain function of 30 to 60 lines.
+system, registry or base class: a new use case is a plain function of 30 to 60 lines. The one
+exception is the services that answer the questions; see
+[Add a decision-model adapter](#add-a-decision-model-adapter).
 
 ## The pieces
 
@@ -217,6 +219,83 @@ connector.
 Every judge method has an `*_async` form, and `find_code_async` is the same search. Pass any object
 with `model` and `async ask(state, questions)`; masking, the store, budgets and the journal behave
 exactly as on the sync path.
+
+## Add a decision-model adapter
+
+An adapter connects the judge to one decision model, hosted by a vendor such as Jev or Drex by
+Nace.AI, served by you, or running inside this process. Every adapter follows one contract, written
+out in `adapters/system_one.py`, so the route table, the CLI and the journal treat them all alike.
+Pick the base by where the model runs:
+
+| The model runs | Base | You write |
+| --- | --- | --- |
+| behind a `POST /v1/systemone` endpoint, yours or a vendor's | none: name a route (below) | nothing |
+| behind an HTTP API with its own dialect | `SystemOneClient` | the hooks that differ |
+| in this process, such as an ONNX classifier loaded from disk | `LocalModelClient` (`adapters/local.py`) | `load`, `answer`, `unload` |
+
+Your own server needs no code. A route names its endpoint and model, and a key only if the server
+checks one: `SYSTEM_ONE_ROUTES=mine` with `SYSTEM_ONE_MINE_ENDPOINT` and `SYSTEM_ONE_MINE_MODEL`.
+`SYSTEM_ONE_MINE_TIMEOUT` (seconds per attempt) and `SYSTEM_ONE_MINE_RETRIES` suit a slow or
+restarting server; see `.env.example`. The endpoint must be an `http://` or `https://` URL with a
+host and no query, fragment or credentials; anything else is refused when the route is built, not
+on the first question, where routing would take it for an outage and fail over.
+
+Models can also split the work by question type. `SYSTEM_ONE_ROUTES_CHECK`,
+`SYSTEM_ONE_ROUTES_PICK` and `SYSTEM_ONE_ROUTES_RATE` each order the routes for one type and
+replace `SYSTEM_ONE_ROUTES` for it, so a yes/no classifier can answer every `Check` while Drex
+answers the rest: `SYSTEM_ONE_ROUTES_CHECK=classifier,drex` with `SYSTEM_ONE_ROUTES=drex`. A search step
+asks a `Check` and a `Pick` in one request; the router splits such a request into one call per
+table, runs them at once and merges the answers. Three things follow:
+
+- A split request counts as one call against `max_calls` but costs one call at each service.
+- It fails if any part fails; each part fails over only within its own table.
+- Its served model names each type's model, as in `check=classifier@3,pick=drex-v1.5`. Stored answers
+  are reused only under the same name, so a request split one way does not reuse an answer to a
+  request split another way.
+
+A model can also need bars of its own, such as one that rates near misses as high as 0.88 when
+the shared yes is 0.80. `SYSTEM_ONE_<NAME>_NOUL_YES_AT`, `SYSTEM_ONE_<NAME>_NOUL_NO_AT` and
+`SYSTEM_ONE_<NAME>_CHOICE_MIN_CONFIDENCE` set that route's bars, and the router maps its answers
+onto the shared scale (the `JEV_NAVIGATOR_*` thresholds) before the judge reads them. The route's
+bars land exactly on the shared bars and values between move linearly, so the shared thresholds
+give every answer the verdict the route's own bars would. That keeps one scale for everything
+downstream: frontier ranking, found and unsure results, and answers from routes that set no bars.
+Choice probabilities and scores are kept as sent. Two records differ from the rest:
+
+- The journal keeps the bytes the service sent; the answer store, the manifest and the report hold
+  the mapped values.
+- The manifest records the route's bars under `provider.route_thresholds`, and a resume with
+  other bars is refused, since the saved frontier was ranked on the old mapping.
+
+Whichever base you use, the model name the service returns must name the checkpoint that
+answered, such as `decider-4b@2026-09-30`, never a moving alias like `latest`. The answer store
+reuses answers by that name, so an alias would replay an old checkpoint's answers after you
+retrain.
+
+To write an adapter:
+
+1. Subclass the base and set its class attributes: `name` (the route name), `endpoint` (empty for
+   an in-process model), `default_model`, `api_key_env` (the service's own key variable; an
+   adapter never reads another service's key), `needs_key = True` if the service refuses anonymous
+   calls, and `pinned = True` if it has exactly one endpoint.
+2. For an HTTP service, override a hook only where it differs from the System-One wire:
+   `wire_questions` or `wire_body` (the request), `headers` (authentication), `parse` (the
+   response). Sending, retries, `cancel` and exact-byte capture come from the base; do not
+   reimplement them. For an in-process model, implement `load` (runs once, on the first question),
+   `answer` (returns the System-One response body) and optionally `unload`. The base runs them one
+   call at a time on its own thread and returns every waiting caller at once on `cancel`.
+3. Make it selectable. An adapter shipped with this library goes in `ADAPTERS` in
+   `adapters/registry.py`, after which `SYSTEM_ONE_ROUTES=<name>` selects it. An adapter in your own
+   package needs no change here: `SYSTEM_ONE_<NAME>_ADAPTER=your_package.module:YourClient`.
+4. Test it. For a shipped adapter, add `tests/test_<name>.py` for the dialect: send the library's
+   own `Check`, `Pick` and `Rate` questions through a fake transport, and assert the request the
+   service receives and the answers parsed from its response shape. `tests/test_adapters.py` runs
+   the shared contract against every registered adapter without further changes.
+5. Probe the live service once with every question type before relying on it. Drex, for example,
+   refuses structured criteria with HTTP 422, which only a live call showed.
+
+`drex.py` is the reference HTTP adapter: six attributes and one hook. `TypeSafeJevClient` follows
+the same contract over TypeSafe's official SDK instead of the base.
 
 ## Testing
 

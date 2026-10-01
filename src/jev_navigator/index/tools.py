@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 AST_GREP = "ast-grep"
 RIPGREP = "rg"
+# `--no-config` keeps ripgrep from reading `RIPGREP_CONFIG_PATH`: over an untrusted repository, a
+# config file could otherwise inject flags such as `--pre=<program>`, which runs an arbitrary
+# program. It also keeps a personal rg config from changing what the index sees.
+_RIPGREP_SAFE = (RIPGREP, "--no-config")
 _NO_MATCHES_EXIT = 1
 
 
@@ -66,7 +70,7 @@ def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> 
     if not files:
         return []
     output = run_command(
-        [RIPGREP, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text, *files],
+        [*_RIPGREP_SAFE, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text, *files],
         cwd,
         no_match_exit=_NO_MATCHES_EXIT,
     )
@@ -79,7 +83,7 @@ def ripgrep_files(text: str, files: Sequence[str], cwd: Path) -> tuple[str, ...]
     if not files:
         return ()
     output = run_command(
-        [RIPGREP, "--files-with-matches", "--null", "--fixed-strings", "--", text, *files],
+        [*_RIPGREP_SAFE, "--files-with-matches", "--null", "--fixed-strings", "--", text, *files],
         cwd,
         no_match_exit=_NO_MATCHES_EXIT,
     )
@@ -101,7 +105,7 @@ def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
     else:
         output = run_command(
             [
-                RIPGREP,
+                *_RIPGREP_SAFE,
                 "--files",
                 "--hidden",
                 "--null",

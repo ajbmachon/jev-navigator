@@ -10,12 +10,14 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 
+from .adapters.routes import RoutedJevClient, client_from_env
+from .adapters.system_one import Adapter
 from .adapters.typesafe import TypeSafeJevClient
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
@@ -67,10 +69,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         _parser().error(str(error))
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
-    client: TypeSafeJevClient | None = None
+    client: Adapter | RoutedJevClient | None = None
     try:
-        _load_typesafe_environment(os.environ)
-        client = TypeSafeJevClient()  # model=None resolves TYPESAFE_DEFAULT_MODEL in the adapter
+        client = _live_client(os.environ)
         if args.command == "trace":
             manifest = create_trace_evidence_pack(
                 repository,
@@ -108,6 +109,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"jvn {args.command}: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
+        if client is not None:
+            # A call still running elsewhere, such as an in-process model's, is not waited for.
+            client.cancel()
         print(f"jvn {args.command}: cancelled", file=sys.stderr)
         return 130
     finally:
@@ -378,6 +382,7 @@ def create_evidence_pack(
             result,
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
+            route_thresholds=getattr(client, "route_thresholds", {}),
             input_tokens=judge.input_tokens,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
@@ -433,7 +438,8 @@ def _parser() -> argparse.ArgumentParser:
 For agents: jvn schema find prints the request's JSON Schema without making model calls.
 JSON mode writes results to stdout; progress goes to stderr. Ctrl-C cancels.
 Results default to ./jvn-results/<directory>-<timestamp> in the invocation directory.
-Credentials: process environment, then ~/.config/jvn/env (TYPESAFE_API_KEY / TYPESAFE_BASE_URL).
+Credentials: process environment, then the checkout .env, then ~/.config/jvn/env (TYPESAFE_API_KEY /
+TYPESAFE_BASE_URL). For Drex: SYSTEM_ONE_ROUTES=drex and DREX_API_KEY.
 Use jvn help find for options and examples. Exit codes: 0 completed, 1 failed, 2 invalid input, 130 cancelled.
 A completed search can have a non-found outcome; inspect search.outcome in JSON output.""",
     )
@@ -804,11 +810,26 @@ def _previous_pack(
         or previous["requested_starts"] != list(starts)
         or previous["thresholds"] != thresholds.as_dict()
         or previous["provider"]["requested_model"] != getattr(client, "model", "unknown")
+        or previous["provider"].get("route_thresholds", {}) != getattr(client, "route_thresholds", {})
     ):
         raise ValueError(
-            "resume must use the same workflow, repository, scope, target, starts, thresholds and model"
+            "resume must use the same workflow, repository, scope, target, starts, thresholds, "
+            "route thresholds and model"
         )
     return previous
+
+
+def _route_thresholds_lines(manifest: Mapping) -> list[str]:
+    """The routes whose model needs bars of its own, with the bars that differ from the shared ones."""
+    shared = manifest["thresholds"]
+    lines = []
+    for route, bars in manifest["provider"].get("route_thresholds", {}).items():
+        own = ", ".join(f"{name} {bar}" for name, bar in bars.items() if bar != shared.get(name))
+        lines.append(
+            f"- Route thresholds: `{route}` needs {own}; its answers are shown mapped onto the shared "
+            "thresholds, and the journal keeps them as sent"
+        )
+    return lines
 
 
 def _default_output(repository: Path) -> Path:
@@ -822,12 +843,21 @@ def _scope_warning(file_count: int) -> str | None:
     return f"jvn: large scope contains {file_count:,} tracked files; indexing may take longer"
 
 
+def _live_client(environment: MutableMapping[str, str]) -> Adapter | RoutedJevClient:
+    """The route tables when `SYSTEM_ONE_ROUTES` or a per-type table names routes (`drex` for
+    Drex), else the Jev client; see `adapters/routes.py`."""
+    _load_typesafe_environment(environment)
+    routed = client_from_env(environment)
+    return routed if routed is not None else TypeSafeJevClient()
+
+
 def _load_typesafe_environment(
     environment: MutableMapping[str, str],
     path: Path | None = None,
 ) -> None:
-    """Load official TypeSafe SDK settings: process environment, then checkout `.env`,
-    then the legacy `~/.config/jvn/env`; a process value always takes precedence."""
+    """Load official TypeSafe SDK settings: process environment, then this tool's checkout `.env`
+    (never a repository under analysis), then the legacy `~/.config/jvn/env`; a process value always
+    takes precedence."""
     from .environment import load_typesafe_environment
 
     load_typesafe_environment(environment, legacy=path)
@@ -858,6 +888,7 @@ def _manifest(
     *,
     requested_model: str,
     served_model: str | None,
+    route_thresholds: Mapping[str, Mapping[str, float]],
     input_tokens: int,
     duration_seconds: float,
     total_calls: int,
@@ -890,6 +921,7 @@ def _manifest(
         "provider": {
             "requested_model": requested_model,
             "served_model": served_model,
+            **({"route_thresholds": dict(route_thresholds)} if route_thresholds else {}),
             "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_tokens,
         },
         "search": {
@@ -1087,6 +1119,7 @@ def _report(manifest: dict) -> str:
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
         f"`{manifest['provider']['served_model']}`",
+        *_route_thresholds_lines(manifest),
         f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
         "(indexing and entry selection excluded)",
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "

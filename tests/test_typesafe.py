@@ -570,6 +570,37 @@ def test_the_answer_store_keeps_no_request_bytes_by_default_even_after_a_real_ca
     assert kept.sent_request() == (STATE, QUESTIONS)
 
 
+def test_a_jev_route_asks_the_sdk_with_the_routes_own_timeout_and_retries() -> None:
+    pytest.importorskip("typesafe_sdk")
+    import httpx2
+    from typesafe_sdk import TypeSafeRateLimitError
+
+    from jev_navigator.adapters.routes import routes_from_env
+
+    timeouts: list[dict] = []
+
+    def busy(request: httpx2.Request) -> httpx2.Response:
+        timeouts.append(request.extensions["timeout"])
+        return httpx2.Response(429, headers={"retry-after-ms": "1"}, json={"error": {"message": "busy"}})
+
+    (route,) = routes_from_env(
+        {
+            "SYSTEM_ONE_ROUTES": "jev",
+            "TYPESAFE_API_KEY": "local-test-key",
+            "SYSTEM_ONE_JEV_TIMEOUT": "2.5",
+            "SYSTEM_ONE_JEV_RETRIES": "0",
+        },
+        transport=httpx2.MockTransport(busy),
+    )
+
+    try:
+        with pytest.raises(TypeSafeRateLimitError):
+            route.client.ask(STATE, QUESTIONS)
+    finally:
+        route.client.close()
+    assert [timeout["read"] for timeout in timeouts] == [2.5]
+
+
 def test_a_max_tokens_exceeded_response_is_typed_and_the_batch_splits_at_the_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

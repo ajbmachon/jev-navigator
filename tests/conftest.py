@@ -1,17 +1,42 @@
-"""A small real repository (Python and TypeScript, two commits) that the index tests run against."""
+"""A small real repository (Python and TypeScript, two commits) that the index tests run against,
+and every test's isolation from the developer's own decision-model settings."""
 
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from git_repos import git, write_files
+from isolated_jvn import NO_SETTINGS
 
+from jev_navigator.adapters.registry import ADAPTERS
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
+
+# Variables that can point `jvn` at a live service with a real key.
+SERVICE_SETTINGS = ("SYSTEM_ONE_", "TYPESAFE_", *(adapter.api_key_env for adapter in ADAPTERS.values()))
+
+
+@pytest.fixture(autouse=True)
+def no_developer_settings(monkeypatch):
+    """`jvn` reads the checkout `.env`, `~/.config/jvn/env` and the exported environment on
+    purpose, and any of them can name a live route with a real key, so a test would send its code
+    to a paid service. Every test starts without them, and what a test loads into the environment
+    is dropped when it ends. A test that runs `jvn` in a subprocess uses `isolated_jvn`."""
+    monkeypatch.setattr("jev_navigator.environment.checkout_root", lambda: NO_SETTINGS)
+    monkeypatch.setattr("jev_navigator.environment.LEGACY_CONFIG", NO_SETTINGS / "env")
+    for name in list(os.environ):
+        if name.startswith(SERVICE_SETTINGS):
+            monkeypatch.delenv(name)
+    kept = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(kept)
+
 
 ORDER_SERVICE = '''\
 from app.validation import validate_order

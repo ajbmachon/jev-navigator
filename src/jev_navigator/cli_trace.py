@@ -164,6 +164,11 @@ def _manifest(
         "provider": {
             "requested_model": getattr(judge.client, "model", "unknown"),
             "served_model": judge.served_model,
+            **(
+                {"route_thresholds": route_thresholds}
+                if (route_thresholds := getattr(judge.client, "route_thresholds", {}))
+                else {}
+            ),
             "calls": judge.calls,
             "input_tokens": judge.input_tokens,
         },

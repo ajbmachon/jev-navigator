@@ -4,15 +4,21 @@ import inspect
 import io
 import json
 import os
+import signal
 import subprocess
-import sys
+import threading
+import time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 
 import pytest
 from git_repos import commit_files
+from isolated_jvn import JVN
 
+from jev_navigator.adapters.local import LocalModelClient
+from jev_navigator.adapters.routes import client_from_env
 from jev_navigator.cli import (
     SCHEMA_VERSION,
     _load_typesafe_environment,
@@ -469,7 +475,7 @@ def test_each_existing_typesafe_environment_value_wins_independently(tmp_path: P
     }
 
 
-def test_user_dotenv_key_is_loaded_without_shell_evaluation(tmp_path: Path) -> None:
+def test_user_dotenv_loads_only_settings_and_never_shell_evaluates(tmp_path: Path) -> None:
     pytest.importorskip("dotenv")
     path = tmp_path / "env"
     path.write_text(
@@ -484,9 +490,8 @@ def test_user_dotenv_key_is_loaded_without_shell_evaluation(tmp_path: Path) -> N
     assert environment == {
         "TYPESAFE_API_KEY": "file-value",
         "TYPESAFE_BASE_URL": "http://127.0.0.1:4777/jvn",
-        "UNRELATED": "$(touch should-not-run)",  # loaded literally, never shell-evaluated
-    }
-    assert not (tmp_path / "should-not-run").exists()
+    }  # UNRELATED is outside the tool's settings namespace, so it is never loaded
+    assert not (tmp_path / "should-not-run").exists()  # and a file value is never shell-evaluated
 
 
 def test_dotenv_base_url_reaches_the_real_sdk_system_one_endpoint(
@@ -680,6 +685,156 @@ def test_json_pipeline_reaches_sdk_and_preserves_explicit_options(tmp_path):
             "def entry(items):\n    return admit(items)\n\ndef admit(items):\n    return len(items) <= 3\n"
         )
     received = []
+    payload = {
+        "command": "find",
+        "target": "--the item-count check",
+        "repo": str(repository),
+        "prefix": ["first.py", "second.py"],
+        "start": ["first.py:1", "second.py:1"],
+        "max_calls": None,
+        "beam_width": 2,
+        "verbose": True,
+        "out": str(tmp_path / "pack"),
+    }
+    with _scripted_provider(received) as endpoint:
+        result = subprocess.run(
+            [*JVN, "--json", "-"],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env={**os.environ, "TYPESAFE_API_KEY": "local-test-key", "TYPESAFE_BASE_URL": endpoint},
+        )
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout)
+    manifest = json.loads(Path(response["manifest"]).read_text())
+    assert received
+    assert manifest["target"] == "--the item-count check"
+    assert manifest["source"]["prefixes"] == ["first.py", "second.py"]
+    assert manifest["requested_starts"] == ["first.py:1", "second.py:1"]
+    assert manifest["budget"]["max_calls"] is None
+    assert manifest["budget"]["beam_width"] == 2
+    assert response["search"]["outcome"] == "found"
+    assert "request" in result.stderr
+
+
+def test_find_runs_on_the_route_table_without_a_typesafe_key(tmp_path, monkeypatch, capsys):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "first.py").write_text(
+        "def entry(items):\n    return admit(items)\n\ndef admit(items):\n    return len(items) <= 3\n"
+    )
+    monkeypatch.setattr("jev_navigator.environment.checkout_root", lambda: tmp_path)
+    monkeypatch.setattr("jev_navigator.environment.LEGACY_CONFIG", tmp_path / "no-legacy-config")
+    for name in ("TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    received = []
+
+    with _scripted_provider(received, model="decider-served") as endpoint:
+        monkeypatch.setenv("SYSTEM_ONE_ROUTES", "decider")
+        monkeypatch.setenv("SYSTEM_ONE_DECIDER_ENDPOINT", endpoint)
+        monkeypatch.setenv("SYSTEM_ONE_DECIDER_MODEL", "decider-test")
+        monkeypatch.setenv("SYSTEM_ONE_DECIDER_API_KEY", "local-test-key")
+        code = main(
+            ["find", "the item-count check", "--repo", str(repository), "--start", "first.py:1"]
+            + ["--out", str(tmp_path / "pack")]
+        )
+
+    assert code == 0, capsys.readouterr().err
+    manifest = json.loads((tmp_path / "pack" / "manifest.json").read_text())
+    assert received
+    assert manifest["provider"]["requested_model"] == "decider-test"
+    assert manifest["provider"]["served_model"] == "decider-served"
+    journal = [json.loads(line) for line in (tmp_path / "pack" / "journal.jsonl").read_text().splitlines()]
+    assert {record["exact"] for record in journal if record["kind"] == "response"} == {True}
+
+
+def test_a_route_with_its_own_bars_records_them_and_resumes_only_with_the_same_bars(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    commit_files(repository, {"policy.py": "def policy(items):\n    return len(items) <= 3\n"})
+
+    def routed(yes_at: str):
+        return client_from_env(
+            {
+                "SYSTEM_ONE_ROUTES": "decider",
+                "SYSTEM_ONE_DECIDER_ENDPOINT": "http://127.0.0.1:9",
+                "SYSTEM_ONE_DECIDER_MODEL": "decider-test",
+                "SYSTEM_ONE_DECIDER_API_KEY": "local-test-key",
+                "SYSTEM_ONE_DECIDER_NOUL_YES_AT": yes_at,
+            }
+        )
+
+    def pack(output: Path, client, resume_from: Path | None = None) -> dict:
+        return create_evidence_pack(
+            repository,
+            (),
+            "the item limit",
+            ("policy.py:1",),
+            output,
+            SearchBudget(max_calls=0),
+            client,
+            resume_from=resume_from,
+        )
+
+    first = pack(tmp_path / "first", routed("0.9"))
+
+    assert first["provider"]["route_thresholds"] == {
+        "decider": {"choice_min_confidence": 0.7, "noul_yes_at": 0.9, "noul_no_at": 0.2}
+    }
+    assert "`decider` needs noul_yes_at 0.9;" in (tmp_path / "first" / "report.md").read_text()
+    pack(tmp_path / "same", routed("0.9"), resume_from=tmp_path / "first")
+    with pytest.raises(ValueError, match="route thresholds"):
+        pack(tmp_path / "moved", routed("0.95"), resume_from=tmp_path / "first")
+
+
+def test_ctrl_c_while_an_in_process_model_answers_exits_without_waiting_for_it(tmp_path, monkeypatch, capsys):
+    # Arrange: entry selection's first question reaches a model that is interrupted while it answers.
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "first.py").write_text("def entry(items):\n    return len(items) <= 3\n")
+    (repository / "second.py").write_text("def other(items):\n    return items\n")
+    monkeypatch.setattr("jev_navigator.environment.checkout_root", lambda: tmp_path)
+    monkeypatch.setattr("jev_navigator.environment.LEGACY_CONFIG", tmp_path / "no-legacy-config")
+    for name in ("TYPESAFE_API_KEY", "TYPESAFE_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SYSTEM_ONE_ROUTES", "held")
+    monkeypatch.setenv("SYSTEM_ONE_HELD_ADAPTER", f"{__name__}:_InterruptedModel")
+    # The events live on the class the route imports by name, so a rerun must not find them set.
+    _InterruptedModel.answering.clear()
+    _InterruptedModel.release.clear()
+    started = time.monotonic()
+
+    # Act
+    try:
+        code = main(
+            ["find", "the item-count check", "--repo", str(repository), "--out", str(tmp_path / "pack")]
+        )
+    finally:
+        _InterruptedModel.release.set()
+
+    # Assert
+    assert code == 130, capsys.readouterr().err
+    assert _InterruptedModel.answering.is_set()
+    assert time.monotonic() - started < 5
+
+
+class _InterruptedModel(LocalModelClient):
+    """An in-process model that presses Ctrl-C as it starts answering, then answers after 10 s."""
+
+    name = "held"
+    default_model = "held@1"
+    answering = threading.Event()
+    release = threading.Event()
+
+    def answer(self, state, questions):
+        self.answering.set()
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+        self.release.wait(10)
+        return {"answers": {}}
+
+
+@contextmanager
+def _scripted_provider(received: list, model: str = "jev-test"):
+    """A local System-One endpoint: every noul answers 0.95 and every choice its first option."""
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
@@ -698,7 +853,7 @@ def test_json_pipeline_reaches_sdk_and_preserves_explicit_options(tmp_path):
                         "probabilities": {label: float(label == labels[0]) for label in labels},
                     }
             body = json.dumps(
-                {"model": "jev-test", "answers": answers, "usage": {"input_tokens": 10, "output_tokens": 10}}
+                {"model": model, "answers": answers, "usage": {"input_tokens": 10, "output_tokens": 10}}
             ).encode()
             self.send_response(200)
             self.send_header("content-type", "application/json")
@@ -712,50 +867,12 @@ def test_json_pipeline_reaches_sdk_and_preserves_explicit_options(tmp_path):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = Thread(target=server.serve_forever)
     thread.start()
-    payload = {
-        "command": "find",
-        "target": "--the item-count check",
-        "repo": str(repository),
-        "prefix": ["first.py", "second.py"],
-        "start": ["first.py:1", "second.py:1"],
-        "max_calls": None,
-        "beam_width": 2,
-        "verbose": True,
-        "out": str(tmp_path / "pack"),
-    }
     try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "from jev_navigator.cli import main; raise SystemExit(main())",
-                "--json",
-                "-",
-            ],
-            input=json.dumps(payload),
-            text=True,
-            capture_output=True,
-            env={
-                **os.environ,
-                "TYPESAFE_API_KEY": "local-test-key",
-                "TYPESAFE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
-            },
-        )
+        yield f"http://127.0.0.1:{server.server_port}"
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
-    assert result.returncode == 0, result.stderr
-    response = json.loads(result.stdout)
-    manifest = json.loads(Path(response["manifest"]).read_text())
-    assert received
-    assert manifest["target"] == "--the item-count check"
-    assert manifest["source"]["prefixes"] == ["first.py", "second.py"]
-    assert manifest["requested_starts"] == ["first.py:1", "second.py:1"]
-    assert manifest["budget"]["max_calls"] is None
-    assert manifest["budget"]["beam_width"] == 2
-    assert response["search"]["outcome"] == "found"
-    assert "request" in result.stderr
 
 
 @pytest.mark.parametrize("arguments", [["--help"], ["help"], ["find", "--help"], ["help", "find"]])

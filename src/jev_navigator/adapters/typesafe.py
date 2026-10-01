@@ -1,7 +1,9 @@
 """JevClient over the official TypeSafe SDK (install the ``typesafe`` extra). Always the latest Jev.
 
-Hosts with their own runtime (for example one that routes requests by region) pass an adapter over
-that instead; the library only needs ``ask`` and ``model``.
+It follows the adapter contract in `system_one.py` and is registered as the ``jev`` route; unlike
+the other adapters it runs on the official SDK rather than `SystemOneClient`. Hosts with their own
+runtime (for example one that routes requests by region) pass an adapter over that instead; the
+library only needs ``ask`` and ``model``.
 
 When this adapter builds the SDK client itself, it wraps the HTTP transport so ``send`` returns the
 exact response bytes, status and content type for a journal. A caller-supplied SDK client is not
@@ -141,11 +143,31 @@ class _AsyncRunner:
 
 
 class TypeSafeJevClient:
-    def __init__(self, sdk_client=None, model: str | None = LATEST_JEV, *, transport=None) -> None:
+    name = "jev"
+    endpoint = "https://api.typesafe.ai"
+    default_model = LATEST_JEV
+    api_key_env = "TYPESAFE_API_KEY"
+    needs_key = True
+    pinned = False
+    runs_locally = False
+
+    def __init__(
+        self,
+        sdk_client=None,
+        model: str | None = LATEST_JEV,
+        *,
+        api_key: str | None = None,
+        endpoint: str | None = None,
+        transport=None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> None:
         """``transport`` is a sync test or host transport. The default uses the official async SDK
         behind the synchronous JevClient interface so ``cancel`` can abort active HTTP requests.
         ``model=None`` resolves `TYPESAFE_DEFAULT_MODEL` from the environment, falling back to
-        `LATEST_JEV` — how consumers point the client at Drex or a finetuned endpoint."""
+        `LATEST_JEV`; ``api_key`` and ``endpoint`` left unset resolve `TYPESAFE_API_KEY` and
+        `TYPESAFE_BASE_URL` the same way. ``timeout`` and ``max_retries`` left unset keep the SDK's
+        defaults."""
         self._capture: CapturingTransport | CapturingAsyncTransport | None = None
         self._runner: _AsyncRunner | None = None
         self._async_sdk = False
@@ -153,19 +175,24 @@ class TypeSafeJevClient:
             model = os.environ.get("TYPESAFE_DEFAULT_MODEL", "").strip() or LATEST_JEV
         if sdk_client is None:
             import httpx2
+            from typesafe_sdk import RetryPolicy
+
+            options = {"model": model, "api_key": api_key, "base_url": endpoint, "timeout": timeout}
+            if max_retries is not None:
+                options["retry"] = RetryPolicy(max_retries=max_retries)
 
             if transport is None:
                 from typesafe_sdk import AsyncTypeSafeClient
 
                 self._capture = CapturingAsyncTransport(httpx2.AsyncHTTPTransport())
-                sdk_client = AsyncTypeSafeClient(model=model, transport=self._capture)
+                sdk_client = AsyncTypeSafeClient(**options, transport=self._capture)
                 self._runner = _AsyncRunner()
                 self._async_sdk = True
             else:
                 from typesafe_sdk import TypeSafeClient
 
                 self._capture = CapturingTransport(transport)
-                sdk_client = TypeSafeClient(model=model, transport=self._capture)
+                sdk_client = TypeSafeClient(**options, transport=self._capture)
         self._sdk = sdk_client
         self.model = model
 

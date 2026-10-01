@@ -100,6 +100,15 @@ Explicit `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` process values win independe
 file or print the values. `TYPESAFE_BASE_URL` is the API root before `/v1/systemone`, such as
 `http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
 
+Another decision model, or several with fallback, is a route table: `SYSTEM_ONE_ROUTES=drex` with
+`DREX_API_KEY` asks Drex by Nace.AI, and `SYSTEM_ONE_ROUTES=mine` with `SYSTEM_ONE_MINE_ENDPOINT`
+and `SYSTEM_ONE_MINE_MODEL` asks your own server, keyless if it checks none.
+`SYSTEM_ONE_ROUTES_CHECK`, `_PICK` and `_RATE` give one question type its own routes, such as a
+yes/no classifier for every `Check`. `SYSTEM_ONE_<NAME>_NOUL_YES_AT`, `_NOUL_NO_AT` and
+`_CHOICE_MIN_CONFIDENCE` give one route's model bars of its own, such as a stricter yes for a model
+that rates near misses high. `.env.example` lists every route setting; docs/extending.md covers
+models that need their own adapter, including ones that run in this process.
+
 ### JSON input for agents and pipelines
 
 Put a request in `request.json`:
@@ -390,9 +399,10 @@ on its own scope, so searches sharing one judge never use up each other's budget
   response)`). The judge records the masked request before dispatch and the raw response before
   parsing, as a `RawResponse(body, status, content_type, decoded)`: the body bytes as received, the HTTP
   status and the content type. Transport errors and responses that fail to parse are recorded as
-  failures. Clients that offer `send` and `parse` return that `RawResponse`; the TypeSafe adapter
-  captures the exact bytes from its HTTP transport. A client that only parses is journaled with its
-  decoded JSON and `exact=False`. `request_sha256` never includes the model; cache reuse checks the
+  failures. Clients that offer `send` and `parse` return that `RawResponse`; every registered
+  adapter (`TypeSafeJevClient`, `DrexClient`; see `adapters/registry.py`) captures the exact bytes
+  from its HTTP transport. A client that only parses, and a model running in this process
+  (`adapters/local.py`), is journaled with its decoded JSON and `exact=False`. `request_sha256` never includes the model; cache reuse checks the
   served model separately. A request holds code, and the library cannot know whose code it is, so
   `JsonlJournal` keeps only the request hash, the question ids and a state hash by default; pass
   `keep_request_text=True` only for your own or open-source code.

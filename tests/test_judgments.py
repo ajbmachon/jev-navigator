@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from jev_navigator.judgments.judge import MAX_REQUEST_CHARS, CallCapReachedError
 from jev_navigator.judgments.questions import Check, Criterion, Pick
 from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
 from jev_navigator.judgments.store import JsonlAnswerStore
-from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
+from jev_navigator.judgments.thresholds import Calibration, NoulVerdict, Thresholds
 from jev_navigator.testing import ScriptedJevClient
 
 DESCRIBES = Check(
@@ -86,6 +87,31 @@ def test_thresholds_precedence_is_defaults_then_environment_then_directive_then_
 def test_invalid_thresholds_are_rejected(overrides: dict) -> None:
     with pytest.raises(ValueError):
         Thresholds().updated(overrides)
+
+
+def test_a_models_own_bars_give_the_verdicts_the_shared_bars_give_its_calibrated_answers() -> None:
+    shared = Thresholds()
+    for no_at, yes_at in ((no / 100, yes / 100) for no in range(1, 50) for yes in range(51, 100)):
+        own = shared.updated({"noul_no_at": no_at, "noul_yes_at": yes_at})
+        calibration = Calibration(own, shared)
+        values = _values_around(no_at, yes_at)
+        mapped = [calibration.noul_probability(value) for value in values]
+        verdicts = [shared.noul_verdict(probability) for probability in mapped]
+        assert verdicts == [own.noul_verdict(value) for value in values], own
+        assert mapped == sorted(mapped)
+        assert (mapped[0], mapped[-1]) == (0.0, 1.0)
+    for bar in (step / 100 for step in range(1, 100)):
+        own = shared.updated({"choice_min_confidence": bar})
+        calibration = Calibration(own, shared)
+        values = _values_around(bar)
+        confident = [shared.choice_is_confident(calibration.choice_confidence(value)) for value in values]
+        assert confident == [own.choice_is_confident(value) for value in values], own
+
+
+def _values_around(*bars: float) -> list[float]:
+    """A grid over 0..1 with each bar and the floats either side of it."""
+    near = {math.nextafter(bar, edge) for bar in bars for edge in (0.0, 1.0)}
+    return sorted({step / 100 for step in range(101)} | set(bars) | near)
 
 
 def test_check_each_batches_items_into_one_request_with_three_way_verdicts() -> None:
