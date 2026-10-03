@@ -1,3 +1,5 @@
+"""Find over the real index: neighbours, picks, budgets, resume and the receipt of what was not opened."""
+
 from __future__ import annotations
 
 import os

@@ -1,3 +1,5 @@
+"""The TypeSafe SDK adapter at its real request boundary: batching, resume, retries, masking and cancel."""
+
 from __future__ import annotations
 
 import asyncio

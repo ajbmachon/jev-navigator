@@ -1,3 +1,5 @@
+"""The search history a check reads: its sections, their limits, and recorded code eviction."""
+
 from __future__ import annotations
 
 import json

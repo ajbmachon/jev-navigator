@@ -1,3 +1,5 @@
+"""Trace over the real index: inventory first, evidence for each obligation, and honest unresolved links."""
+
 from __future__ import annotations
 
 import json

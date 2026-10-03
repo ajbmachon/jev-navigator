@@ -1,3 +1,5 @@
+"""Rebuilding a stored request exactly from the repository at its commit, and naming any mismatch."""
+
 from __future__ import annotations
 
 from pathlib import Path

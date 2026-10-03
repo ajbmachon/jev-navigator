@@ -1,3 +1,5 @@
+"""Import and export resolution for Python and TypeScript, and the neighbours it gives the search."""
+
 from __future__ import annotations
 
 import json

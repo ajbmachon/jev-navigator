@@ -1,3 +1,5 @@
+"""The request journal: what is written before dispatch, raw responses, failures, and masking."""
+
 from __future__ import annotations
 
 import base64

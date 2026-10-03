@@ -1,3 +1,5 @@
+"""The async search, judge and history paths: same masking, store, journal and caps as the sync paths."""
+
 from __future__ import annotations
 
 import asyncio

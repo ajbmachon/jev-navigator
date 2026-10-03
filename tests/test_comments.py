@@ -1,3 +1,5 @@
+"""Comments and facts read from source: kinds, the noise filter, declaration comments and cheap facts."""
+
 from __future__ import annotations
 
 from pathlib import Path
