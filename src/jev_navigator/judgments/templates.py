@@ -49,8 +49,7 @@ HANDS_OFF = Check(
         " behaviour described in `target`?"
     ),
     yes=Criterion(
-        "A line in `{item}.code` hands work on to other code as part of the described behaviour, judged"
-        " from what the line itself shows: the call, its arguments and where it sits.",
+        "A line in `{item}.code` hands work on to other code as part of the described behaviour.",
         not_for="Code that only receives the outcome after the work is done.",
         examples=(f"{EXAMPLE_BEHAVIOUR}: an order handler that calls the limit check before saving.",),
     ),
@@ -61,8 +60,8 @@ SELECTS_OR_CONFIGURES = Check(
     name="selects_or_configures",
     instructions="Does `{item}.code` choose or set what the behaviour described in `target` uses?",
     yes=Criterion(
-        "`{item}.code` decides which implementation, handler or setting value the described behaviour"
-        " uses, or writes a setting that behaviour reads.",
+        "`{item}.code` decides or sets which implementation, handler or setting value the described"
+        " behaviour uses, as its own lines show.",
         examples=(
             f"{EXAMPLE_BEHAVIOUR}: code that reads the item limit from configuration, or registers which"
             " check runs.",
