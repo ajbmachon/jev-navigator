@@ -400,6 +400,41 @@ def test_a_module_registration_window_offers_the_registered_function(tmp_path: P
     assert "candidate" not in authentication.signature
 
 
+def test_a_call_inside_a_callback_is_offered_the_method_whose_body_declares_a_constant(
+    tmp_path: Path,
+) -> None:
+    # Arrange: parse-server's DatabaseController.create callback and the adapter method it calls, cut down.
+    index = committed_index(
+        tmp_path,
+        {
+            "src/controller.js": (
+                "export default class DatabaseController {\n"
+                "  create(className, object) {\n"
+                "    return this.loadSchema().then(schema => {\n"
+                "      return this.adapter.createObject(className, schema, object);\n"
+                "    });\n"
+                "  }\n"
+                "}\n"
+            ),
+            "src/adapter.js": (
+                "export class PostgresStorageAdapter {\n"
+                "  async createObject(className, schema, object, transactionalSession) {\n"
+                "    const promise = (transactionalSession ? transactionalSession.t : this._client)\n"
+                "      .none('INSERT INTO $1:name', [className, object]);\n"
+                "    return promise;\n"
+                "  }\n"
+                "}\n"
+            ),
+        },
+    )
+
+    # Act
+    offered = {place.key: place.signature for place in offered_from(index, "src/controller.js", 4)}
+
+    # Assert
+    assert "called by src/controller.js:3-5" in offered["src/adapter.js:2-6"]
+
+
 def test_a_condition_is_not_described_as_passing_a_name_on(tmp_path: Path) -> None:
     # Arrange
     index = committed_index(

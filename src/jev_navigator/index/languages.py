@@ -85,14 +85,29 @@ _DECLARED_NAME = re.compile(
     r"^\s*(?:export\s+)?(?:declare\s+)?(?:(?:type|interface|enum|const|let|var)\s+)?(\w+)"
 )
 
-_NAME_PATTERNS = (
-    re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+(\w+)"),
+# A declaration names itself at the start of its own first line.
+_HEAD_NAME_PATTERNS = (
+    re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?class\s+(\w+)"),
     re.compile(r"^\s*(?:async\s+)?def\s+(\w+)"),
-    re.compile(r"\bfunction\s*\*?\s*(\w+)"),
-    re.compile(r"\b(?:const|let|var)\s+(\w+)\s*(?::[^=]+)?=\s*(?:async\s+)?(?:function\b|\()"),
-    re.compile(r"^\s*(?:public\s+|private\s+|protected\s+|static\s+|async\s+|get\s+|set\s+)*(\w+)\s*\("),
-    re.compile(r"(\w+)\s*[:=]\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>)"),
+    re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?function\b\s*\*?\s*(\w+)"),
+    re.compile(
+        r"^\s*(?:(?:public|private|protected|static|override|abstract|async|get|set)\s+)*"
+        r"\*?\s*#?(\w+)\s*[<(]"
+    ),
 )
+
+# An unnamed function takes the name that the code just before it binds it to, opening parentheses
+# included (`x = ((a) => a)`): a declared name whatever its type holds, an assigned name or member
+# whose type holds no `,` or `;` (so a binding never starts inside an earlier parameter), or a key.
+_BINDING_NAME_PATTERNS = (
+    re.compile(r"\b(?:const|let|var)\s+(\w+)(?:\s*:.*)?\s*=[\s(]*$"),
+    re.compile(r"(\w+)\s*(?::(?:[^=,;]|=>)+)?=[\s(]*$"),
+    re.compile(r"(\w+)\??\s*:[\s(]*$"),
+)
+
+# The line before names a function that starts its line only when that line starts as a binding
+# (`export const render =`), never when it is the end of a type that spans lines.
+_BINDING_LINE = re.compile(r"^\s*(?:export\s+)?(?:(?:const|let|var)\s+)?[\w$.]+\??\s*[:=]")
 
 
 def language_of(path: str) -> str | None:
@@ -154,14 +169,30 @@ def declared_name(first_line: str) -> str:
     return match.group(1) if match else "<anonymous>"
 
 
-def function_name(first_line: str, line_before: str = "") -> str:
-    """The declared name on a function's first line, or on the line that assigns it."""
-    for candidate in (first_line, line_before):
-        for pattern in _NAME_PATTERNS:
-            match = pattern.search(candidate)
-            if match and match.group(1) not in _NOT_NAMES:
-                return match.group(1)
-    return "<anonymous>"
+def function_name(node_text: str, text_before_node: str = "", line_before: str = "") -> str:
+    """The name a function or class node declares at the start of its own first line, or else the
+    name the code just before the node binds it to (``x = ``, ``x: ``, ``const x = ``): on the node's
+    own line, or on the line before when the node starts its line. The node's body never names it:
+    a declaration inside the body names only itself, and a call the node is passed to names nothing."""
+    head = node_text.split("\n", 1)[0]
+    found = _first_name(_HEAD_NAME_PATTERNS, head) or _bound_name(text_before_node, line_before)
+    return found or "<anonymous>"
+
+
+def _bound_name(text_before_node: str, line_before: str) -> str:
+    if text_before_node.strip():
+        return _first_name(_BINDING_NAME_PATTERNS, text_before_node)
+    if _BINDING_LINE.match(line_before):
+        return _first_name(_BINDING_NAME_PATTERNS, line_before)
+    return ""
+
+
+def _first_name(patterns: Sequence[re.Pattern[str]], text: str) -> str:
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match and match.group(1) not in _NOT_NAMES:
+            return match.group(1)
+    return ""
 
 
 _NOT_NAMES = frozenset({"if", "for", "while", "switch", "catch", "return", "function", "async"})

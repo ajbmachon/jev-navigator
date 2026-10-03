@@ -13,7 +13,7 @@ from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v9-node-symbol-names"
+FACT_RULE_VERSION = "combined-facts-v10-head-symbol-names"
 
 
 class FactCache:

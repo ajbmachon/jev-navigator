@@ -81,8 +81,8 @@ NOTES = """\
 Nothing here is code, so nothing here holds a function to count.
 """
 
-# Every file here parses, so a ranking taken over all of them is a complete measurement: 14 functions
-# and 2 classes, 31 symbol lines, and 7 symbols wide enough to be compared to a whole file.
+# Every file here parses, so a ranking taken over all of them is a complete measurement: 15 functions
+# and 2 classes, 31 symbol lines, and 8 symbols wide enough to be compared to a whole file.
 CLEAN = {"app/basket.py": BASKET, "web/cart.ts": CART, "web/ties.ts": TIES}
 
 # `broken.ts` only partly parses and `oneline.ts` puts a method on the same line as its class, so a
@@ -141,11 +141,11 @@ def test_a_pack_writes_both_files_and_measures_the_whole_scope_in_one_parser_pas
     assert pack["limits"][0].startswith("Symbols come from the index's own parser")
 
     # Assert: what was measured stays whole in the document, while the count of it is only a summary
-    assert pack["counts"]["totals"] == {"function": 10, "class": 2}
+    assert pack["counts"]["totals"] == {"function": 11, "class": 2}
     assert pack["counts"]["symbol_lines"] == 25
-    assert pack["largest"]["measured"] == 5 and pack["largest"]["shown"] == 5
+    assert pack["largest"]["measured"] == 6 and pack["largest"]["shown"] == 6
     assert pack["largest"]["complete"] is True and pack["largest"]["caveat"] == ""
-    assert pack["ranges"]["listed"] == 5
+    assert pack["ranges"]["listed"] == 6
 
     # Assert: what came back as JSON is what was returned, and the returned manifest is what ran
     assert (tmp_path / "pack" / "statistics.json").read_text().endswith("}\n")
@@ -181,7 +181,7 @@ def test_a_reused_index_is_measured_from_its_cached_facts_and_never_scanned_agai
     # Assert: the facts the first pack already read are read again, never scanned a second time
     assert scans_before == 1 and len([event for event in events if event[1] == "started"]) == 1
     assert second["operations"] == ["count", "largest"]
-    assert second["counts"]["totals"] == first["counts"]["totals"] == {"function": 16, "class": 3}
+    assert second["counts"]["totals"] == first["counts"]["totals"] == {"function": 17, "class": 3}
     assert second["counts"]["symbol_lines"] == first["counts"]["symbol_lines"] == 35
     assert second["largest"]["ranking"] == first["largest"]["ranking"]
 
@@ -203,7 +203,7 @@ def test_the_pack_carries_the_measurement_the_owner_took_without_repeating_it(
     taken = stats.count_symbols(fresh, None, kinds=("function", "class"), largest_of=3, held=False)
 
     # Assert: the counts are the owner's, unchanged, and the ranking came out of that same call
-    assert pack["counts"]["totals"] == taken.total == {"function": 16, "class": 3}
+    assert pack["counts"]["totals"] == taken.total == {"function": 17, "class": 3}
     assert pack["counts"]["symbol_lines"] == taken.symbol_lines == 35
     assert {
         file: (record["counts"], record["symbol_lines"], record["parsed"])
@@ -212,7 +212,7 @@ def test_the_pack_carries_the_measurement_the_owner_took_without_repeating_it(
         file: (measured.counts, measured.symbol_lines, measured.parsed)
         for file, measured in taken.per_file.items()
     }
-    assert pack["largest"]["measured"] == len(taken.largest.measured) == 10
+    assert pack["largest"]["measured"] == len(taken.largest.measured) == 11
     assert pack["largest"]["shown"] == 3 < pack["largest"]["measured"]
     assert [(record["file"], record["name"], record["size"]) for record in pack["largest"]["ranking"]] == [
         (symbol.span.file, symbol.span.name, symbol.size) for symbol in taken.largest.largest
@@ -228,7 +228,7 @@ def test_the_pack_carries_the_measurement_the_owner_took_without_repeating_it(
     assert len(separate.measured) == pack["largest"]["measured"]
 
     # Assert: every measured symbol keeps its range in the pack, so a top-N cut hides nothing
-    assert pack["ranges"]["listed"] == pack["largest"]["measured"] == 10
+    assert pack["ranges"]["listed"] == pack["largest"]["measured"] == 11
     assert {(record["file"], record["name"], tuple(record["lines"])) for record in _listed(pack)} == {
         (symbol.span.file, symbol.span.name, (symbol.span.start, symbol.span.end))
         for symbol in taken.largest.measured
@@ -261,23 +261,23 @@ def test_a_limit_shortens_the_ranking_shown_never_the_count(tmp_path: Path) -> N
     top = create_statistics_pack(root, (), tmp_path / "top", limit=2, index=index)
 
     # Assert: the same files measured twice, so only what is shown may differ
-    assert top["counts"]["totals"] == whole["counts"]["totals"] == {"function": 14, "class": 2}
+    assert top["counts"]["totals"] == whole["counts"]["totals"] == {"function": 15, "class": 2}
     assert top["counts"]["symbol_lines"] == whole["counts"]["symbol_lines"] == 31
     assert top["options"]["limit"] == 2 and whole["options"]["limit"] is None
-    assert top["largest"]["measured"] == whole["largest"]["measured"] == 7
+    assert top["largest"]["measured"] == whole["largest"]["measured"] == 8
     assert top["largest"]["shown"] == 2 < top["largest"]["measured"]
-    assert whole["largest"]["shown"] == whole["largest"]["measured"] == 7
+    assert whole["largest"]["shown"] == whole["largest"]["measured"] == 8
     assert top["largest"]["truncated"] is True and whole["largest"]["truncated"] is False
     assert top["largest"]["complete"] is False and whole["largest"]["complete"] is True
-    assert top["ranges"]["listed"] == top["largest"]["measured"] == 7
+    assert top["ranges"]["listed"] == top["largest"]["measured"] == 8
     assert top["ranges"]["per_file"]["web/ties.ts"]
 
     # Assert: the shorter ranking says how short it is, in both files, and lists what it left out
-    assert "only 2 of 7 measured symbols are shown" in top["largest"]["caveat"]
+    assert "only 2 of 8 measured symbols are shown" in top["largest"]["caveat"]
     assert whole["largest"]["caveat"] == ""
     assert "only the 2 widest" in (tmp_path / "top" / "statistics.md").read_text()
     assert "all measured symbols" in (tmp_path / "whole" / "statistics.md").read_text()
-    assert "Measured 7 symbols and shows only 2" in (tmp_path / "top" / "statistics.md").read_text()
+    assert "Measured 8 symbols and shows only 2" in (tmp_path / "top" / "statistics.md").read_text()
     assert "could hold a narrower symbol of its own" in (tmp_path / "top" / "statistics.md").read_text()
 
 
@@ -293,16 +293,17 @@ def test_held_functions_are_measured_beside_the_symbol_holding_them(tmp_path: Pa
     # Assert: top-level ranking excludes methods and nested functions, not whole files
     assert files["options"]["held"] is False and every["options"]["held"] is True
     assert all(record["held"] is False for record in files["largest"]["ranking"])
-    assert files["largest"]["measured"] == 7 and every["largest"]["measured"] == 16
+    assert files["largest"]["measured"] == 8 and every["largest"]["measured"] == 17
 
     # Assert: comparing symbol against symbol measures every symbol, holder and held together, so a
     # container is never ranked above a symbol inside it while hiding that symbol from the pack.
-    assert sum(every["counts"]["totals"].values()) == every["largest"]["measured"] == 16
+    assert sum(every["counts"]["totals"].values()) == every["largest"]["measured"] == 17
     assert {(record["file"], record["name"]) for record in files["largest"]["ranking"]} == {
         ("app/basket.py", "Basket"),
         ("app/basket.py", "standalone"),
         ("web/cart.ts", "Cart"),
         ("web/cart.ts", "sum"),
+        ("web/cart.ts", "<anonymous>"),
         ("web/cart.ts", "scale"),
         ("web/ties.ts", "pickOne"),
         ("web/ties.ts", "pickTwo"),

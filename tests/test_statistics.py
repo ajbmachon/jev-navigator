@@ -163,12 +163,13 @@ def test_the_widest_function_is_shown_with_its_inclusive_line_range(tmp_path: Pa
         ("add", 3),
         ("total", 3),
         ("<anonymous>", 1),
+        ("<anonymous>", 1),
         ("sum", 1),
         ("twice", 1),
     ]
     assert ranking.largest == ranking.measured
     assert ranking.caveat == "" and ranking.complete
-    assert stats.count_symbols(index, ("web/cart.ts",)).total == {"function": 6, "class": 1}
+    assert stats.count_symbols(index, ("web/cart.ts",)).total == {"function": 7, "class": 1}
 
 
 def test_functions_of_equal_size_are_all_kept(tmp_path: Path) -> None:
@@ -346,7 +347,7 @@ def test_a_scope_the_caller_names_is_measured_as_it_was_given(tmp_path: Path) ->
     # Assert: a repeated path is measured once, and nothing outside the named scope is measured.
     assert stats.scope_of(index, ("web/cart.ts", "web/cart.ts")) == ("web/cart.ts",)
     assert list(one_file.per_file) == ["web/cart.ts"]
-    assert one_file.total == {"function": 6, "class": 1}
+    assert one_file.total == {"function": 7, "class": 1}
     assert one_file.complete and one_file.caveat == ""
 
 
@@ -356,12 +357,12 @@ def test_a_limit_shortens_the_shown_ranking_never_the_measurement(tmp_path: Path
     # Act
     capped = stats.count_symbols(index, largest_of=3)
 
-    # Assert: three of the twelve measured symbols are shown, all twelve were still measured, and
+    # Assert: three of the thirteen measured symbols are shown, all thirteen were still measured, and
     # the ranking admits that what it left out could hold a narrower symbol.
-    assert len(capped.largest.largest) == 3 and len(capped.largest.measured) == 12
+    assert len(capped.largest.largest) == 3 and len(capped.largest.measured) == 13
     assert [symbol.size for symbol in capped.largest.largest] == [11, 8, 5]
     assert capped.largest.truncated and capped.largest.complete is False
-    assert "only 3 of 12 measured symbols are shown" in capped.largest.caveat
+    assert "only 3 of 13 measured symbols are shown" in capped.largest.caveat
     assert capped.complete and capped.caveat == ""  # the count itself saw the whole scope
 
 
@@ -387,7 +388,7 @@ def test_the_whole_scope_is_measured_in_one_parser_pass(tmp_path: Path) -> None:
     # and not once per symbol or once per file.
     assert seen == [("facts", "started", 5), ("facts", "completed", 5)]
     assert index.parser_scans_completed == ("facts",) and index.parser_scans_pending == ()
-    assert len(counts.largest.measured) == 19 and len(counts.largest.largest) == 19
+    assert len(counts.largest.measured) == 20 and len(counts.largest.largest) == 20
 
 
 def test_source_behind_a_measurement_is_read_through_the_index(tmp_path: Path) -> None:

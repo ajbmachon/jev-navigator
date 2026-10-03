@@ -141,15 +141,12 @@ def _structure_from_matches(files, lines_of, unparsed, matches):
             # symbols it did keep are still matched below.
             unparsed.add("facts", [file])
             continue
-        first_line = lines_of(file)[start - 1]
+        lines = lines_of(file)
         if match["ruleId"] == "declaration":
-            declarations[file].add(Span(file, start, end, declared_name(first_line)))
+            declarations[file].add(Span(file, start, end, declared_name(lines[start - 1])))
         else:
             target = functions if match["ruleId"] == "function" else classes
-            # The matched node's own text names the symbol even when the physical line opens with
-            # another declaration's head: a method on a one-line class shares the line `class Box`
-            # opens, and naming it from that line would collapse it into the class's span.
-            target[file].add(Span(file, start, end, function_name(match["text"], first_line)))
+            target[file].add(Span(file, start, end, _symbol_name(match, lines, start)))
     return {
         file: FileStructure(
             _ordered(functions[file]),
@@ -158,6 +155,14 @@ def _structure_from_matches(files, lines_of, unparsed, matches):
         )
         for file in files
     }
+
+
+def _symbol_name(match: dict, lines: Sequence[str], start: int) -> str:
+    """Only code before the node may name it: on `class Box { v() {} }` the method keeps its own name
+    instead of collapsing into the class's span."""
+    before_node = lines[start - 1][: match["range"]["start"]["column"]]
+    line_before = lines[start - 2] if start > 1 else ""
+    return function_name(match["text"], before_node, line_before)
 
 
 def _calls_from_matches(matches) -> tuple[CallMatch, ...]:
@@ -284,7 +289,8 @@ def _languages(files: Sequence[str]) -> list[str]:
 
 
 def _ordered(spans: set[Span]) -> tuple[Span, ...]:
-    return tuple(sorted(spans, key=lambda span: (span.start, -span.end)))
+    """Outer spans before the spans they hold; the name orders spans on the same lines."""
+    return tuple(sorted(spans, key=lambda span: (span.start, -span.end, span.name)))
 
 
 def _line_of(match: dict) -> int:

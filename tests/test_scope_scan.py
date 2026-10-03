@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -310,6 +313,170 @@ def test_a_method_on_a_one_line_class_is_named_and_counted_itself(tmp_path: Path
     # Act and assert
     assert [(span.name, span.start, span.end) for span in index.functions_in("src/box.ts")] == [("v", 1, 1)]
     assert {span.name for span in index.symbols_in("src/box.ts")} == {"Box", "v"}
+
+
+# parse-server's PostgresStorageAdapter.createObject (f7b91ad), cut down: its body declares
+# `const promise = (`, which must not name the method.
+POSTGRES_CREATE_OBJECT = """\
+// @flow
+export class PostgresStorageAdapter implements StorageAdapter {
+  async createObject(
+    className: string,
+    object: any,
+    transactionalSession: ?any
+  ) {
+    const qs = `INSERT INTO $1:name VALUES ($2:raw)`;
+    const promise = (transactionalSession ? transactionalSession.t : this._client)
+      .none(qs, [className, object])
+      .then(() => ({ ops: [object] }));
+    return promise;
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "named"),
+    [
+        pytest.param(
+            "src/postgres.js",
+            POSTGRES_CREATE_OBJECT,
+            [("createObject", 3, 13), ("<anonymous>", 11, 11)],
+            id="a constant declared in the body",
+        ),
+        pytest.param(
+            "src/store.js",
+            "export class Store {\n  save(row) {\n    function encode(value) {\n"
+            "      return JSON.stringify(value);\n    }\n    return encode(row);\n  }\n}\n",
+            [("save", 2, 7), ("encode", 3, 5)],
+            id="a function declared in the body",
+        ),
+        pytest.param(
+            "src/routes.js",
+            "module.exports.register = function (app) {\n  const route = (req) => req;\n"
+            "  app.get('/x', route);\n};\n",
+            [("register", 1, 4), ("route", 2, 2)],
+            id="an assignment before the function",
+        ),
+        pytest.param(
+            "src/orders.test.ts",
+            'describe("orders", () => {\n  it("places an order", async () => {\n'
+            "    expect(placeOrder()).toBe(1);\n  });\n});\n",
+            [("<anonymous>", 1, 5), ("<anonymous>", 2, 4)],
+            id="a callback passed to a call",
+        ),
+        pytest.param(
+            "src/cart.ts",
+            "export const sum = (xs) => xs.reduce((a, b) => a + b, 0);\n",
+            [("sum", 1, 1), ("<anonymous>", 1, 1)],
+            id="a callback on its declaration's line",
+        ),
+        pytest.param(
+            "src/csrf.ts",
+            "const originHandler: OriginHandler = ((origin) => {\n  return origin;\n}) as OriginHandler;\n",
+            [("originHandler", 1, 3)],
+            id="a parenthesised function value",
+        ),
+        pytest.param(
+            "src/render.ts",
+            "export const createRenderer =\n  (options) => {\n    return options;\n  };\n",
+            [("createRenderer", 2, 4)],
+            id="a binding that ends the line before",
+        ),
+        pytest.param(
+            "src/components.ts",
+            "export const button: (props: PropsWithChildren) => unknown = (props) =>\n  props;\n",
+            [("button", 1, 2)],
+            id="a declaration typed as a function",
+        ),
+        pytest.param(
+            "src/defaults.ts",
+            "function serve(app: App, onError = (error) => error) {\n  return onError;\n}\n",
+            [("serve", 1, 3), ("onError", 1, 1)],
+            id="a default parameter after a typed parameter",
+        ),
+        pytest.param(
+            "src/hono.ts",
+            "export class Hono {\n  route<\n    SubPath extends string,\n  >(path: SubPath): this {\n"
+            "    return this;\n  }\n}\n",
+            [("route", 2, 6)],
+            id="a method whose type parameters span lines",
+        ),
+        pytest.param(
+            "src/head.ts",
+            "const insertIntoHead: (\n  tag: string\n) => HtmlEscapedCallback =\n  (tag) => tag;\n",
+            [("<anonymous>", 4, 4)],
+            id="a type on the line before names nothing",
+        ),
+    ],
+)
+def test_a_function_is_named_by_its_own_head_or_the_binding_before_it_never_by_its_body(
+    tmp_path: Path, file: str, source: str, named: list[tuple[str, int, int]]
+) -> None:
+    # Arrange
+    index = committed(tmp_path, {file: source})
+
+    # Act
+    functions = index.functions_in(file)
+
+    # Assert
+    assert sorted((span.name, span.start, span.end) for span in functions) == sorted(named)
+
+
+def test_a_method_whose_body_declares_a_constant_is_found_by_its_own_name(tmp_path: Path) -> None:
+    # Arrange
+    index = committed(tmp_path, {"src/postgres.js": POSTGRES_CREATE_OBJECT})
+
+    # Act
+    method = index.find_definition("createObject")
+    constant = index.find_definition("promise")
+
+    # Assert
+    assert method == (Span("src/postgres.js", 3, 13, "createObject"),)
+    assert constant == ()
+
+
+def test_an_export_is_named_by_its_declaration_not_by_a_function_inside_it(tmp_path: Path) -> None:
+    # Arrange
+    index = committed(
+        tmp_path,
+        {"src/config.ts": "export const config = {\n  handler: async (event) => event,\n};\n"},
+    )
+
+    # Act
+    facts = index._facts_in("src/config.ts")
+
+    # Assert
+    assert facts.export_names == ("config",)
+
+
+_LIST_FUNCTIONS = (
+    "import sys\n"
+    "from pathlib import Path\n"
+    "from jev_navigator.index.code_index import CodeIndex\n"
+    "index = CodeIndex(Path(sys.argv[1]), ['cart.ts'], fact_cache_dir=Path(sys.argv[2]))\n"
+    "print([span.name for span in index.functions_in('cart.ts')])\n"
+)
+
+
+def test_functions_on_the_same_lines_are_listed_in_one_order_whatever_the_hash_seed(tmp_path: Path) -> None:
+    # Arrange: two functions span line 1 alone; each process scans cold, with its own string hashing.
+    (tmp_path / "cart.ts").write_text("export const sum = (xs) => xs.reduce((a, b) => a + b, 0);\n")
+
+    # Act
+    orders = {
+        subprocess.run(
+            [sys.executable, "-c", _LIST_FUNCTIONS, str(tmp_path), str(tmp_path / f"facts-{seed}")],
+            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in range(8)
+    }
+
+    # Assert
+    assert orders == {"['<anonymous>', 'sum']\n"}
 
 
 def test_a_flow_typed_class_keeps_its_methods(tmp_path: Path) -> None:

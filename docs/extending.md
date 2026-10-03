@@ -228,9 +228,13 @@ text before any paid call.
 
 ### Parser facts and naming
 
-Function and class names come from the matched AST node, with the containing physical line used
-only when the node does not contain its binding name (for example an assigned anonymous function).
-This keeps a method on a one-line TypeScript class distinct from its enclosing class.
+A function or class is named by the start of its own first line (`def`, `class`, `function`, a
+method head). When that line names nothing, the code just before the node on its line names it
+(`x = `, `x: `, `const x = `, as for an assigned anonymous function). Nothing inside the body ever
+names it, and a call it is passed to names nothing: a callback stays `<anonymous>`. This keeps a
+method on a one-line TypeScript class distinct from its enclosing class, and a method whose body
+declares `const promise = (...)` named after itself. Spans covering the same lines are ordered by
+name, so the order does not depend on hashing.
 Persistent facts are keyed by source bytes, language, parser version and `FACT_RULE_VERSION`.
 A change to extracted facts must change that rule identity so existing cached results are reparsed.
 Name lookups reuse an in-memory index of parsed definitions, calls and references, including facts
