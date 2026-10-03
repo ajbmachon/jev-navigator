@@ -14,6 +14,7 @@ from types import MappingProxyType
 from ..index.bindings import Binding
 from ..index.code_index import CodeIndex
 from ..index.spans import CallEdge, CodeSlice, Span, TextHit
+from ..judgments.relations import key_mention
 
 MAX_DEFINITION_LINES = 120
 REST_OF_FILE_LINES = 40
@@ -395,7 +396,7 @@ def _keys_mentioned(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     usable = [(key, hits) for key, hits in hits_by_key.items() if 0 < len(hits) <= MAX_KEY_HITS]
     rarest_first = sorted(usable, key=lambda item: len(item[1]))
     return [
-        place_for_line(index, hit.file, hit.line, f"mentions `{key}`")
+        place_for_line(index, hit.file, hit.line, key_mention(key))
         for key, hits in rarest_first
         for hit in hits
     ]

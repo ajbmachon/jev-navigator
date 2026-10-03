@@ -63,7 +63,9 @@ Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer
 @dataclass(frozen=True)
 class JevResponse:
     """``input_tokens`` is what the provider reported for the request, ``None`` when it reported
-    nothing; a missing count is never 0."""
+    nothing; a missing count is never 0. It is ``None`` too for an answer replayed from a store
+    (``from_store``), which sent no request in this run, and for a response composed from several
+    requests; totals count only requests sent."""
 
     answers: Mapping[str, Answer]
     model: str
@@ -155,7 +157,3 @@ class TokenTotal:
             self.not_reported += 1
         else:
             self.reported += tokens
-
-    def complete_total(self) -> int | None:
-        """The total when every response reported its count, else ``None``."""
-        return self.reported if self.not_reported == 0 else None

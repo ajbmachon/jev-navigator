@@ -55,6 +55,7 @@ unlimited unless you set a limit.
 | `--prefix PATH` | Whole source inventory. Limit scope to a file or directory, relative to the search root. Repeat for multiple scopes. | `jvn find "the order limit" --prefix app/ --prefix tests/` |
 | `--start PATH:LINE` | Automatic entry selection. Start from a known caller or entry point; repeat for multiple starts. Lines are 1-based, paths are relative to the search root. | `jvn find "the order limit" --start app/orders.py:42 --start app/routes.py:18` |
 | `--out PATH` | A unique directory under `./jvn-results/`. Choose another new or empty directory. | `jvn find "the order limit" --out ./order-evidence` |
+| `--answer-store PATH` | `$JEV_NAVIGATOR_ANSWER_STORE`, else `~/.cache/jev-navigator/answers.sqlite` (provisional). The shared store every run reads and writes; a run prints `answer store: PATH` on stderr. Point an eval arm at a new file so it never replays another arm's answers. `find`, `findall` and `trace` accept it. | `jvn find "the order limit" --answer-store ./arm-a.sqlite` |
 | `--resume PATH` | Off. Continue a budget-stopped or cancelled evidence pack into a new output directory. | `jvn find "the order limit" --resume ./order-evidence` |
 | `--max-depth N` | Unlimited. Maximum relationship hops from the starting places; `0` opens only those places. | `jvn find "the order limit" --max-depth 3` |
 | `--max-steps N` | Unlimited. Maximum distinct code openings during navigation; entry selection is separate. | `jvn find "the order limit" --max-steps 8` |
@@ -187,6 +188,10 @@ Check the command's exit status before reading a result file:
 | `130` | Cancelled with Ctrl-C. Existing journal records remain available. |
 
 The evidence directory contains `report.md`, `manifest.json`, `journal.jsonl` and `answers.jsonl`.
+Every answer also goes to the shared answer store (see `--answer-store`), which holds no code; a later
+run at the same commit replays from it after one live request that learns the served model, and copies
+what it replays into its own `answers.jsonl`. Find All and Trace items carry the commit and file
+hashes, so a run on a new commit asks again.
 Budget-stopped and cancelled packs also contain `resume.json`.
 The manifest retains the full record even if a pipeline selects only a few output fields. Journal
 records preserve request/response evidence; inspect their exact-capture flags when auditing bytes.

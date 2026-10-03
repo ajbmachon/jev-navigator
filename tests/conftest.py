@@ -12,6 +12,7 @@ from git_repos import git, write_files
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
+from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
 
 ORDER_SERVICE = '''\
 from app.validation import validate_order
@@ -174,3 +175,10 @@ class BudgetedClient:
             (len(json.dumps(question, ensure_ascii=False)) for question in questions.values()), default=0
         )
         return len(json.dumps(state, ensure_ascii=False)) + longest
+
+
+@pytest.fixture(autouse=True)
+def isolated_shared_answer_store(tmp_path_factory, monkeypatch) -> None:
+    """Every test gets its own shared answer store, never the machine's real one."""
+    store = tmp_path_factory.mktemp("shared-answers") / "answers.sqlite"
+    monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))

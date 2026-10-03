@@ -180,8 +180,15 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   versioned code spans, raw probabilities, full search history, uninspected frontier, and unparsed
   files.
 - `report.md`: a readable outcome, source table, found code, and coverage caveat.
-- `journal.jsonl`: request hashes and exact provider responses as the run progresses.
-- `answers.jsonl`: reusable typed answers keyed by source and request hashes.
+- `journal.jsonl`: every masked request as sent (state, questions and body bytes, so it holds
+  code) and the exact provider responses, as the run progresses.
+- `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
+  written to the machine's shared answer store (`~/.cache/jev-navigator/answers.sqlite`, or
+  `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
+  same questions replays from it after one live request that learns the served model (Find All and
+  Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
+  `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
+  `--answer-store PATH` points a run at another store file; each run prints the store it uses.
 
 The manifest and report contain inspected source code. Keep packs for private repositories in a
 private artifact store; the repository includes only a small public-format sample under
@@ -371,10 +378,15 @@ budget, the journal and the recording are the same steps, and only the send diff
 or an awaited one). Batches of `check_each_async` and the places of each `find_code_async` round are
 sent with `asyncio.gather` — except that the first batch of a `check_each_async` whose served model
 is still unknown and which has an answer store goes out alone. Its live answer pins the served model,
-so the remaining batches can replay from the store exactly as the sequential path does. A sync method given an async client
-raises `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
+so the remaining batches can replay from the store. The sync `check_each`, `check_every` and their
+`iter_` forms send their batches on a thread pool, at most `Judge(max_concurrency=N)` at once
+(default 16), with the same first-batch rule; the `iter_` forms yield each batch as it completes. The
+call cap stays exact under concurrency, and after a failure or cancellation no batch sends a new
+request, while answers already received still yield. A sync method given an async client raises
+`TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
 
-Budgets: `judge.calls` counts requests sent (store hits are free). `Judge(max_calls=N)` caps a judge
+Budgets: `judge.calls` counts requests sent (store hits are free; `judge.replayed_answers` counts
+the answers the store gave instead). `Judge(max_calls=N)` caps a judge
 together with every `judge.scope()` made from it, and a scope counts its own calls; `find_code` runs
 on its own scope, so searches sharing one judge never use up each other's budget.
 
@@ -390,16 +402,31 @@ on its own scope, so searches sharing one judge never use up each other's budget
 - **Secrets.** `SecretMasker` masks private keys, token shapes, secret-named assignments and
   high-entropy assignments in every request, by content: a value hidden in one place is hidden
   everywhere in the request, for example where a relation text or another candidate quotes it.
-  The complete candidate set is masked before packing, so copied values stay hidden across batches.
+  The complete candidate set is masked once, before packing, so copied values stay hidden across
+  batches; the final scan still runs on every request before it is sent.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
   left in a key is refused too. Both are on by default; a host passes its own (a masker offers
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
-- **Answer store.** Every answer is stored with the served model and the thresholds in force. An
-  item answer is reused only when the item, the shared state, the question with its wording hash and
-  the served model all match; until the first live answer of a run the served model is unknown, and
+- **Batches.** A batched request carries at most `Judge(items_per_request=N)` items (default 16)
+  and closes early when the next item would not fit the size budget. Batches form over every item in
+  an order fixed by each unit's file and lines (by content for an item without them), so the same
+  units form the same batches whatever order a caller passes them in, and a request carries all
+  its batch mates even when some of their questions were answered before.
+- **Answer store.** Every answer is stored with the served model and the thresholds in force. Jev's
+  answer about one item changes with the other items in its request, so an item answer is reused
+  only when the item, its batch mates, the shared state, the question with its wording hash and the
+  served model all match. A route's refusal of an exact request for its input size is stored too, so
+  a replay splits that request again without sending it; until the first live answer of a run the served model is unknown, and
   unknown counts as a miss (or pass `served_model=`); with a store, a first `check_each_async` then sends its
   first batch alone, and the batches after that answer replay as usual. `ReplayOnlyClient` replays
   from the store and never calls Jev.
+  `JsonlAnswerStore` is one run's pack. `SqliteAnswerStore(path)` is one insert-only store shared by
+  every run on a machine, so a repeated run at the same commit asks nothing again but the request
+  that learns the served model. It never holds
+  code, state or question text: only hashes, unit locations, batch member ids, the batching rule and
+  size, the model, raw answers and timestamps. Its location and retention (no expiry) are provisional;
+  `LayeredAnswerStore(pack, shared)` reads the pack first, copies every answer it finds only in the
+  shared store into the pack, and writes new answers to both, so the pack alone still replays the run.
 - **Journal, separate from the store.** Pass `journal=` (any object with `record_request(request) ->
   request_id`, `record_response(request_id, response)` and `record_failure(request_id, error,
   response)`). The judge records the masked request before dispatch and the raw response before

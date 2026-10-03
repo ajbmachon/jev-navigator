@@ -22,6 +22,7 @@ from jev_navigator.directives.places import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
+from jev_navigator.judgments.relations import key_mention
 
 
 def committed_index(root: Path, files: Mapping[str, str]) -> CodeIndex:
@@ -148,7 +149,7 @@ def test_quoted_keys_are_searched_across_the_scope_including_docs_and_config(tmp
     mentions = {
         key.split(":")[0]
         for key, signature in offered.items()
-        if "mentions `max_items_per_order`" in signature
+        if key_mention("max_items_per_order") in signature
     }
     assert mentions == {"config.yaml", "README.md"}
 
@@ -169,7 +170,7 @@ def test_a_quoted_key_matches_whole_names_only(tmp_path: Path) -> None:
 
     # Assert
     mentions = {
-        key.split(":")[0] for key, signature in offered.items() if "mentions `invoice_day`" in signature
+        key.split(":")[0] for key, signature in offered.items() if key_mention("invoice_day") in signature
     }
     assert mentions == {"config.yaml"}
 

@@ -13,7 +13,7 @@ from jev_navigator.directives.trace import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
-from jev_navigator.judgments.client import MAX_REQUEST_CHARS
+from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS, MAX_REQUEST_CHARS
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
@@ -252,9 +252,9 @@ def test_trace_requires_a_concrete_start_instead_of_inventing_one(tmp_path: Path
 
 
 def _bulky_workflow_index(root: Path) -> CodeIndex:
-    """The same real workflow with bodies long enough to force several Judge batches."""
+    """The same real workflow with bodies too long for two to share a Judge batch."""
     _workflow_index(root)
-    bulk = "x" * 30_000
+    bulk = "x" * (JEV_INPUT_BOX_CHARS * 3 // 5)
     for path in sorted(root.glob("*.py")):
         path.write_text(path.read_text().replace("):\n", f"):\n    bulk = '{bulk}'\n"))
     return CodeIndex.from_directory(root)

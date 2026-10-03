@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,6 +28,12 @@ from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
 from jev_navigator.testing import ScriptedJevClient
+
+
+def _asked_item(question_id: str, state: dict) -> str:
+    """The code of the item a batched question asks about, so scripts answer by content, not slot."""
+    return state["items"][int(question_id.split("#")[1])]["code"]
+
 
 DESCRIBES = Check(
     name="describes",
@@ -97,9 +104,12 @@ def test_invalid_thresholds_are_rejected(overrides: dict) -> None:
 
 def test_check_each_batches_items_into_one_request_with_three_way_verdicts() -> None:
     # Arrange
-    client = ScriptedJevClient(nouls={"describes#0": 0.95, "describes#1": 0.5, "describes#2": 0.05})
+    by_code = {"def a(): ...": 0.95, "def b(): ...": 0.5, "def c(): ...": 0.05}
+    client = ScriptedJevClient(
+        nouls=lambda question_id, _question, state: by_code[_asked_item(question_id, state)]
+    )
     judge = Judge(client)
-    items = [{"code": "def a(): ..."}, {"code": "def b(): ..."}, {"code": "def c(): ..."}]
+    items = [{"code": code} for code in by_code]
 
     # Act
     results = judge.check_each(DESCRIBES, items, {"doc": {"sentence": "a validates orders"}})
@@ -114,22 +124,24 @@ def test_check_each_batches_items_into_one_request_with_three_way_verdicts() -> 
     )
 
 
-def test_items_judged_before_are_answered_from_the_store(tmp_path: Path) -> None:
+def test_items_judged_before_with_the_same_batch_mates_are_answered_from_the_store(tmp_path: Path) -> None:
     # Arrange
     store = JsonlAnswerStore(tmp_path / "answers.jsonl")
-    first_client = ScriptedJevClient(nouls={"describes": 0.9})
-    Judge(first_client, store=store).check_each(DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "s"}})
+    items = [{"code": "x = 1"}, {"code": "y = 2"}]
+    Judge(ScriptedJevClient(nouls={"describes": 0.9}), store=store).check_each(
+        DESCRIBES, items, {"doc": {"sentence": "s"}}
+    )
     second_client = ScriptedJevClient(nouls={"describes": 0.1})
     second = Judge(
         second_client, store=JsonlAnswerStore(tmp_path / "answers.jsonl"), served_model="jev-scripted"
     )
 
     # Act
-    results = second.check_each(DESCRIBES, [{"code": "x = 1"}, {"code": "y = 2"}], {"doc": {"sentence": "s"}})
+    results = second.check_each(DESCRIBES, items, {"doc": {"sentence": "s"}})
 
     # Assert
-    assert [(result.probability, result.from_store) for result in results] == [(0.9, True), (0.1, False)]
-    assert len(second_client.requests) == 1
+    assert [(result.probability, result.from_store) for result in results] == [(0.9, True), (0.9, True)]
+    assert second_client.requests == []
 
 
 def test_independent_checks_share_a_request_and_reuse_only_the_matching_cached_answers(
@@ -145,24 +157,23 @@ def test_independent_checks_share_a_request_and_reuse_only_the_matching_cached_a
         Criterion("It does not change a value."),
     )
     Judge(ScriptedJevClient(nouls={"describes": 0.9}), store=JsonlAnswerStore(path)).check_each(
-        DESCRIBES, items[:1], shared
+        DESCRIBES, items, shared
     )
-    client = ScriptedJevClient(nouls={"describes": 0.1, "changes#0": 0.5, "changes#1": 0.95})
+    changes_by_code = {"x = 1": 0.5, "y = 2": 0.95}
+    client = ScriptedJevClient(
+        nouls=lambda question_id, _question, state: changes_by_code[_asked_item(question_id, state)]
+    )
     judge = Judge(client, store=JsonlAnswerStore(path), served_model="jev-scripted")
 
     results = judge.check_every([DESCRIBES, changes], items, shared)
 
     assert len(client.requests) == 1
     state, questions = client.requests[0]
-    assert state["items"] == items
-    assert set(questions) == {
-        f"{DESCRIBES.question_id}#1",
-        f"{changes.question_id}#0",
-        f"{changes.question_id}#1",
-    }
+    assert sorted(item["code"] for item in state["items"]) == ["x = 1", "y = 2"]
+    assert set(questions) == {f"{changes.question_id}#0", f"{changes.question_id}#1"}
     assert [(r.item, r.probability, r.from_store) for r in results["describes"]] == [
         (items[0], 0.9, True),
-        (items[1], 0.1, False),
+        (items[1], 0.9, True),
     ]
     assert [r.verdict for r in results["changes"]] == [NoulVerdict.UNSURE, NoulVerdict.YES]
 
@@ -342,6 +353,42 @@ def test_a_value_masked_in_one_item_is_masked_in_the_other_items_of_its_batch() 
     # Assert
     sent_items = client.requests[0][0]["items"]
     assert [item["code"] for item in sent_items] == ['WEBHOOK_TOKEN = "[MASKED]"', 'post("[MASKED]", order)']
+
+
+class CountingMasker(SecretMasker):
+    """The built-in masker, counting how often each text is masked."""
+
+    def __init__(self) -> None:
+        self.masked: Counter[str] = Counter()
+
+    def mask(self, text: str) -> str:
+        self.masked[text] += 1
+        return super().mask(text)
+
+
+def test_each_item_is_masked_once_per_judging_call_across_several_batches() -> None:
+    # Arrange
+    masker = CountingMasker()
+    client = ScriptedJevClient()
+    items = [{"code": f"def part{index}():\n    return {index}"} for index in range(4)]
+
+    # Act
+    Judge(client, masker=masker, items_per_request=1).check_each(DESCRIBES, items, {"doc": {"sentence": "s"}})
+
+    # Assert
+    assert len(client.requests) > 1
+    assert [masker.masked[item["code"]] for item in items] == [1, 1, 1, 1]
+
+
+def test_the_final_scan_refuses_a_secret_that_masking_cannot_reach_on_the_batch_path() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    items = [{"code": "x = 1"}, {"code": "y = 2", f"ghp_{'c3' * 18}": "key text is never masked"}]
+
+    # Act and assert
+    with pytest.raises(SecretInRequestError):
+        Judge(client).check_each(DESCRIBES, items, {"doc": {"sentence": "s"}})
+    assert client.requests == []
 
 
 def test_the_final_scan_refuses_a_masked_value_that_is_also_a_state_key() -> None:
@@ -566,16 +613,18 @@ def test_a_response_without_usage_is_reported_as_not_reported_and_never_added_as
     assert [response.input_tokens for response in answered] == [10, None, 0]
     assert judge.input_total.reported == 10
     assert judge.input_total.not_reported == 1
-    assert judge.input_total.complete_total() is None
 
 
-def test_a_total_with_every_response_reported_is_complete() -> None:
+def test_a_reported_zero_counts_as_reported_not_missing() -> None:
+    # Arrange
     judge = Judge(_UsageClient(10, 0))
 
+    # Act
     for index in range(2):
         judge.ask({"s": index}, {"q": {"type": "noul"}}, thresholds=Thresholds())
 
-    assert judge.input_total.complete_total() == 10
+    # Assert
+    assert (judge.input_total.reported, judge.input_total.not_reported) == (10, 0)
 
 
 def test_a_scoped_judge_adds_unreported_responses_to_its_parent() -> None:
@@ -655,14 +704,12 @@ def _padding_item(label: str, chars: int) -> dict:
     return {"file": f"{label}.py", "lines": [1, 2], "code": f"def {label}():\n    {'y' * chars}"}
 
 
-def test_oversized_batch_is_split_before_sending_so_no_request_exceeds_the_input_budget() -> None:
+def test_items_that_would_overflow_one_request_are_packed_so_no_request_exceeds_the_input_budget() -> None:
     client = BudgetedClient(MAX_REQUEST_CHARS)
     judge = Judge(client)
     items = [_padding_item(f"part{index}", 28_000) for index in range(4)]
 
-    results = judge.check_every(
-        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=200_000
-    )
+    results = judge.check_every([DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts")
 
     assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
     assert client.refusals == 0, "a request the measurement already rejects must not be paid for"
@@ -682,9 +729,7 @@ def _boxed_client() -> BudgetedClient:
 
 def _judge_padded_parts(client: BudgetedClient, count: int, chars: int):
     items = [_padding_item(f"part{index}", chars) for index in range(count)]
-    return Judge(client).check_every(
-        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=500_000
-    )
+    return Judge(client).check_every([DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts")
 
 
 def test_a_state_just_under_the_character_box_is_sent_unsplit() -> None:
@@ -814,3 +859,23 @@ def test_input_budget_error_is_typed_from_the_provider_report_without_the_sdk() 
     assert isinstance(input_budget_error(ProviderError()), InputBudgetExceededError)
     assert input_budget_error(OtherProviderError()) is None
     assert input_budget_error(TypeError("no status at all")) is None
+
+
+def test_a_secret_in_check_wording_is_masked_once_per_plan_and_the_request_still_goes(tmp_path: Path) -> None:
+    # Arrange
+    token = f"ghp_{'d4' * 18}"
+    wording = f"Does `{{item}}.code` use the token {token}?"
+    leaky = Check("leaky", wording, Criterion("Yes."), Criterion("No."))
+    masker = CountingMasker()
+    client = ScriptedJevClient()
+    items = [{"file": f"f{index}.py", "code": f"v = {index}"} for index in range(3)]
+
+    # Act
+    Judge(client, masker=masker, items_per_request=1).check_each(leaky, items, {"doc": {"sentence": "s"}})
+
+    # Assert
+    sent = json.dumps(client.requests)
+    assert len(client.requests) == 3
+    assert token not in sent and "[MASKED]" in sent
+    wording_masks = sum(count for text, count in masker.masked.items() if token in text)
+    assert wording_masks == 1, "every request here asks at slot 0, so its wording is masked once"

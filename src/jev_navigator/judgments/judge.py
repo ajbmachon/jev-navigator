@@ -11,10 +11,10 @@ import asyncio
 import base64
 import copy
 import inspect
-import json
 import logging
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
@@ -52,7 +52,15 @@ from .thresholds import NoulVerdict, Thresholds
 
 logger = logging.getLogger(__name__)
 
-MAX_STATE_CHARS = 60_000
+DEFAULT_ITEMS_PER_REQUEST = 16
+"""How many items one batched request carries at most (André, 03.10.2026: measured on the code-index
+set, 16 per request kept accuracy and cost about half the tokens of one per request)."""
+BATCHING_RULE = "unit-place-order-count-and-box-v1"
+"""How batches form: units in file-and-lines order, closed at ``items_per_request`` items or at the
+character box. Recorded on every stored answer; the batch membership hash in the item key already
+tells two batches apart."""
+DEFAULT_MAX_CONCURRENCY = 16
+"""How many batches of one synchronous judging call are in flight at once."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
@@ -148,9 +156,12 @@ class CallDecision:
 
 
 class Judge:
-    """``calls`` counts requests sent (store hits are free). ``scope()`` gives one caller, such as a
+    """``calls`` counts requests sent (store hits are free); ``replayed_answers`` counts the answers
+    the store gave instead. ``scope()`` gives one caller, such as a
     single search, its own counter on the same client, store and journal; every scope adds its calls
-    to its parent, and ``max_calls`` caps a judge together with all of its scopes."""
+    to its parent, and ``max_calls`` caps a judge together with all of its scopes.
+    ``items_per_request`` caps the items of one batched request, and ``max_concurrency`` bounds how
+    many batches of one synchronous judging call are in flight."""
 
     def __init__(
         self,
@@ -163,6 +174,8 @@ class Judge:
         served_model: str | None = None,
         journal: Journal | None = None,
         max_calls: int | None = None,
+        items_per_request: int = DEFAULT_ITEMS_PER_REQUEST,
+        max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
     ) -> None:
         self.client = client
         self.masker = masker
@@ -172,7 +185,10 @@ class Judge:
         self.served_model = served_model
         self.journal = journal
         self.max_calls = max_calls
+        self.items_per_request = items_per_request
+        self.max_concurrency = max_concurrency
         self.calls = 0
+        self.replayed_answers = 0
         self.input_total = TokenTotal()
         self._parent: Judge | None = None
         self._bookkeeping = threading.Lock()
@@ -181,6 +197,7 @@ class Judge:
         child = copy.copy(self)
         child.max_calls = None
         child.calls = 0
+        child.replayed_answers = 0
         child.input_total = TokenTotal()
         child._parent = self
         return child
@@ -195,6 +212,21 @@ class Judge:
         cancel = getattr(self.client, "cancel", None)
         if cancel is not None:
             cancel()
+
+    def abort_sends(self, futures: Sequence[Future]) -> None:
+        """What a caller interrupt does to one step's concurrent requests: the client aborts those in
+        flight, those not started never start, and this returns once every one has settled. Only an
+        interrupt calls it. A client's cancel is permanent (``TypeSafeJevClient`` refuses every later
+        request once cancelled), so cancelling on an ordinary failure, such as a reached call cap,
+        would fail the rest of the run and discard answers already paid for; an ordinary failure
+        instead lets the requests in flight settle and keeps their answers. Known and accepted: a
+        Ctrl-C that lands while a caller handles a yielded answer closes the batch generator, which
+        cannot tell it from an ordinary early stop, so the requests in flight finish first and only
+        the exit is delayed."""
+        self.cancel()
+        for future in futures:
+            future.cancel()
+        wait(futures)
 
     def effective(self, *overrides: Mapping[str, float] | None) -> Thresholds:
         thresholds = self.thresholds
@@ -225,20 +257,21 @@ class Judge:
         *,
         list_name: str = "items",
         thresholds: Thresholds | None = None,
-        batch_budget: int | None = None,
     ) -> Mapping[str, list[CheckResult]]:
         """Every check asked about every item, in as few requests as the size budget allows.
 
         Independent checks about the same items travel together: one request per batch that fits,
         each carrying every check for every item in it, instead of one round trip per check over the
-        whole list. A batch the provider would refuse for its input size is split by item and the
-        halves measured again, so every request sent fits the measured input budget. Items already
-        judged by the same question and model come from the store.
+        whole list. Batches hold at most ``items_per_request`` items and form in a stable item order,
+        so the same items always form the same batches; an item's stored answer is reused only
+        with the same batch mates. Batches are sent concurrently, up to ``max_concurrency`` at once.
+        A batch the provider would refuse for its input size is split by item and the halves
+        measured again, so every request sent fits the measured input budget. Items already judged
+        by the same question and model, in the same batch, come from the store.
         """
-        plan = self._check_plan(checks, items, shared, list_name, thresholds, batch_budget)
-        for batch in plan.batches:
-            for sub_batch, response in self._send_positions(plan, sorted(set(batch.slots.values()))):
-                plan.answer(sub_batch, response)
+        plan = self._check_plan(checks, items, shared, list_name, thresholds)
+        for sub_batch, response in self._answered_batches(plan):
+            plan.answer(sub_batch, response)
         return plan.answers()
 
     def iter_check_each(
@@ -272,28 +305,25 @@ class Judge:
     ) -> Iterator[tuple[str, CheckResult]]:
         """Every check asked about every item, yielded per answered question as batches complete.
 
-        The streaming form of ``check_every``: it uses the same packing, splitting and cache, yields
-        each result under the name of the check that asked for it, and yields cached answers before the
-        first batch so store hits consume no live call. A call-cap failure, or a provider input-budget
-        refusal that no split can answer, still raises after earlier results yield, so a caller keeps
-        every answered batch.
+        The streaming form of ``check_every``: it uses the same packing, splitting, concurrency and
+        cache, yields each result under the name of the check that asked for it as its batch
+        completes, and yields cached answers before the first batch so store hits consume no live
+        call. A call-cap failure, or a provider input-budget refusal that no split can answer, still
+        raises after every answered batch has yielded, so a caller keeps them all.
         Cancellation is checked before each live request, including between split halves; cached and
-        already answered results still
-        yield in full. It does not cancel a request already in flight.
+        already answered results still yield in full. It does not cancel a request already in flight.
         """
         plan = self._check_plan(checks, items, shared, list_name, thresholds)
         names = {check.question_id: check.name for check in checks}
         for (position, question_id), answer in sorted(plan.answered.items()):
             yield names[question_id], plan.result(position, answer)
-        for batch in plan.batches:
-            sent = self._send_positions(plan, sorted(set(batch.slots.values())), cancelled=cancelled)
-            for sub_batch, response in sent:
-                plan.answer(sub_batch, response)
-                for question_id, position in sorted(sub_batch.slots.items(), key=lambda slot: slot[1]):
-                    yield (
-                        names[question_id.split("#", 1)[0]],
-                        plan.result(position, plan.answered[(position, question_id)]),
-                    )
+        for sub_batch, response in self._answered_batches(plan, cancelled):
+            plan.answer(sub_batch, response)
+            for question_id, position in sorted(sub_batch.slots.items(), key=lambda slot: slot[1]):
+                yield (
+                    names[question_id.split("#", 1)[0]],
+                    plan.result(position, plan.answered[(position, question_id)]),
+                )
 
     async def check_each_async(
         self,
@@ -318,30 +348,29 @@ class Judge:
         *,
         list_name: str = "items",
         thresholds: Thresholds | None = None,
-        batch_budget: int | None = None,
     ) -> Mapping[str, list[CheckResult]]:
-        """``check_every`` with its batches sent concurrently; when the served model is still
-        unknown and an answer store is present, the first batch pins the model before the remaining
-        batches look in the store, exactly as the sequential path does."""
-        plan = self._check_plan(checks, items, shared, list_name, thresholds, batch_budget)
+        """``check_every`` with its batches sent concurrently, at most ``max_concurrency`` at once and,
+        under a call cap, in waves no larger than the calls left, as the sync path does. When the
+        served model is still unknown and an answer store is present, the first batch pins the model
+        before the remaining batches look in the store."""
+        plan = self._check_plan(checks, items, shared, list_name, thresholds)
         batches = plan.batches
-        if batches and self.store is not None and not self._knows_model():
-            # Without a served model the store cannot prove model-version identity, so every lookup
-            # misses; the first live response pins ``served_model`` and the rest may then replay.
-            # ``slots`` maps one entry per open question to its item position, so the positions are
-            # deduplicated exactly like the sibling batch senders: two checks over two items are two
-            # item slots and four questions, never four copies of two items and eight questions.
-            for sub_batch, response in await self._send_positions_async(
-                plan, sorted(set(batches[0].slots.values()))
-            ):
+        if batches and self._must_learn_model_first():
+            for sub_batch, response in await self._send_positions_async(plan, _positions(batches[0])):
                 plan.answer(sub_batch, response)
             batches = batches[1:]
-        await asyncio.gather(*(self._answer_batch_async(plan, batch) for batch in batches))
+        slots = asyncio.Semaphore(self.max_concurrency)
+        while batches:
+            size = self._wave_size(len(batches))
+            wave, batches = batches[:size], batches[size:]
+            await asyncio.gather(*(self._answer_batch_async(plan, batch, slots) for batch in wave))
         return plan.answers()
 
-    async def _answer_batch_async(self, plan: _CheckPlan, batch: _Batch) -> None:
-        """Send one packed batch concurrently, splitting it when the provider refuses its size."""
-        for sub_batch, response in await self._send_positions_async(plan, sorted(set(batch.slots.values()))):
+    async def _answer_batch_async(self, plan: _CheckPlan, batch: _Batch, slots: asyncio.Semaphore) -> None:
+        """Send one packed batch once a slot is free, splitting it when the provider refuses its size."""
+        async with slots:
+            answered = await self._send_positions_async(plan, _positions(batch))
+        for sub_batch, response in answered:
             plan.answer(sub_batch, response)
 
     def ask_all(
@@ -427,15 +456,21 @@ class Judge:
         item_keys: Mapping[str, str] | None = None,
         sources: Mapping[str, Mapping] | None = None,
         skeleton: Mapping | None = None,
+        masked: frozenset[str] | None = None,
+        batch: Mapping | None = None,
     ) -> JevResponse:
         """Masks, scans, hashes and looks up the store; only a miss sends, and every fresh answer is
-        recorded. The async variant shares every step except the send."""
-        prepared = self._prepare(state, questions)
+        recorded. The async variant shares every step except the send. ``masked`` marks a request
+        the caller already masked as one, with the values it hid: masking is skipped, the final
+        scan is not. Question wording must never quote customer text; a batch plan masks it anyway,
+        once per plan."""
+        prepared = self._sendable(state, questions, masked)
         if prepared.stored is not None:
+            self._count_replayed(len(prepared.stored.answers))
             return prepared.stored
         self._reserve_call()
         dispatched = self._dispatch(prepared)
-        return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton)
+        return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton, batch)
 
     async def ask_async(
         self,
@@ -446,23 +481,49 @@ class Judge:
         item_keys: Mapping[str, str] | None = None,
         sources: Mapping[str, Mapping] | None = None,
         skeleton: Mapping | None = None,
+        masked: frozenset[str] | None = None,
+        batch: Mapping | None = None,
     ) -> JevResponse:
-        prepared = self._prepare(state, questions)
+        prepared = self._sendable(state, questions, masked)
         if prepared.stored is not None:
+            self._count_replayed(len(prepared.stored.answers))
             return prepared.stored
         self._reserve_call()
         dispatched = await self._dispatch_async(prepared)
-        return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton)
+        return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton, batch)
 
-    def _prepare(self, state: Mapping, questions: Mapping) -> _Prepared:
-        hidden: frozenset[str] = frozenset()
-        if self.masker:
-            state, questions, hidden = mask_request(state, questions, self.masker)
-        refuse_if_secret(state, questions, self.scanner, hidden)
+    def _sendable(self, state: Mapping, questions: Mapping, masked: frozenset[str] | None) -> _Prepared:
+        """The prepared request, refused without a call when this route, under the same input box,
+        already refused these exact bytes for their input size, so a replay splits it again for free.
+        A changed box tries the request again."""
+        prepared = self._prepare(state, questions, masked)
+        if self._known_refusal(prepared):
+            raise InputBudgetExceededError("this route refused this exact request for its input size before")
+        return prepared
+
+    def _known_refusal(self, prepared: _Prepared) -> bool:
+        if prepared.stored is not None or self.store is None:
+            return False
+        return self.store.refused(prepared.request_hash, self.client.model, JEV_INPUT_BOX_CHARS)
+
+    def _record_refusal(self, prepared: _Prepared, error: Exception) -> None:
+        if isinstance(error, InputBudgetExceededError) and self.store is not None:
+            with self._bookkeeping:
+                self.store.put_refusal(prepared.request_hash, self.client.model, JEV_INPUT_BOX_CHARS)
+
+    def _prepare(self, state: Mapping, questions: Mapping, masked: frozenset[str] | None) -> _Prepared:
+        if masked is None:
+            state, questions, masked = self._masked_request(state, questions)
+        refuse_if_secret(state, questions, self.scanner, masked)
         request_hash = request_sha256(state, questions)
         stored = self.store.by_request(request_hash) if self.store else None
         accepted = stored.response() if stored is not None and self._accepts(stored.model) else None
         return _Prepared(state, questions, request_hash, request_body(state, questions), accepted)
+
+    def _masked_request(self, state: Mapping, questions: Mapping) -> tuple[Mapping, Mapping, frozenset[str]]:
+        if not self.masker:
+            return state, questions, frozenset()
+        return mask_request(state, questions, self.masker)
 
     def _finish(
         self,
@@ -472,14 +533,22 @@ class Judge:
         item_keys: Mapping[str, str] | None,
         sources: Mapping[str, Mapping] | None,
         skeleton: Mapping | None,
+        batch: Mapping | None,
     ) -> JevResponse:
         response = dispatched.response
         with self._bookkeeping:
             for judge in self._chain():
                 judge.served_model = response.model
                 judge.input_total.add(response.input_tokens)
-            self._record(prepared, dispatched, thresholds, item_keys or {}, sources or {}, skeleton or {})
+            self._record(
+                prepared, dispatched, thresholds, item_keys or {}, sources or {}, skeleton or {}, batch or {}
+            )
         return JevResponse(response.answers, response.model, response.input_tokens, prepared.request_hash)
+
+    def _count_replayed(self, answers: int) -> None:
+        with self._bookkeeping:
+            for judge in self._chain():
+                judge.replayed_answers += answers
 
     def _reserve_call(self) -> None:
         with self._bookkeeping:
@@ -511,6 +580,7 @@ class Judge:
             if isinstance(error, AttemptJournalCallbackError):
                 self._propagate_attempt_journal_error(request_id, error, raw)
             self._journal_failure(request_id, error, raw)
+            self._record_refusal(prepared, error)
             raise
 
     async def _dispatch_async(self, prepared: _Prepared) -> _Dispatched:
@@ -534,7 +604,63 @@ class Judge:
             if isinstance(error, AttemptJournalCallbackError):
                 self._propagate_attempt_journal_error(request_id, error, raw)
             self._journal_failure(request_id, error, raw)
+            self._record_refusal(prepared, error)
             raise
+
+    def _must_learn_model_first(self) -> bool:
+        """Without a served model the store cannot prove model-version identity, so every lookup
+        misses; one batch sent alone pins ``served_model`` and the rest may then replay."""
+        return self.store is not None and not self._knows_model()
+
+    def _answered_batches(
+        self, plan: _CheckPlan, cancelled: Callable[[], bool] | None = None
+    ) -> Iterator[tuple[_Batch, JevResponse]]:
+        """Every request of the plan's batches with its answer, a batch at a time as batches complete,
+        with at most ``max_concurrency`` batches in flight. Answers are applied by the caller, on its
+        own thread. Under a call cap, batches go in waves no larger than the calls left, in their
+        stable order, so a capped call always answers the same batches. The first failure stops
+        every request not yet sent and raises after every batch already sending has yielded what it
+        answered."""
+        batches = list(plan.batches)
+        if batches and self._must_learn_model_first():
+            yield from self._send_positions(plan, _positions(batches.pop(0)), cancelled)
+        if not batches:
+            return
+        stop = _BatchStop(cancelled)
+        pool = ThreadPoolExecutor(max_workers=min(self.max_concurrency, len(batches)))
+        futures: list[Future] = []
+        try:
+            while batches and not stop.requested():
+                size = self._wave_size(len(batches))
+                wave, batches = batches[:size], batches[size:]
+                futures = []
+                for batch in wave:
+                    futures.append(pool.submit(self._send_batch, plan, batch, stop))
+                yield from _completed_batches(futures)
+        except KeyboardInterrupt:
+            stop.halted.set()
+            self.abort_sends(futures)
+            raise
+        finally:
+            stop.halted.set()
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    def _wave_size(self, waiting: int) -> int:
+        """Every waiting batch when uncapped; else as many as calls are left, at least one, since a
+        batch the store answers needs no call."""
+        left = self.calls_left()
+        return waiting if left is None else max(1, min(left, waiting))
+
+    def _send_batch(self, plan: _CheckPlan, batch: _Batch, stop: _BatchStop) -> _SentBatch:
+        """One batch's requests on a worker thread; a failure stops the other batches' unsent
+        requests and is kept with the requests answered before it, so the caller yields those first."""
+        answered: list[tuple[_Batch, JevResponse]] = []
+        try:
+            answered.extend(self._send_positions(plan, _positions(batch), stop.requested))
+        except Exception as error:
+            stop.halted.set()
+            return _SentBatch(answered, error)
+        return _SentBatch(answered, None)
 
     def _send_positions(
         self,
@@ -542,32 +668,34 @@ class Judge:
         positions: Sequence[int],
         cancelled: Callable[[], bool] | None = None,
     ) -> Iterator[tuple[_Batch, JevResponse]]:
-        """Send one packed batch of item positions, splitting it when its request cannot fit the
-        provider's measured input budget.
+        """Send one packed batch of item positions, splitting it when the provider refuses its size.
 
-        The batch is measured before it is sent: a request outside ``request_exceeds_input_budget``
-        (state plus the longest question over ``JEV_INPUT_BOX_CHARS``, or the body over
-        ``MAX_REQUEST_CHARS``) is split by item and each half is measured again, so no request the
-        measurement already rejects is ever paid for. A provider refusal that still names an
-        exceeded input budget (``max_tokens_exceeded``) splits the same way. One position whose own
-        state cannot fit has no smaller honest request - its questions name an item path that a
-        partial state would change - so its error propagates and the journal keeps the provider's
-        report. Every sub-batch keeps each item's store key, so replay and resume accounting stay
-        exact.
+        Packing already keeps every batch within ``request_exceeds_input_budget``, so a batch is sent
+        as packed. A provider refusal that names an exceeded input budget (``max_tokens_exceeded``)
+        splits it by item and sends the halves. One position whose own request is refused has no
+        smaller honest request - its questions name an item path that a partial state would change -
+        so its error propagates and the journal keeps the provider's report. Every sub-batch keys
+        each item by its own batch mates, so replay and resume accounting stay exact.
         """
         if not positions:
             return
-        batch = self._batch(plan, sorted(positions))
+        batch = self._batch(plan, list(positions))
         if batch is None:
             return
         splittable = len(positions) > 1
-        if splittable and request_exceeds_input_budget(batch.state, batch.questions):
-            yield from self._split_positions(plan, positions, cancelled)
-            return
         try:
             if cancelled is not None and cancelled():
                 return
-            yield batch, self.ask(batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras)
+            yield (
+                batch,
+                self.ask(
+                    batch.state,
+                    batch.questions,
+                    thresholds=plan.thresholds,
+                    masked=plan.hidden,
+                    **batch.extras,
+                ),
+            )
         except InputBudgetExceededError:
             if not splittable:
                 raise
@@ -590,15 +718,13 @@ class Judge:
         leave an orphaned half running inside a cancelled gather."""
         if not positions:
             return []
-        batch = self._batch(plan, sorted(positions))
+        batch = self._batch(plan, list(positions))
         if batch is None:
             return []
         splittable = len(positions) > 1
-        if splittable and request_exceeds_input_budget(batch.state, batch.questions):
-            return await self._split_positions_async(plan, positions)
         try:
             response = await self.ask_async(
-                batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras
+                batch.state, batch.questions, thresholds=plan.thresholds, masked=plan.hidden, **batch.extras
             )
         except InputBudgetExceededError:
             if not splittable:
@@ -665,58 +791,69 @@ class Judge:
         shared: Mapping | None,
         list_name: str,
         thresholds: Thresholds | None,
-        batch_budget: int | None = None,
     ) -> _CheckPlan:
-        """Mask the whole candidate set before packing so copied secret values stay hidden across
-        batches. Each per-item store key includes its masked item and shared state; a batch also
-        masks its question wording with those values before sending.
+        """Mask the whole candidate set once, before packing, so copied secret values stay hidden
+        across batches; the final scan before each send still runs. Batches form over every item,
+        answered or not, so they do not depend on the store. Each per-item store key includes its
+        masked item, the shared state, the question and the batch it was asked in.
         """
         if len({check.name for check in checks}) != len(checks):
             raise ValueError("independent checks require unique names for their result lists")
-        *items, shared = self._masked_together([*items, shared or {}])
-        budget = MAX_STATE_CHARS if batch_budget is None else batch_budget
-        plan = _CheckPlan(list_name, checks, items, shared, thresholds or self.thresholds, budget)
-        for position, item in enumerate(items):
-            for check in checks:
-                stored = self._stored_item(check, item, shared)
+        hidden = masked_values([*items, shared or {}], self.masker) if self.masker else frozenset()
+        *items, shared = self._masked_together([*items, shared or {}], hidden)
+        plan = _CheckPlan(
+            list_name,
+            checks,
+            items,
+            shared,
+            hidden,
+            thresholds or self.thresholds,
+            self.items_per_request,
+            masker=self.masker,
+        )
+        groups = _batches(plan)
+        for members in groups:
+            self._look_up_batch(plan, members)
+        self._count_replayed(len(plan.answered))
+        plan.batches = [
+            batch for batch in (self._batch(plan, members) for members in groups) if batch is not None
+        ]
+        return plan
+
+    def _look_up_batch(self, plan: _CheckPlan, members: list[int]) -> None:
+        """Every question about every member is answered from the store or left open."""
+        mates = plan.membership(members)
+        for position in members:
+            for check in plan.checks:
+                stored = self._stored_item(check, plan.items[position], plan.shared, mates)
                 if stored is None:
                     plan.open.setdefault(position, {})[check.question_id] = check
                 else:
                     plan.answered[(position, check.question_id)] = stored
-        plan.batches = [
-            batch
-            for batch in (self._batch(plan, positions) for positions in _batches(plan))
-            if batch is not None
-        ]
-        return plan
 
-    def _masked_together(self, values: list[Mapping]) -> list[Mapping]:
-        """Masks the values as one request: a value hidden in one of them is hidden in all."""
+    def _masked_together(self, values: list[Mapping], hidden: frozenset[str]) -> list[Mapping]:
+        """Masks the values as one request: each of ``hidden`` is hidden in all of them."""
         if self.masker is None:
             return values
-        hidden = masked_values(values, self.masker)
         return [mask_everywhere(value, self.masker, hidden) for value in values]
 
-    def _batch(self, plan: _CheckPlan, positions: list[int]) -> _Batch | None:
-        """The request that carries one batch: every still open check of every item in it, asked at
-        that item's place in the list. An item whose questions were all answered before the call is
-        in no batch, and an item that still needs one answer keeps its own key and its own source.
+    def _batch(self, plan: _CheckPlan, members: list[int]) -> _Batch | None:
+        """The request that carries one batch: every member in the state, since an answer depends on
+        its batch mates, and every still open check of every member, asked at that member's place
+        in the list. A batch with no open question is not sent.
         """
-        *batch_items, batch_shared = self._masked_together(
-            [*(plan.items[position] for position in positions), plan.shared]
-        )
-        by_position = dict(zip(positions, batch_items, strict=True))
+        batch_items = [plan.items[position] for position in members]
+        mates = plan.membership(members)
         questions: dict[str, dict] = {}
         slots: dict[str, int] = {}
         item_keys: dict[str, str] = {}
         sources: dict[str, dict] = {}
-        for slot, position in enumerate(positions):
-            item = by_position[position]
+        for slot, (position, item) in enumerate(zip(members, batch_items, strict=True)):
             for check in plan.open_at(position).values():
                 asked = f"{check.question_id}#{slot}"
-                questions[asked] = check.to_question(item_path(plan.list_name, slot))
+                questions[asked] = plan.question(check, slot)
                 slots[asked] = position
-                item_keys[self._item_key(check, item, batch_shared)] = asked
+                item_keys[self._item_key(check, item, plan.shared, mates)] = asked
                 if _source_of(item):
                     sources[asked] = _source_of(item)
         if not questions:
@@ -724,9 +861,14 @@ class Judge:
         extras = {
             "item_keys": item_keys,
             "sources": sources,
-            "skeleton": _skeleton(plan.list_name, questions, batch_items, batch_shared),
+            "skeleton": _skeleton(plan.list_name, questions, batch_items, plan.shared),
+            "batch": {
+                "batching_rule": BATCHING_RULE,
+                "items_per_request": plan.items_per_request,
+                "members": [plan.item_ids[position] for position in members],
+            },
         }
-        return _Batch({**batch_shared, plan.list_name: batch_items}, questions, slots, extras)
+        return _Batch({**plan.shared, plan.list_name: batch_items}, questions, tuple(members), slots, extras)
 
     def _all_request(
         self,
@@ -763,17 +905,18 @@ class Judge:
             )
         return _CallRequest(usable, questions, thresholds or self.thresholds)
 
-    def _stored_item(self, check: Check, item: Mapping, shared: Mapping) -> _ItemAnswer | None:
+    def _stored_item(self, check: Check, item: Mapping, shared: Mapping, mates: str) -> _ItemAnswer | None:
         if self.store is None or not self._knows_model():
             return None
-        stored = self.store.by_item(self._item_key(check, item, shared), self._model_filter())
+        stored = self.store.by_item(self._item_key(check, item, shared, mates), self._model_filter())
         if stored is None or not isinstance(stored.answer, NoulAnswer):
             return None
         return _ItemAnswer(stored.answer.probability, True, stored.request_sha256)
 
-    def _item_key(self, check: Check, item: Mapping, shared: Mapping) -> str:
-        """Item content, the shared state the question refers to, and the question with its wording."""
-        return f"{content_hash(item)}|{content_hash(shared)}|{check.question_id}"
+    def _item_key(self, check: Check, item: Mapping, shared: Mapping, mates: str) -> str:
+        """Item content, the shared state the question refers to, the question with its wording, and
+        the batch the item was asked in."""
+        return f"{content_hash(item)}|{content_hash(shared)}|{check.question_id}|{mates}"
 
     def _accepts(self, stored_model: str) -> bool:
         return self._knows_model() and self._model_filter() in (None, stored_model)
@@ -795,6 +938,7 @@ class Judge:
         item_keys: Mapping[str, str],
         sources: Mapping[str, Mapping],
         skeleton: Mapping,
+        batch: Mapping,
     ) -> None:
         if self.store is None:
             return
@@ -810,6 +954,7 @@ class Judge:
                 item_keys=dict(item_keys),
                 sources=dict(sources),
                 skeleton=dict(skeleton),
+                batch=dict(batch),
                 request={"state": prepared.state, "questions": prepared.questions},
                 sent_body_base64=base64.b64encode(dispatched.sent_body).decode("ascii"),
                 sent_exact=dispatched.sent_exact,
@@ -852,12 +997,31 @@ class _Dispatched:
 
 
 @dataclass(frozen=True)
+class _BatchStop:
+    """Why a concurrent batch must not send its next request: the caller cancelled, a sibling batch
+    failed, or the caller stopped consuming results."""
+
+    cancelled: Callable[[], bool] | None
+    halted: threading.Event = field(default_factory=threading.Event)
+
+    def requested(self) -> bool:
+        return self.halted.is_set() or (self.cancelled is not None and self.cancelled())
+
+
+@dataclass(frozen=True)
+class _SentBatch:
+    answered: list[tuple[_Batch, JevResponse]]
+    error: Exception | None
+
+
+@dataclass(frozen=True)
 class _Batch:
     """One request: the code it carries, the questions asked about that code, and, for each of those
     questions, the item in the batch whose code the answer is about."""
 
     state: Mapping
     questions: Mapping
+    members: tuple[int, ...]
     slots: Mapping[str, int]
     extras: Mapping[str, Mapping]
 
@@ -875,19 +1039,50 @@ class _CheckPlan:
     checks: Sequence[Check]
     items: Sequence[Mapping]
     shared: Mapping
+    hidden: frozenset[str]
     thresholds: Thresholds
-    budget: int
+    items_per_request: int
     answered: dict[tuple[int, str], _ItemAnswer] = field(default_factory=dict)
     open: dict[int, dict[str, Check]] = field(default_factory=dict)
     batches: list[_Batch] = field(default_factory=list)
+    item_ids: list[str] = field(init=False)
+    masker: Masker | None = None
+    _questions: dict[tuple[str, int], dict] = field(default_factory=dict, init=False)
 
     def open_at(self, position: int) -> Mapping[str, Check]:
         """The questions still open for one item, keyed by the question id without its slot."""
         return self.open.get(position, {})
 
-    def pending(self) -> list[int]:
-        """The items with a question still open for them, in the order they were given."""
-        return sorted(self.open)
+    def __post_init__(self) -> None:
+        self.item_ids = [content_hash(item) for item in self.items]
+
+    def stable_order(self) -> list[int]:
+        """Every item position ordered by the unit's place (file, then lines) where the item has one,
+        else by its content, so the same units always form the same batches whatever order the
+        caller gave them in, and a new commit does not reorder them."""
+        return sorted(
+            range(len(self.items)),
+            key=lambda position: (*_unit_place(self.items[position]), self.item_ids[position], position),
+        )
+
+    def question(self, check: Check, slot: int) -> dict:
+        """The check's question about the item at ``slot``, masked with the plan's hidden values;
+        built and masked once per plan, since packing measures many candidate requests."""
+        key = (check.question_id, slot)
+        if key not in self._questions:
+            question = check.to_question(item_path(self.list_name, slot))
+            self._questions[key] = (
+                mask_everywhere(question, self.masker, self.hidden) if self.masker else question
+            )
+        return self._questions[key]
+
+    def slot_questions(self, slot: int) -> list[tuple[str, dict]]:
+        """Every check's question about the item at ``slot``, keyed as a request asks it."""
+        return [(f"{check.question_id}#{slot}", self.question(check, slot)) for check in self.checks]
+
+    def membership(self, members: Sequence[int]) -> str:
+        """The identity of a batch: its members' content hashes in their order in the request."""
+        return content_hash([self.item_ids[position] for position in members])
 
     def answer(self, batch: _Batch, response: JevResponse) -> None:
         for question_id, position in batch.slots.items():
@@ -948,6 +1143,21 @@ class _CallRequest:
         return CallDecision(chosen.name, argument_result.choice, route_result, argument_result)
 
 
+def _positions(batch: _Batch) -> list[int]:
+    """The item positions a batch carries, in their place in the request."""
+    return list(batch.members)
+
+
+def _completed_batches(futures: list[Future]) -> Iterator[tuple[_Batch, JevResponse]]:
+    failure: Exception | None = None
+    for future in as_completed(futures):
+        sent = future.result()
+        yield from sent.answered
+        failure = failure or sent.error
+    if failure is not None:
+        raise failure
+
+
 def _is_async(client: object) -> bool:
     method = getattr(client, "send", None) or client.ask
     return inspect.iscoroutinefunction(method)
@@ -983,6 +1193,14 @@ def _skeleton(list_name: str, questions: Mapping, items: list[Mapping], shared: 
     }
 
 
+def _unit_place(item: Mapping) -> tuple[str, int, int]:
+    """The unit's file and line range, or empty when the item names none."""
+    lines = item.get("lines")
+    if not isinstance(lines, list | tuple) or len(lines) != 2:
+        return str(item.get("file", "")), 0, 0
+    return str(item.get("file", "")), int(lines[0]), int(lines[1])
+
+
 def _source_of(item: Mapping) -> dict:
     """The location fields an item carries (``file``, ``lines``, ``commit``), if any."""
     return {key: item[key] for key in ("file", "lines", "commit") if key in item}
@@ -1004,25 +1222,25 @@ def _argument_id(operation: str, offer: CallOffer) -> str:
 
 
 def _batches(plan: _CheckPlan) -> list[list[int]]:
-    """Fills a batch until the request that would carry it would be larger than the budget allows.
-    An item is measured together with the question wording asked about it, because that is what one
-    request has to fit, and a single question is measured exactly as the batch around it is.
-    """
-    budget = plan.budget - len(json.dumps(plan.shared))
+    """Every item, in the stable order, in batches of at most ``items_per_request``; a batch closes
+    early when the request carrying the next item would not fit the character boxes."""
     batches: list[list[int]] = []
     current: list[int] = []
-    used = 0
-    for position in plan.pending():
-        size = _open_size(plan, position)
-        if current and used + size > budget:
+    for position in plan.stable_order():
+        if current and (
+            len(current) == plan.items_per_request or not _fits_in_batch(plan, [*current, position])
+        ):
             batches.append(current)
-            current, used = [], 0
+            current = []
         current.append(position)
-        used += size
     return [*batches, current] if current else batches
 
 
-def _open_size(plan: _CheckPlan, position: int) -> int:
-    """What one item and the wording of the questions still open about it would cost on their own."""
-    wording = [check.to_question(item_path(plan.list_name, 0)) for check in plan.open_at(position).values()]
-    return len(json.dumps(plan.items[position])) + sum(len(json.dumps(question)) for question in wording)
+def _fits_in_batch(plan: _CheckPlan, members: list[int]) -> bool:
+    """The one size rule of packing: the request that would carry these members, with every check
+    asked of each, within the boxes ``request_exceeds_input_budget`` measures before a send."""
+    state = {**plan.shared, plan.list_name: [plan.items[position] for position in members]}
+    questions = {
+        asked: question for slot in range(len(members)) for asked, question in plan.slot_questions(slot)
+    }
+    return not request_exceeds_input_budget(state, questions)

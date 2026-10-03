@@ -14,6 +14,7 @@ import pytest
 from git_repos import commit_files
 
 from jev_navigator.cli_trace import SCHEMA_VERSION, create_trace_evidence_pack
+from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
 from jev_navigator.testing import ScriptedJevClient
 
 WORKFLOW_FILES = {
@@ -328,7 +329,7 @@ def test_explicit_depth_stop_is_preserved_as_partial_traversal(tmp_path: Path) -
     assert manifest["trace"]["outcome"] == "depth"
 
 
-def test_budget_stop_writes_the_pack_with_honest_partial_coverage(tmp_path: Path) -> None:
+def test_budget_stop_writes_the_pack_with_honest_partial_coverage(tmp_path: Path, monkeypatch) -> None:
     repository = _bulk_workflow_repository(tmp_path)
     output = tmp_path / "pack"
     client = _evidence_client()
@@ -356,7 +357,9 @@ def test_budget_stop_writes_the_pack_with_honest_partial_coverage(tmp_path: Path
     report = (output / "report.md").read_text()
     assert "Outcome: **budget**" in report
 
-    # A replay over the persisted store preserves the same answers with no live call at all.
+    # A replay over the persisted pack alone, with an empty shared store, preserves the same answers
+    # with no live call at all.
+    monkeypatch.setenv(SHARED_STORE_VARIABLE, str(tmp_path / "empty-shared.sqlite"))
     replayed = _pack(
         repository,
         tmp_path / "replay",
@@ -366,6 +369,8 @@ def test_budget_stop_writes_the_pack_with_honest_partial_coverage(tmp_path: Path
         answers_from=output / "answers.jsonl",
     )
     assert replayed["provider"]["calls"] == 0
+    assert replayed["provider"]["replayed_answers"] > 0
+    assert manifest["provider"]["replayed_answers"] == 0
     assert replayed["trace"]["outcome"] == "budget"
     for obligation, original in zip(replayed["trace"]["obligations"], obligations, strict=True):
         assert obligation["status"] == original["status"]

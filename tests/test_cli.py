@@ -21,6 +21,7 @@ from jev_navigator.cli import (
     main,
 )
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
 from jev_navigator.testing import ScriptedJevClient
 
 
@@ -993,3 +994,45 @@ def test_stats_schema_and_validation_share_the_cli_contract(
     assert not (tmp_path / "jvn-results").exists()
     assert main(["stats", "--min-lines", "10", "--max-lines", "2"]) == 1
     assert not (tmp_path / "jvn-results").exists()
+
+
+def test_each_run_names_its_answer_store_and_a_fresh_store_isolates_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jev_navigator import cli
+
+    # Arrange
+    repository = tmp_path / "repository"
+    functions = "".join(
+        f"def admit_{index}(item):\n    return len(item) <= {index}\n\n\n" for index in range(40)
+    )
+    commit_files(repository, {"app/policy.py": functions})
+    clients: list[ScriptedJevClient] = []
+
+    def client() -> ScriptedJevClient:
+        instance = ScriptedJevClient(default_noul=0.96)
+        instance.close = lambda: None
+        clients.append(instance)
+        return instance
+
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    common = ["findall", "the item limit", "--repo", str(repository)]
+    arm_a, arm_b = tmp_path / "arm-a.sqlite", tmp_path / "arm-b.sqlite"
+    default_store = os.environ[SHARED_STORE_VARIABLE]
+
+    # Act
+    main([*common, "--answer-store", str(arm_a), "--out", str(tmp_path / "a1")])
+    first_err = capsys.readouterr().err
+    main([*common, "--answer-store", str(arm_a), "--out", str(tmp_path / "a2")])
+    main([*common, "--answer-store", str(arm_b), "--out", str(tmp_path / "b1")])
+    later_err = capsys.readouterr().err
+
+    # Assert: the repeat on the same store sends only the one request that learns the served model
+    assert f"answer store: {arm_a}" in first_err
+    assert f"answer store: {arm_b}" in later_err
+    first, repeat, isolated = (len(instance.requests) for instance in clients)
+    assert first > 1 and repeat == 1 and isolated == first
+    assert os.environ[SHARED_STORE_VARIABLE] == default_store, (
+        "the flag never travels through the environment"
+    )

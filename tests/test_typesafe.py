@@ -405,8 +405,8 @@ def test_input_batches_keep_values_masked_across_request_boundaries(
     monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
     client = TypeSafeJevClient()
     try:
-        answers = Judge(client).check_every(
-            [DESCRIBES], items, {"doc": {"sentence": "posts an order"}}, batch_budget=1
+        answers = Judge(client, items_per_request=1).check_every(
+            [DESCRIBES], items, {"doc": {"sentence": "posts an order"}}
         )
     finally:
         client.close()
