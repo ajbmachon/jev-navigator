@@ -251,7 +251,7 @@ def test_a_default_run_names_a_neighbour_by_location_and_symbol(tmp_path: Path) 
     manifest = find_pack(repository, tmp_path / "pack", "find", 5)
 
     # Assert
-    assert "app/policy.py:1 admit (called by handle)" in offered_signatures(manifest)
+    assert "app/policy.py:1 admit" in offered_signatures(manifest)
 
 
 def test_keep_requests_keeps_each_neighbour_signature_whole(tmp_path: Path) -> None:
@@ -265,3 +265,47 @@ def test_keep_requests_keeps_each_neighbour_signature_whole(tmp_path: Path) -> N
     assert f"app/policy.py:1 `def admit(item, {MARKER}=None):` (called by handle)" in offered_signatures(
         manifest
     )
+
+
+def template_literal_repository(root: Path) -> Path:
+    """TypeScript functions whose first lines hold a template literal and a sql-tagged literal, each
+    with backticks and the marker, plus a caller that makes them neighbours."""
+    commit_files(
+        root,
+        {
+            "web/routes.ts": (
+                "export function load(router: any, id: string) "
+                f"{{ return router.get(`/{MARKER}/runs/${{id}}`); }}\n"
+                "\n"
+                f"export function query(db: any) {{ return db.run(sql`SELECT {MARKER} FROM users`); }}\n"
+                "\n"
+                "export function handle(router: any, db: any) {\n"
+                "  load(router, 'one');\n"
+                "  return query(db);\n"
+                "}\n"
+            ),
+        },
+    )
+    return root
+
+
+@pytest.mark.parametrize("max_calls", [5, 1])
+def test_a_default_run_folder_holds_no_code_from_template_literals(tmp_path: Path, max_calls: int) -> None:
+    # Arrange
+    repository = template_literal_repository(tmp_path / "repository")
+    output = tmp_path / "pack"
+
+    # Act
+    create_evidence_pack(
+        repository,
+        ("web/",),
+        TARGET,
+        ("web/routes.ts:6",),
+        output,
+        SearchBudget(max_calls=max_calls, beam_width=1),
+        ScriptedJevClient(nouls=lambda question_id, question, state: 0.04),
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Assert
+    assert files_holding_code(output) == []

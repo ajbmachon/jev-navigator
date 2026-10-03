@@ -14,7 +14,7 @@ from .index.code_index import CodeIndex
 from .index.spans import Span
 from .judgments.judge import CheckResult
 from .judgments.thresholds import NoulVerdict
-from .run_files import location_label
+from .run_files import place_label
 
 STATE_VERSION = 1
 
@@ -155,7 +155,7 @@ def _frontier_record(entry: NotInspected, index: CodeIndex) -> dict:
     code = entry.place.open()
     return {
         "place_key": entry.place_key,
-        "signature": location_label(index, entry.signature),
+        "signature": place_label(index, entry.place_key),
         "kind": entry.place.kind,
         "span": asdict(code.span),
         "origin": code.origin,

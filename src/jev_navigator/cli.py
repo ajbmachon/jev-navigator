@@ -34,7 +34,7 @@ from .judgments.store import SHARED_STORE_VARIABLE, default_shared_store, run_an
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import location_label
+from .run_files import place_label
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
@@ -287,7 +287,7 @@ def create_evidence_pack(
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
-        journal.place_label = partial(location_label, index)
+        journal.place_label = partial(place_label, index)
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
         checkpoint = SavedSearch(None)
@@ -984,19 +984,19 @@ def _drop_code(manifest: dict, index: CodeIndex) -> None:
         for option in decision.get("options", []):
             option.pop("description", None)
     for candidate in entry_selection.get("candidates", []):
-        candidate["signature"] = location_label(index, candidate["signature"])
+        candidate["signature"] = place_label(index, candidate["place"])
     for name in ("search", "seed_search"):
         search = manifest.get(name) or {}
         for group in ("found", "starts", "searched", "unsure"):
             for place in search.get(group, []):
                 place.pop("code", None)
         for entry in search.get("not_inspected", []):
-            entry["signature"] = location_label(index, entry["signature"])
+            entry["signature"] = place_label(index, entry["place"])
         for step in search.get("history", []):
             for fetched in step.get("fetched", []):
                 fetched.pop("code", None)
             for offered in step.get("judgments", {}).get("could_contain", []):
-                offered["signature"] = location_label(index, offered["signature"])
+                offered["signature"] = place_label(index, offered["place"])
 
 
 def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previous: dict | None) -> dict:

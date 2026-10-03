@@ -12,7 +12,7 @@ from time import monotonic
 
 from .judgments.answers import TokenTotal, reported_input_tokens, reported_output_tokens
 from .judgments.journal import JournalRequest, JsonlJournal, RawResponse
-from .run_files import unquoted
+from .run_files import place_location
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -130,13 +130,13 @@ class TerminalProgress:
 
 
 class ProgressJournal(JsonlJournal):
-    """``place_label`` turns a neighbour's signature into the location a run file may show; the CLI
-    sets one that adds the symbol name once the index exists."""
+    """``place_label`` turns a neighbour's place key into the label a run file shows instead of its
+    signature; the CLI sets one that adds the symbol name once the index exists."""
 
     def __init__(self, path: Path, progress: TerminalProgress, *, keep_request_text: bool = False) -> None:
         super().__init__(path, keep_request_text=keep_request_text)
         self.progress = progress
-        self.place_label: Callable[[str], str] = unquoted
+        self.place_label: Callable[[str], str] = place_location
 
     def record_step(self, step: Mapping) -> None:
         super().record_step(step if self.keep_request_text else self._labelled(step))
@@ -145,7 +145,7 @@ class ProgressJournal(JsonlJournal):
         judgments = dict(step.get("judgments", {}))
         if "could_contain" in judgments:
             judgments["could_contain"] = [
-                {**offered, "signature": self.place_label(offered["signature"])}
+                {**offered, "signature": self.place_label(offered["place"])}
                 for offered in judgments["could_contain"]
             ]
         return {**step, "judgments": judgments}
