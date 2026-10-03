@@ -152,7 +152,9 @@ places (starts, then Jev's picks, then the best-scored neighbours) and returns `
 
 Read `searched` and the outcome `nothing_left` as "opened and judged unlikely", never as "the code does
 not exist": one "no" about one place can be wrong. When nothing is found, rank the opened places by
-their probability and treat the best one as the likeliest place.
+their probability and treat the best one as the likeliest place. A search that ran out of places
+before parsing every code file in scope ends as `scope_incomplete`; `files_examined` of `code_files`
+says how much it reached.
 
 Documents and other files without a supported code grammar remain searchable as text and can
 participate in text-based moves. Syntax operations return no symbols, calls or references for them;

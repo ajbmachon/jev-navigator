@@ -141,7 +141,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     else:
         print(f"evidence pack: {output.resolve()}")
-        print(f"outcome: {search_outcome} ({calls} live calls)")
+        print(f"outcome: {_outcome_summary(result)} ({calls} live calls)")
         if resume_directory is not None:
             print(f"resume: use --resume {output.resolve()} with the same target and repository")
     return 130 if search_outcome == "cancelled" else 0
@@ -947,6 +947,8 @@ def _manifest(
                 for entry in result.not_inspected
             ],
             "unparsed_files": sorted(result.unparsed_files),
+            "files_examined": result.files_examined,
+            "code_files": result.code_files,
             "parser_scans": {
                 "completed": list(result.parser_scans_completed),
                 "pending": list(result.parser_scans_pending),
@@ -1098,6 +1100,27 @@ def _included_in_opened_span(candidate, result: FindResult) -> str | None:
     return None
 
 
+def _outcome_summary(search: dict) -> str:
+    """The outcome name; an empty Find also says how much of the scope its own moves examined."""
+    outcome = str(search["outcome"])
+    if "files_examined" not in search:
+        return outcome
+    if outcome == "nothing_left":
+        return f"{outcome}, not found in this scope: all {search['code_files']} code files examined"
+    if outcome != "scope_incomplete":
+        return outcome
+    never_reached = search["code_files"] - search["files_examined"]
+    gaps = [f"{never_reached} never reached"]
+    if search["unparsed_files"]:
+        gaps.append(f"{len(search['unparsed_files'])} parsed only partly")
+    if search["unavailable_files"]:
+        gaps.append(f"{len(search['unavailable_files'])} gone from disk")
+    return (
+        f"{outcome}, not found: {search['files_examined']} of {search['code_files']} code files examined, "
+        + ", ".join(gaps)
+    )
+
+
 _FRONTIER_REASONS = {
     "target_found": "Search stopped after finding a match",
     "deprioritized": "Candidate score did not exceed the opening threshold",
@@ -1122,7 +1145,7 @@ def _report(manifest: dict) -> str:
         f"- Revision: `{source['revision']}`",
         f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes']) or 'whole directory'}",
         f"- Target: {manifest['target']}",
-        f"- Outcome: **{search['outcome']}**",
+        f"- Outcome: **{_outcome_summary(search)}**",
         *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "

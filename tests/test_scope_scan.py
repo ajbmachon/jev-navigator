@@ -675,6 +675,7 @@ def test_an_empty_search_that_never_reached_every_file_says_so_without_parsing_t
     assert parsed == {"app/start.py"}
     assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.parser_scans_pending == ("facts",)
+    assert (result.files_examined, result.code_files, result.files_never_reached) == (1, 3, 2)
 
 
 def test_an_empty_search_that_parsed_every_file_reports_nothing_left(tmp_path: Path) -> None:
@@ -689,3 +690,20 @@ def test_an_empty_search_that_parsed_every_file_reports_nothing_left(tmp_path: P
     # Assert
     assert result.outcome == Outcome.NOTHING_LEFT
     assert result.parser_scans_pending == ()
+    assert (result.files_examined, result.code_files) == (1, 1)
+
+
+def test_reading_the_parsed_files_receipt_parses_nothing(tmp_path: Path, ast_grep_runs) -> None:
+    # Arrange
+    index = committed(
+        tmp_path, {"app/a.py": "def a():\n    return 1\n", "app/b.py": "def b():\n    return 2\n"}
+    )
+    index.functions_in("app/a.py")
+    runs_before = len(ast_grep_runs)
+
+    # Act
+    parsed = index.parsed_files
+
+    # Assert
+    assert parsed == {"app/a.py"}
+    assert len(ast_grep_runs) == runs_before

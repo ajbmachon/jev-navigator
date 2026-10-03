@@ -37,6 +37,7 @@ from ..history import (
     judge_history_async,
 )
 from ..index.code_index import CodeIndex
+from ..index.languages import language_of
 from ..index.spans import CodeSlice
 from ..judgments.answers import JevResponse, NoulAnswer
 from ..judgments.client import JEV_INPUT_BOX_CHARS, QUESTION_RESERVE_CHARS, InputBudgetExceededError
@@ -209,8 +210,9 @@ class FindResult:
     absent: one "no" about one place can be wrong. When nothing is found, rank the opened places by
     their probability; the best one is the likeliest place. ``starts`` holds the start places with
     their verdicts: a start is never a find, because the caller already had it. ``unparsed_files``
-    lists scope files the index could not parse; while it is not empty the outcome is never
-    ``nothing_left``."""
+    lists scope files the index could not parse. ``files_examined`` of ``code_files`` scope code files
+    were parsed by the search; while any was never reached or could not be parsed, the outcome is
+    never ``nothing_left``."""
 
     outcome: Outcome
     found: tuple[Visit, ...]
@@ -229,6 +231,12 @@ class FindResult:
     parser_scans_completed: tuple[str, ...] = ()
     parser_scans_pending: tuple[str, ...] = ()
     unavailable_files: Mapping[str, str] = field(default_factory=dict)
+    files_examined: int = 0
+    code_files: int = 0
+
+    @property
+    def files_never_reached(self) -> int:
+        return self.code_files - self.files_examined
 
 
 @dataclass(order=True)
@@ -481,7 +489,9 @@ def _settled_response(future: Future):
 
 def _merge_round(search: _Search, opened: list[_Opening], responses: list) -> None:
     """After the call cap refused a live request, only stored answers can still come back; a round
-    that got none means the store holds nothing for the frontier, so opening more places is waste."""
+    that got none means the store holds nothing for the frontier, so opening more places is waste.
+    Counting unreplayed store records instead would never stop a Resume: its store carries the
+    earlier run's answers for places that run already judged, which this run never asks again."""
     answered = [response for response in responses if not isinstance(response, _Unanswered)]
     search.replay_exhausted = search.cap_reached and not answered
     for opening, response in zip(opened, responses, strict=True):
@@ -1089,6 +1099,7 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
     completed_scans = index.parser_scans_completed
     pending_scans = index.parser_scans_pending
     unavailable = index.unavailable_files
+    code_files = {file for file in index.available_files if language_of(file)}
     search.history.append(
         _stop_step(search, outcome, not_inspected, unparsed, completed_scans, pending_scans, unavailable)
     )
@@ -1110,6 +1121,8 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
         completed_scans,
         pending_scans,
         unavailable,
+        len(code_files & index.parsed_files),
+        len(code_files),
     )
 
 

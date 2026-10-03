@@ -507,8 +507,12 @@ places it did not open stay in `not_inspected` for Resume.
 Only HTTP 400 with `detail.error_type` equal to `max_tokens_exceeded` is a size refusal;
 mentions of that text in question IDs or unrelated error messages do not trigger splitting.
 A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code
-is not there. The search ends as `nothing_left` when no start or pick waits and no neighbour scores
-above the no bar (0.20 by default). A start place is judged but never ends the search as found, because
+is not there. The search runs out of places when no start or pick waits and no neighbour scores
+above the no bar (0.20 by default). It then ends as `nothing_left` only if its own moves parsed every
+code file in scope without a grammar error; otherwise it ends as `scope_incomplete`. The remaining
+files are never parsed just to choose the label. `FindResult.files_examined` and `code_files` say how
+much of the scope the search parsed, and the CLI prints it, for example `scope_incomplete, not found:
+31 of 189 code files examined, 158 never reached`. A start place is judged but never ends the search as found, because
 the caller already had it; `FindResult.starts` keeps each start with its verdict. Each neighbour's
 signature names its file and lines: a function quotes its first line; a window around a call, reference
 or key outside any function gives its line range and quotes that line; a stretch chosen by position (the
@@ -520,7 +524,7 @@ judged, start places apart in `starts`); and `not_inspected`, each entry with it
 `deprioritized`, `capped` or `depth`) and its `QueueTier`: `START`, `PICK` or `MOVE`. Resume
 preserves that role, so waiting starts still open before picks and are never reported as new finds.
 `searched` means "opened and judged at or below the no bar, probability kept", and `nothing_left`
-means "nothing left worth opening"; neither proves that the code does not exist, because one "no" about
+means "nothing left worth opening in a scope the search parsed whole"; neither proves that the code does not exist, because one "no" about
 one place can be wrong. When nothing reaches the yes bar, rank the opened places by their
 `contains_target` probability: the best-scored place is the likeliest one. Pass the result back as
 `resume=` to continue from that frontier with a fresh budget. Pass `commit=` to require that the index

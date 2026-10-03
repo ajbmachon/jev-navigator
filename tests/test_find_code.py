@@ -666,6 +666,42 @@ def test_a_spent_call_budget_still_replays_every_stored_round_after_a_refused_re
     assert len(places_chosen(replayed)) == 4
 
 
+def test_a_capped_resume_with_the_earlier_answers_copied_in_stops_one_round_after_its_cap(
+    sample_index: CodeIndex, tmp_path: Path
+) -> None:
+    # Arrange
+    answers = scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.9)
+    budget = SearchBudget(beam_width=1)
+    first_store = JsonlAnswerStore(tmp_path / "first" / "answers.jsonl")
+    first = find_code(
+        sample_index,
+        Judge(ScriptedJevClient(nouls=answers), store=first_store, max_calls=1),
+        TARGET,
+        start_at_place(sample_index),
+        budget=budget,
+    )
+    copied = tmp_path / "second" / "answers.jsonl"
+    copied.parent.mkdir()
+    copied.write_bytes(first_store.path.read_bytes())
+    client = ScriptedJevClient(nouls=answers)
+
+    # Act
+    resumed = find_code(
+        sample_index,
+        Judge(client, store=JsonlAnswerStore(copied), max_calls=1),
+        TARGET,
+        [],
+        budget=budget,
+        resume=first,
+    )
+
+    # Assert
+    assert resumed.outcome == Outcome.BUDGET
+    assert len(client.requests) == 1
+    assert resumed.steps == 1
+    assert len(places_chosen(resumed)) == 2
+
+
 def test_cached_search_answer_is_free_at_zero_live_call_budget(
     sample_index: CodeIndex, tmp_path: Path
 ) -> None:

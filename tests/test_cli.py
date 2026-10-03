@@ -25,6 +25,41 @@ from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
 from jev_navigator.testing import ScriptedJevClient
 
 
+def test_an_empty_find_reports_how_much_of_the_scope_it_examined(tmp_path: Path) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(repository, {"app/entry.py": "def handle(item):\n    return item\n"})
+    commit_files(
+        repository,
+        {
+            "app/mail.py": "def send(letter):\n    return letter\n",
+            "app/billing.py": "def bill(account):\n    return account\n",
+        },
+    )
+    client = ScriptedJevClient(nouls=lambda question_id, question, state: 0.04)
+    output = tmp_path / "evidence"
+
+    # Act
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/entry.py:2",),
+        output,
+        SearchBudget(),
+        client,
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Assert
+    assert manifest["search"]["outcome"] == "scope_incomplete"
+    assert (manifest["search"]["files_examined"], manifest["search"]["code_files"]) == (1, 3)
+    assert (
+        "Outcome: **scope_incomplete, not found: 1 of 3 code files examined, 2 never reached**"
+        in (output / "report.md").read_text()
+    )
+
+
 def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     commit_files(
