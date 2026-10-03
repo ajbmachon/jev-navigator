@@ -321,10 +321,11 @@ class CodeIndex:
 
     def find_references(self, name: str) -> tuple[Reference, ...]:
         """Uses of ``name`` that are not calls: arguments, collection entries, assignments,
-        decorators, exports, returns, method receivers, types and conditions, each with its role,
-        holder and binding. Code reached this way (a callback, a registry entry, a parameter typed
-        with a class) has no call edge to follow. A member passed as an argument (``self.handler``)
-        is bound like a method call on an unknown receiver, never proven by a same-named function."""
+        decorators, exports, returns, method receivers, types, base classes and conditions, each
+        with its role, holder and binding. Code reached this way (a callback, a registry entry, a
+        parameter typed with a class, a subclass) has no call edge to follow. A member passed as an
+        argument (``self.handler``) is bound like a method call on an unknown receiver, never proven
+        by a same-named function."""
         return self._references(self._references_named(name))
 
     def references_in(self, function: Span) -> tuple[Reference, ...]:

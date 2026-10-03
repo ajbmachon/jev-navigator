@@ -26,7 +26,7 @@ _QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
 _KEY_SHAPE = re.compile(r"[._:/-]")
 MAX_KEY_HITS = 30
 _PASSED_ON_ROLES = frozenset(
-    {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type"}
+    {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type", "base"}
 )
 _TEST_DIRECTORIES = frozenset({"test", "tests", "__tests__", "spec"})
 _TEST_FILE_NAME = re.compile(r"^test_|_test\.|\.test\.|\.spec\.|^conftest\.py$")
