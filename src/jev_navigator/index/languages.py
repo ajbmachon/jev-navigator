@@ -211,8 +211,16 @@ class ReferenceRole:
     not_regex: str = ""
 
 
+_PYTHON_SUPERCLASSES = (
+    "kind: argument_list\ninside:\n  stopBy: neighbor\n  kind: class_definition\n  field: superclasses"
+)
+
 _PYTHON_ROLES = (
-    ReferenceRole("argument", ("kind: argument_list", "kind: keyword_argument\nfield: value")),
+    ReferenceRole(
+        "argument",
+        ("kind: argument_list", "kind: keyword_argument\nfield: value"),
+        not_inside=(_PYTHON_SUPERCLASSES,),
+    ),
     ReferenceRole(
         "argument",
         ("kind: argument_list", "kind: keyword_argument\nfield: value"),
@@ -224,13 +232,7 @@ _PYTHON_ROLES = (
     ReferenceRole("return", ("kind: return_statement",)),
     ReferenceRole("receiver", ("kind: attribute\nfield: object",), not_regex="^(self|cls)$"),
     ReferenceRole("type", ("kind: type\nstopBy: end",)),
-    ReferenceRole(
-        "base",
-        (
-            "kind: argument_list\n"
-            "inside:\n  stopBy: neighbor\n  kind: class_definition\n  field: superclasses",
-        ),
-    ),
+    ReferenceRole("base", (_PYTHON_SUPERCLASSES,)),
     ReferenceRole(
         "condition",
         (

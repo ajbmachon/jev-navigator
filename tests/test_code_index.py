@@ -364,6 +364,35 @@ def test_references_in_lists_the_names_a_function_passes_on_without_calling(
     assert "scheduler" not in {ref.name for ref in references}
 
 
+SCRIPT_BASE_AND_SUBCLASS = (
+    "export class Base {}\n",
+    'import { Base } from "./base";\n\n\nexport class Sub extends Base {}\n',
+)
+
+
+@pytest.mark.parametrize(
+    ("suffix", "base", "subclass"),
+    [
+        (".py", "class Base:\n    pass\n", "from base import Base\n\n\nclass Sub(Base):\n    pass\n"),
+        (".ts", *SCRIPT_BASE_AND_SUBCLASS),
+        (".js", *SCRIPT_BASE_AND_SUBCLASS),
+    ],
+)
+def test_a_class_s_base_is_recorded_once_as_its_base(
+    tmp_path: Path, suffix: str, base: str, subclass: str
+) -> None:
+    # Arrange
+    (tmp_path / f"base{suffix}").write_text(base)
+    (tmp_path / f"sub{suffix}").write_text(subclass)
+    index = CodeIndex(tmp_path, [f"base{suffix}", f"sub{suffix}"])
+
+    # Act
+    references = index.find_references("Base")
+
+    # Assert
+    assert [(ref.file, ref.line, ref.role) for ref in references] == [(f"sub{suffix}", 4, "base")]
+
+
 USES_PY = """\
 from app.rules import ALLOWED, PATTERN, Store
 

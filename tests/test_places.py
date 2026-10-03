@@ -720,29 +720,69 @@ SCRIPT_SUBCLASS = (
     "  find(className: string) {\n    return [className];\n  }\n"
     "}\n"
 )
+PYTHON_BASE = (
+    "class BaseAdapter:\n"
+    "    def create_object(self, class_name):\n        return class_name\n\n"
+    "    def find(self, class_name):\n        return []\n"
+)
+PYTHON_SUBCLASS = (
+    "from base import BaseAdapter\n\n"
+    "class PostgresAdapter(BaseAdapter):\n"
+    "    def find(self, class_name):\n        return [class_name]\n"
+)
 
 
-def test_a_script_class_offers_the_methods_it_inherits_through_extends(tmp_path: Path) -> None:
+def class_files(suffix: str) -> dict[str, str]:
+    """BaseAdapter in src/base and PostgresAdapter, which extends it on line 3, in src/postgres;
+    plain JavaScript is the TypeScript without its annotations."""
+    if suffix == ".py":
+        sources = (PYTHON_BASE, PYTHON_SUBCLASS)
+    elif suffix == ".js":
+        sources = (SCRIPT_BASE.replace(": string", ""), SCRIPT_SUBCLASS.replace(": string", ""))
+    else:
+        sources = (SCRIPT_BASE, SCRIPT_SUBCLASS)
+    return {f"src/base{suffix}": sources[0], f"src/postgres{suffix}": sources[1]}
+
+
+@pytest.mark.parametrize("suffix", [".ts", ".js"])
+def test_a_script_class_offers_the_methods_it_inherits_through_extends(tmp_path: Path, suffix: str) -> None:
     # Arrange
-    index = committed_index(tmp_path, {"src/base.ts": SCRIPT_BASE, "src/postgres.ts": SCRIPT_SUBCLASS})
+    index = committed_index(tmp_path, class_files(suffix))
 
     # Act
     offered = members_of(index, "PostgresAdapter")
 
     # Assert
-    assert [place.key for place in offered] == ["src/base.ts:2-4"]
+    assert [place.key for place in offered] == [f"src/base{suffix}:2-4"]
     assert "inherited by PostgresAdapter from BaseAdapter" in offered[0].signature
 
 
-def test_a_base_class_offers_the_classes_that_extend_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize("suffix", [".py", ".ts", ".js"])
+def test_a_base_class_offers_the_classes_that_extend_it(tmp_path: Path, suffix: str) -> None:
     # Arrange
-    index = committed_index(tmp_path, {"src/base.ts": SCRIPT_BASE, "src/postgres.ts": SCRIPT_SUBCLASS})
+    index = committed_index(tmp_path, class_files(suffix))
 
     # Act
-    offered = {place.key: place.signature for place in offered_from(index, "src/base.ts", 1)}
+    offered = {place.key: place.signature for place in offered_from(index, f"src/base{suffix}", 1)}
 
     # Assert
-    assert "refers to BaseAdapter as base" in offered["src/postgres.ts:3-7"]
+    subclass = next(key for key in offered if key.startswith(f"src/postgres{suffix}:3-"))
+    assert "refers to BaseAdapter as base" in offered[subclass]
+
+
+@pytest.mark.parametrize(("suffix", "base_class"), [(".py", "1-6"), (".ts", "1-8"), (".js", "1-8")])
+def test_a_subclass_offers_its_base_class_as_its_base(tmp_path: Path, suffix: str, base_class: str) -> None:
+    # Arrange
+    index = committed_index(tmp_path, class_files(suffix))
+    opened = index.read_slice(index.find_definition("PostgresAdapter")[0])
+
+    # Act
+    offered = neighbours(index, opened, moves={"passed_on": MOVES["passed_on"]})
+
+    # Assert
+    assert [(place.key, place.relation) for place in offered] == [
+        (f"src/base{suffix}:{base_class}", "passed on by PostgresAdapter as base")
+    ]
 
 
 def test_a_window_in_a_long_class_offers_its_methods_outside_the_window(tmp_path: Path) -> None:
