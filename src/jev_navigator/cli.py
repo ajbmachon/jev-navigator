@@ -34,7 +34,7 @@ from .judgments.store import SHARED_STORE_VARIABLE, default_shared_store, run_an
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import place_label
+from .run_files import place_label, shown_relation, step_without_key_mentions
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
@@ -296,6 +296,8 @@ def create_evidence_pack(
                 raise ValueError("repository revision changed since the evidence pack")
             checkpoint = load_resume(resume_from.resolve() / "resume.json", index)
         resume = checkpoint.result
+        if resume is not None:
+            journal.remember_moves({entry.place_key: entry.place.move for entry in resume.not_inspected})
         resuming_enumeration = checkpoint.completed is not None
         if resuming_enumeration and checkpoint.check_id != CONTAINS_IMPLEMENTATION.question_id:
             raise ValueError("Find All question changed since the evidence pack; start a new search")
@@ -979,24 +981,39 @@ def _manifest(
 
 def _drop_code(manifest: dict, index: CodeIndex) -> None:
     """Leave each place as its location: the code it held stays in the repository."""
-    entry_selection = manifest.get("entry_selection") or {}
+    _drop_entry_code(manifest.get("entry_selection") or {}, index)
+    for name in ("search", "seed_search"):
+        _drop_search_code(manifest.get(name) or {}, index)
+
+
+def _drop_entry_code(entry_selection: dict, index: CodeIndex) -> None:
     for decision in entry_selection.get("decisions", []):
         for option in decision.get("options", []):
             option.pop("description", None)
     for candidate in entry_selection.get("candidates", []):
         candidate["signature"] = place_label(index, candidate["place"])
-    for name in ("search", "seed_search"):
-        search = manifest.get(name) or {}
-        for group in ("found", "starts", "searched", "unsure"):
-            for place in search.get(group, []):
-                place.pop("code", None)
-        for entry in search.get("not_inspected", []):
-            entry["signature"] = place_label(index, entry["place"])
-        for step in search.get("history", []):
-            for fetched in step.get("fetched", []):
-                fetched.pop("code", None)
-            for offered in step.get("judgments", {}).get("could_contain", []):
-                offered["signature"] = place_label(index, offered["place"])
+
+
+def _drop_search_code(search: dict, index: CodeIndex) -> None:
+    visits = [visit for group in ("found", "starts", "searched", "unsure") for visit in search.get(group, [])]
+    moves = {visit["place"]: visit.get("move") for visit in visits if "place" in visit}
+    for visit in visits:
+        visit.pop("code", None)
+        source = visit.get("source") or {}
+        if "place" in visit and "reached_by" in source:
+            source["reached_by"] = shown_relation(visit.get("move"), source["reached_by"], visit["place"])
+    for entry in search.get("not_inspected", []):
+        entry["signature"] = place_label(index, entry["place"])
+    search["history"] = [_step_without_code(step, moves, index) for step in search.get("history", [])]
+
+
+def _step_without_code(step: dict, moves: dict, index: CodeIndex) -> dict:
+    shown = step_without_key_mentions(step, moves)
+    for fetched in shown["fetched"]:
+        fetched.pop("code", None)
+    for offered in shown["judgments"].get("could_contain", []):
+        offered["signature"] = place_label(index, offered["place"])
+    return shown
 
 
 def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previous: dict | None) -> dict:
@@ -1122,6 +1139,7 @@ def _visit(visit: Visit) -> dict:
         "probability": visit.probability,
         "verdict": visit.verdict,
         "path": list(visit.path),
+        "move": visit.move,
     }
 
 

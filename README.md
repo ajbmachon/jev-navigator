@@ -192,7 +192,7 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   code from the unchanged repository.
 
 By default the manifest, report, journal and resume state hold no source code, only locations and
-hashes. `--keep-requests` (JSON `"keep_requests": true`) also keeps the code and full neighbour
+hashes; a relation that quotes a mentioned key reads `mentions a key (path:line)`. `--keep-requests` (JSON `"keep_requests": true`) also keeps the code and full neighbour
 signatures in the manifest and report and the exact request text in the journal; use it only for
 your own or open-source code. The repository includes only a small public-format sample under
 [`examples/evidence-pack`](examples/evidence-pack).

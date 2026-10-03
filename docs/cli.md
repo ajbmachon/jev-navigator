@@ -196,7 +196,8 @@ hashes, so a run on a new commit asks again.
 Budget-stopped and cancelled packs also contain `resume.json`.
 The manifest retains the full record even if a pipeline selects only a few output fields. By default
 the manifest, report, journal and resume state hold no source code: places appear as
-`path:start-end` with file hashes, neighbours as `path:line name`, and journal requests as hashes. With `--keep-requests` the manifest and report also carry the code and the journal the
+`path:start-end` with file hashes, neighbours as `path:line name`, a key mention as `mentions a key
+(path:line)`, and journal requests as hashes. With `--keep-requests` the manifest and report also carry the code and the journal the
 exact request body; inspect the journal's exact-capture flags when auditing bytes.
 
 ## Agent workflow

@@ -12,7 +12,7 @@ from time import monotonic
 
 from .judgments.answers import TokenTotal, reported_input_tokens, reported_output_tokens
 from .judgments.journal import JournalRequest, JsonlJournal, RawResponse
-from .run_files import place_location
+from .run_files import place_location, step_without_key_mentions
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -130,25 +130,37 @@ class TerminalProgress:
 
 
 class ProgressJournal(JsonlJournal):
-    """``place_label`` turns a neighbour's place key into the label a run file shows instead of its
-    signature; the CLI sets one that adds the symbol name once the index exists."""
+    """Without ``keep_request_text`` a history step's neighbours are shown by ``place_label`` (the CLI
+    sets one that adds the symbol name once the index exists) and key mentions by location; the
+    journal remembers which move listed each neighbour so an opened key mention is shown the same way.
+    ``remember_moves`` adds the moves of a resumed frontier."""
 
     def __init__(self, path: Path, progress: TerminalProgress, *, keep_request_text: bool = False) -> None:
         super().__init__(path, keep_request_text=keep_request_text)
         self.progress = progress
         self.place_label: Callable[[str], str] = place_location
+        self._moves: dict[str, str | None] = {}
+
+    def remember_moves(self, moves: Mapping[str, str | None]) -> None:
+        self._moves.update(moves)
 
     def record_step(self, step: Mapping) -> None:
-        super().record_step(step if self.keep_request_text else self._labelled(step))
+        self._remember_offered(step)
+        super().record_step(step if self.keep_request_text else self._shown(step))
 
-    def _labelled(self, step: Mapping) -> dict:
-        judgments = dict(step.get("judgments", {}))
+    def _remember_offered(self, step: Mapping) -> None:
+        for offered in step.get("judgments", {}).get("could_contain", []):
+            self._moves[offered["place"]] = (offered.get("relationship") or {}).get("move")
+
+    def _shown(self, step: Mapping) -> dict:
+        shown = step_without_key_mentions(step, self._moves)
+        judgments = shown["judgments"]
         if "could_contain" in judgments:
             judgments["could_contain"] = [
                 {**offered, "signature": self.place_label(offered["place"])}
                 for offered in judgments["could_contain"]
             ]
-        return {**step, "judgments": judgments}
+        return shown
 
     def record_request(self, request: JournalRequest) -> str:
         request_id = super().record_request(request)
