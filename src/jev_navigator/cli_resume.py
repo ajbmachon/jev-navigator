@@ -14,6 +14,7 @@ from .index.code_index import CodeIndex
 from .index.spans import Span
 from .judgments.judge import CheckResult
 from .judgments.thresholds import NoulVerdict
+from .run_files import location_label
 
 STATE_VERSION = 1
 
@@ -72,7 +73,7 @@ def save_resume(
         "stage": "enumeration" if completed is not None else "entry" if entry_pending else "navigation",
         "check_id": check_id,
         "completed": [asdict(answer) for answer in completed] if completed is not None else None,
-        "result": None if entry_pending else _result_record(result),
+        "result": None if entry_pending else _result_record(result, index),
     }
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
@@ -112,7 +113,7 @@ def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
     return SavedSearch(result, completed, state.get("check_id"))
 
 
-def _result_record(result: FindResult) -> dict:
+def _result_record(result: FindResult, index: CodeIndex) -> dict:
     return {
         "outcome": result.outcome,
         "found": [_visit_record(item) for item in result.found],
@@ -123,7 +124,7 @@ def _result_record(result: FindResult) -> dict:
         "searched": [_visit_record(item) for item in result.searched],
         "unsure": [_visit_record(item) for item in result.unsure],
         "starts": [_visit_record(item) for item in result.starts],
-        "not_inspected": [_frontier_record(item) for item in result.not_inspected],
+        "not_inspected": [_frontier_record(item, index) for item in result.not_inspected],
     }
 
 
@@ -149,11 +150,12 @@ def _read_visit(record: dict, index: CodeIndex) -> Visit:
     )
 
 
-def _frontier_record(entry: NotInspected) -> dict:
+def _frontier_record(entry: NotInspected, index: CodeIndex) -> dict:
+    """A location, never code: no request carries a frontier place's stored signature."""
     code = entry.place.open()
     return {
         "place_key": entry.place_key,
-        "signature": entry.signature,
+        "signature": location_label(index, entry.signature),
         "kind": entry.place.kind,
         "span": asdict(code.span),
         "origin": code.origin,

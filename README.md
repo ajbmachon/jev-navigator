@@ -177,8 +177,8 @@ An explicitly selected output directory must be new or empty. Each evidence pack
 
 - `manifest.json`: schema version, navigator build fingerprint and source revision, inspected
   repository revision, explicit budget and thresholds, requested and served model, elapsed time,
-  versioned code locations (`path:start-end` with file hashes), raw probabilities, full search
-  history, uninspected frontier, and unparsed files.
+  versioned code locations (`path:start-end` with file hashes; neighbours as `path:line name`), raw
+  probabilities, full search history, uninspected frontier, and unparsed files.
 - `report.md`: a readable outcome, source table, found locations, and coverage caveat.
 - `journal.jsonl`: request hashes and exact provider responses as the run progresses.
 - `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
@@ -191,9 +191,10 @@ An explicitly selected output directory must be new or empty. Each evidence pack
 - `resume.json` (budget-stopped or cancelled runs): the frontier as locations; Resume re-reads the
   code from the unchanged repository.
 
-By default a pack holds no source code, only locations and hashes. `--keep-requests` (JSON
-`"keep_requests": true`) also keeps the code in the manifest and report and the exact request text in
-the journal; use it only for your own or open-source code. The repository includes only a small public-format sample under
+By default the manifest, report, journal and resume state hold no source code, only locations and
+hashes. `--keep-requests` (JSON `"keep_requests": true`) also keeps the code and full neighbour
+signatures in the manifest and report and the exact request text in the journal; use it only for
+your own or open-source code. The repository includes only a small public-format sample under
 [`examples/evidence-pack`](examples/evidence-pack).
 
 ## Layer 1: index, operations and comments (no model)

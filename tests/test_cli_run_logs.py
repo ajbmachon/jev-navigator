@@ -15,20 +15,23 @@ from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.judgments.questions import request_sha256
 from jev_navigator.testing import ScriptedJevClient
 
-MARKER = "ZEBRA_MARKER_7731"
+MARKER = "zebra_marker_7731"
 TARGET = "the check that limits the number of items"
 
 
 def marked_repository(root: Path) -> Path:
-    """Every function holds the marker below its first line, so locations never quote it."""
+    """The marker sits on each function's first line, which a neighbour's signature quotes, and in
+    its body; symbol names stay free of it."""
     commit_files(
         root,
         {
             "app/entry.py": (
                 "from .policy import admit\n\n"
-                f"def handle(item):\n    # {MARKER} entry\n    return admit(item)\n"
+                f"def handle(item, {MARKER}=None):\n    # {MARKER} entry\n    return admit(item)\n"
             ),
-            "app/policy.py": f"def admit(item):\n    # {MARKER} policy\n    return len(item) <= 3\n",
+            "app/policy.py": (
+                f"def admit(item, {MARKER}=None):\n    # {MARKER} policy\n    return len(item) <= 3\n"
+            ),
         },
     )
     return root
@@ -41,13 +44,33 @@ def limit_client() -> ScriptedJevClient:
     )
 
 
+def decoded_base64_fields(value: object) -> list[bytes]:
+    if isinstance(value, dict):
+        return [
+            decoded
+            for key, item in value.items()
+            for decoded in (
+                [base64.b64decode(item or "")] if key.endswith("_base64") else decoded_base64_fields(item)
+            )
+        ]
+    if isinstance(value, list):
+        return [decoded for item in value for decoded in decoded_base64_fields(item)]
+    return []
+
+
+def holds_code(path: Path) -> bool:
+    content = path.read_bytes()
+    if MARKER.encode() in content:
+        return True
+    if path.suffix != ".jsonl":
+        return False
+    records = [json.loads(line) for line in content.decode().splitlines() if line.strip()]
+    return any(MARKER.encode() in decoded for decoded in decoded_base64_fields(records))
+
+
 def files_holding_code(folder: Path) -> list[str]:
-    encoded = [base64.b64encode(f"{MARKER}{tail}".encode()) for tail in (" entry", " policy")]
-    return sorted(
-        path.name
-        for path in folder.iterdir()
-        if MARKER.encode() in path.read_bytes() or any(value[:20] in path.read_bytes() for value in encoded)
-    )
+    """Run files holding the marker as text or inside a base64 field."""
+    return sorted(path.name for path in folder.iterdir() if holds_code(path))
 
 
 def find_pack(repository: Path, output: Path, workflow: str, max_calls: int, **options) -> dict:
@@ -170,3 +193,75 @@ def test_the_json_request_field_keep_requests_reaches_the_run_folder(
     # Assert
     assert exit_code == 0
     assert (files_holding_code(output) != []) is keep_requests
+
+
+def test_a_capped_run_and_its_resume_send_exactly_the_requests_of_an_uninterrupted_run(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    whole_client, first_client, resumed_client = limit_client(), limit_client(), limit_client()
+    options = {"fact_cache_dir": tmp_path / "fact-cache"}
+    start = ("app/entry.py:5",)
+    whole_budget = SearchBudget(beam_width=1, max_calls=5)
+    capped_budget = SearchBudget(beam_width=1, max_calls=1)
+    create_evidence_pack(
+        repository, ("app/",), TARGET, start, tmp_path / "whole", whole_budget, whole_client, **options
+    )
+    create_evidence_pack(
+        repository, ("app/",), TARGET, start, tmp_path / "first", capped_budget, first_client, **options
+    )
+
+    # Act
+    resumed = create_evidence_pack(
+        repository,
+        ("app/",),
+        TARGET,
+        start,
+        tmp_path / "second",
+        whole_budget,
+        resumed_client,
+        resume_from=tmp_path / "first",
+        **options,
+    )
+
+    # Assert
+    def hashes(client: ScriptedJevClient) -> list[str]:
+        return [request_sha256(state, questions) for state, questions in client.requests]
+
+    assert resumed["search"]["outcome"] == "found"
+    assert hashes(first_client) + hashes(resumed_client) == hashes(whole_client)
+    assert any(MARKER in json.dumps(state) for state, _ in resumed_client.requests)
+    assert files_holding_code(tmp_path / "first") == []
+
+
+def offered_signatures(manifest: dict) -> list[str]:
+    return [
+        offered["signature"]
+        for step in manifest["search"]["history"]
+        for offered in step["judgments"].get("could_contain", [])
+    ]
+
+
+def test_a_default_run_names_a_neighbour_by_location_and_symbol(tmp_path: Path) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+
+    # Act
+    manifest = find_pack(repository, tmp_path / "pack", "find", 5)
+
+    # Assert
+    assert "app/policy.py:1 admit (called by handle)" in offered_signatures(manifest)
+
+
+def test_keep_requests_keeps_each_neighbour_signature_whole(tmp_path: Path) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+
+    # Act
+    manifest = find_pack(repository, tmp_path / "pack", "find", 5, keep_requests=True)
+
+    # Assert
+    assert f"app/policy.py:1 `def admit(item, {MARKER}=None):` (called by handle)" in offered_signatures(
+        manifest
+    )

@@ -13,6 +13,7 @@ import sys
 from collections.abc import MutableMapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from time import monotonic
 
@@ -33,6 +34,7 @@ from .judgments.store import SHARED_STORE_VARIABLE, default_shared_store, run_an
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
+from .run_files import location_label
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
@@ -285,6 +287,7 @@ def create_evidence_pack(
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
+        journal.place_label = partial(location_label, index)
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
         checkpoint = SavedSearch(None)
@@ -417,7 +420,7 @@ def create_evidence_pack(
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
             manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
         if not keep_requests:
-            _drop_code(manifest)
+            _drop_code(manifest, index)
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
@@ -974,19 +977,26 @@ def _manifest(
     }
 
 
-def _drop_code(manifest: dict) -> None:
-    """Leave each judged place as its location: the code it held stays in the repository."""
-    for decision in (manifest.get("entry_selection") or {}).get("decisions", []):
+def _drop_code(manifest: dict, index: CodeIndex) -> None:
+    """Leave each place as its location: the code it held stays in the repository."""
+    entry_selection = manifest.get("entry_selection") or {}
+    for decision in entry_selection.get("decisions", []):
         for option in decision.get("options", []):
             option.pop("description", None)
+    for candidate in entry_selection.get("candidates", []):
+        candidate["signature"] = location_label(index, candidate["signature"])
     for name in ("search", "seed_search"):
         search = manifest.get(name) or {}
         for group in ("found", "starts", "searched", "unsure"):
             for place in search.get(group, []):
                 place.pop("code", None)
+        for entry in search.get("not_inspected", []):
+            entry["signature"] = location_label(index, entry["signature"])
         for step in search.get("history", []):
             for fetched in step.get("fetched", []):
                 fetched.pop("code", None)
+            for offered in step.get("judgments", {}).get("could_contain", []):
+                offered["signature"] = location_label(index, offered["signature"])
 
 
 def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previous: dict | None) -> dict:
