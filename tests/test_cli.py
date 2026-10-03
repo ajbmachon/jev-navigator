@@ -1019,7 +1019,7 @@ def test_each_run_names_its_answer_store_and_a_fresh_store_isolates_runs(
     monkeypatch.setattr(cli, "TypeSafeJevClient", client)
     common = ["findall", "the item limit", "--repo", str(repository)]
     arm_a, arm_b = tmp_path / "arm-a.sqlite", tmp_path / "arm-b.sqlite"
-    default_store = os.environ[SHARED_STORE_VARIABLE]
+    default_store = os.environ.get(SHARED_STORE_VARIABLE)
 
     # Act
     main([*common, "--answer-store", str(arm_a), "--out", str(tmp_path / "a1")])
@@ -1033,6 +1033,6 @@ def test_each_run_names_its_answer_store_and_a_fresh_store_isolates_runs(
     assert f"answer store: {arm_b}" in later_err
     first, repeat, isolated = (len(instance.requests) for instance in clients)
     assert first > 1 and repeat == 1 and isolated == first
-    assert os.environ[SHARED_STORE_VARIABLE] == default_store, (
+    assert os.environ.get(SHARED_STORE_VARIABLE) == default_store, (
         "the flag never travels through the environment"
     )

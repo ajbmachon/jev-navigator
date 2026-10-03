@@ -238,8 +238,12 @@ name. A callback passed to a call (`it("works", () => ...)`) is held by no name 
 and keeps test and framework callbacks from sharing the names `it`, `describe` or `expect`. A
 callback spanning exactly a named symbol's lines (`xs.map((x) => x.id)` on the one line of `ids`) is
 the same place, so it is left out rather than listed as a second, anonymous symbol.
-Persistent facts are keyed by source bytes, language, parser version and `FACT_RULE_VERSION`.
-A change to extracted facts must change that rule identity so existing cached results are reparsed.
+Persistent facts are keyed by source bytes, language, parser version, the ast-grep rule text a scan
+of that language sends, and the source of the modules that build the rules and turn matches into
+facts (`fact_cache._MODULES_THAT_READ_MATCHES`). Changing a rule or the code that reads matches
+reparses existing cached results by itself; there is no version string to bump. A new module that
+shapes facts belongs in that tuple.
+
 Name lookups reuse an in-memory index of parsed definitions, calls and references, including facts
 loaded from the persistent cache. Text discovery searches only files without facts. A bidirectional
 trace prepares the scoped fact inventory in one batch before walking incoming and outgoing links;

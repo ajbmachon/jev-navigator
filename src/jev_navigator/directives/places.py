@@ -273,9 +273,10 @@ def _callees(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 
 def _callee_rank(index: CodeIndex, edge: CallEdge) -> tuple[bool, bool, int]:
+    """A callee with no definition yields no place, so its call sites are never counted."""
     targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
     only_tests = bool(targets) and all(_is_test_file(target.file) for target in targets)
-    return not edge.binding.proven, only_tests, index.call_site_count(edge.name)
+    return not edge.binding.proven, only_tests, index.call_site_count(edge.name) if targets else 0
 
 
 def _referenced_by(index: CodeIndex, opened: CodeSlice) -> list[Place]:

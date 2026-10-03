@@ -12,8 +12,9 @@ import tempfile
 import threading
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
-from functools import cache
+from functools import cache, lru_cache
 from pathlib import Path, PurePosixPath
+from typing import TypeVar
 
 from . import tools
 from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
@@ -30,6 +31,7 @@ from .languages import (
     declares_type,
     declares_value,
     language_of,
+    split_lines,
 )
 from .packages import Packages
 from .scope_scan import FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
@@ -39,10 +41,13 @@ from .tsconfig import ScriptPaths, nearest_script_paths
 DEFAULT_WINDOW_RADIUS = 10
 MAX_TEXT_HITS = 20
 CO_CHANGE_COMMITS = 200
+LINE_CACHE_FILES = 512
 _COMMIT_MARK = "@@commit@@"
 _REGULAR_FILE_MODES = frozenset({"100644", "100755"})
 _WORD = re.compile(r"[\w$]+")
 ScanObserver = Callable[[str, str, int], None]
+_Result = TypeVar("_Result")
+CoChange = tuple[str, int]
 
 
 _NO_STRUCTURE = FileStructure((), (), ())
@@ -90,8 +95,8 @@ class CodeIndex:
         _require_inside(self.root, self.files)
         self._scope = frozenset(self.files)
         self._code_files = tuple(path for path in self.files if language_of(path))
-        self._lines_of = cache(self._read_lines)
-        self._file_sha256 = cache(self._read_file_sha256)
+        self._lines_of = lru_cache(maxsize=LINE_CACHE_FILES)(self._read_lines)
+        self._sha256: dict[str, str] = {}
         self._script_paths_in = cache(self._read_script_paths)
         self._packages = cache(self._read_packages)
         self._unparsed = Unparsed()
@@ -101,6 +106,9 @@ class CodeIndex:
         self._facts_lock = threading.RLock()
         self._fact_cache = FactCache(fact_cache_dir)
         self._files_for_name = cache(self._candidate_files)
+        self._discovered: dict[str, frozenset[str]] = {}
+        self._text_hits = cache(self._search_text)
+        self._co_changes = cache(self._read_co_changes)
         self._calls_named = cache(self._calls_with_name)
         self._references_named = cache(self._references_with_name)
         self._definitions = cache(self._definitions_by_name)
@@ -311,10 +319,15 @@ class CodeIndex:
 
     def callee_edges(self, function: Span) -> tuple[CallEdge, ...]:
         self._require_in_scope(function.file)
+        calls = [
+            call
+            for call in self._facts_in(function.file).calls
+            if function.start <= call.line <= function.end
+        ]
+        self.prefetch_names(call.name for call in calls)
         edges: dict[str, CallEdge] = {}
-        for call in self._facts_in(function.file).calls:
-            inside = call.file == function.file and function.start <= call.line <= function.end
-            if inside and call.name not in edges:
+        for call in calls:
+            if call.name not in edges:
                 binding = self.binding_of(call.file, call.line, call.name, call.receiver)
                 edges[call.name] = CallEdge(call.name, call.line, binding)
         return tuple(edges.values())
@@ -348,6 +361,8 @@ class CodeIndex:
         return self._binding(file, line, name, receiver, role)
 
     def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
+        matches = sorted(set(matches))
+        self.prefetch_names(match.name for match in matches)
         return tuple(
             Reference(
                 match.name,
@@ -357,7 +372,7 @@ class CodeIndex:
                 self.enclosing_symbol(match.file, match.line),
                 self.binding_of(match.file, match.line, match.name, match.receiver, match.role),
             )
-            for match in sorted(set(matches))
+            for match in matches
         )
 
     def _compute_binding(
@@ -441,14 +456,45 @@ class CodeIndex:
             if reference.name == name
         )
 
+    def prefetch_names(self, names: Iterable[str]) -> None:
+        """Finds the unparsed files that may mention each of ``names`` with one ripgrep, so the
+        lookups of these names that follow start no search of their own."""
+        self._discover(names)
+
     def _candidate_files(self, name: str) -> tuple[str, ...]:
         # Parsed facts already answer name membership. Only unparsed inventory needs text discovery.
+        self._discover((name,))
         with self._facts_lock:
-            known = set(self._fact_files_by_name.get(name, ()))
-            remaining = tuple(file for file in self._code_files if file not in self._facts)
-        discovered = tools.ripgrep_files(name, self._available_files(remaining), self.root)
-        candidates = known.union(discovered)
+            candidates = self._fact_files_by_name.get(name, set()) | self._discovered[name]
         return tuple(file for file in self._code_files if file in candidates)
+
+    def _discover(self, names: Iterable[str]) -> None:
+        with self._facts_lock:
+            new = [name for name in dict.fromkeys(names) if name not in self._discovered]
+            remaining = tuple(
+                file for file in self._code_files if file not in self._facts and file not in self._unavailable
+            )
+        if not new:
+            return
+        mentioning = self._on_available(remaining, lambda files: tools.ripgrep_files(new, files, self.root))
+        found = self._files_by_name(new, mentioning)
+        with self._facts_lock:
+            for name in new:
+                self._discovered.setdefault(name, found[name])
+
+    def _files_by_name(self, names: Sequence[str], files: Sequence[str]) -> dict[str, frozenset[str]]:
+        """Which of ``files`` (each known to hold one of ``names``) holds each name, reading each file
+        once."""
+        if len(names) == 1:
+            return {names[0]: frozenset(files)}
+        holding: dict[str, set[str]] = {name: set() for name in names}
+        patterns = [(name, name.encode()) for name in names]
+        for file in files:
+            content = self._read_bytes(file) or b""
+            for name, pattern in patterns:
+                if pattern in content:
+                    holding[name].add(file)
+        return {name: frozenset(found) for name, found in holding.items()}
 
     def _remember_facts(self, file: str, facts: FileFacts) -> None:
         self._facts[file] = facts
@@ -471,51 +517,57 @@ class CodeIndex:
 
     def _ensure_facts(self, files: Sequence[str]) -> None:
         with self._facts_lock:
-            missing = [
-                file
-                for file in self._available_files(files)
-                if language_of(file) is not None and file not in self._facts
-            ]
-            if not missing:
+            contents = self._load_cached_facts(files)
+            if not contents:
                 return
-            to_scan = []
-            contents: dict[str, bytes] = {}
-            for file in missing:
-                try:
-                    content = (self.root / file).read_bytes()
-                except FileNotFoundError:
-                    self._unavailable[file] = "disappeared after inventory"
-                    continue
-                contents[file] = content
-                cached = self._fact_cache.load(file, content)
-                if cached is None:
-                    to_scan.append(file)
-                else:
-                    self._remember_facts(file, cached)
-                    if cached.incomplete:
-                        self._unparsed.add("facts", (file,))
-            if not to_scan:
-                return
+            to_scan = tuple(contents)
             scanned = self._run_scan(
                 "facts",
                 lambda: self._scan_available_facts(to_scan),
                 len(to_scan),
             )
             for file, facts in scanned.items():
+                if self._read_bytes(file) is None:
+                    continue
                 self._remember_facts(file, facts)
                 self._fact_cache.save(file, contents[file], facts)
 
+    def _load_cached_facts(self, files: Sequence[str]) -> dict[str, bytes]:
+        """Remembers the persisted facts of ``files``; returns the bytes of those still to parse.
+
+        The caller holds the facts lock."""
+        to_parse: dict[str, bytes] = {}
+        for file in files:
+            if language_of(file) is None or file in self._facts or file in self._unavailable:
+                continue
+            content = self._read_bytes(file)
+            if content is None:
+                continue
+            cached = self._fact_cache.load(file, content)
+            if cached is None:
+                to_parse[file] = content
+                continue
+            self._remember_facts(file, cached)
+            if cached.incomplete:
+                self._unparsed.add("facts", (file,))
+        return to_parse
+
     def _scan_available_facts(self, files: Sequence[str]) -> dict[str, FileFacts]:
-        remaining = tuple(files)
-        while remaining:
+        return self._on_available(
+            tuple(files), lambda remaining: scan_facts(remaining, self.root, self._unparsed)
+        )
+
+    def _on_available(self, files: tuple[str, ...], run: Callable[[tuple[str, ...]], _Result]) -> _Result:
+        """``run(files)``. Only when the tool fails are the files checked; it then runs again over
+        those still present, and a failure with every file present is the tool's own."""
+        while True:
             try:
-                return scan_facts(remaining, self.root, self._lines_of, self._unparsed)
+                return run(files)
             except tools.ToolFailedError:
-                available = self._available_files(remaining)
-                if available == remaining:
+                available = self._available_files(files)
+                if available == files:
                     raise
-                remaining = available
-        return {}
+                files = available
 
     def _top_level_spans(self, file: str) -> frozenset[Span]:
         """Symbols and declarations of ``file`` that no class or other function contains. A function
@@ -594,7 +646,14 @@ class CodeIndex:
         return self.read_slice(span, origin)
 
     def search_text(self, text: str, max_hits: int = MAX_TEXT_HITS) -> tuple[TextHit, ...]:
-        found = tools.ripgrep_fixed(text, self._available_files(self.files), self.root, max_hits)
+        """Lines holding ``text``, searched once per text for the life of the index."""
+        return self._text_hits(text, max_hits)
+
+    def _search_text(self, text: str, max_hits: int) -> tuple[TextHit, ...]:
+        readable = tuple(file for file in self.files if file not in self._unavailable)
+        found = self._on_available(
+            readable, lambda files: tools.ripgrep_fixed(text, files, self.root, max_hits)
+        )
         hits = sorted(hit for hit in found if hit.file in self._scope)
         return tuple(hits[:max_hits])
 
@@ -629,9 +688,13 @@ class CodeIndex:
         self._require_in_scope(file)
         return tuple(path for path in self._code_files if path != file and file in self.imports(path))
 
-    def co_changed_files(self, file: str, limit: int = 5) -> tuple[tuple[str, int], ...]:
-        """Scope files most often committed together with ``file``, with their shared-commit counts."""
+    def co_changed_files(self, file: str, limit: int = 5) -> tuple[CoChange, ...]:
+        """Scope files most often committed together with ``file``, with their shared-commit counts;
+        the history is read once per file for the life of the index."""
         self._require_in_scope(file)
+        return self._co_changes(file)[:limit]
+
+    def _read_co_changes(self, file: str) -> tuple[CoChange, ...]:
         if not self.commit:
             return ()
         log = tools.git(
@@ -653,7 +716,7 @@ class CodeIndex:
             path for commit in _commits(log) if file in commit for path in commit if path != file
         )
         in_scope = [(path, count) for path, count in counts.most_common() if path in self._scope]
-        return tuple(sorted(in_scope, key=lambda item: (-item[1], item[0]))[:limit])
+        return tuple(sorted(in_scope, key=lambda item: (-item[1], item[0])))
 
     def _revision_of(self, file: str) -> str:
         if not self.commit:
@@ -676,19 +739,29 @@ class CodeIndex:
 
     def _read_lines(self, file: str) -> tuple[str, ...]:
         self._require_in_scope(file)
-        try:
-            return _split_lines((self.root / file).read_text(errors="replace"))
-        except FileNotFoundError:
-            self._unavailable[file] = "disappeared after inventory"
-            return ()
+        content = self._read_bytes(file)
+        return split_lines(content.decode(errors="replace")) if content is not None else ()
 
-    def _read_file_sha256(self, file: str) -> str:
+    def _file_sha256(self, file: str) -> str:
+        """The SHA-256 of the bytes the index first read from ``file``."""
         self._require_in_scope(file)
+        if file not in self._sha256:
+            self._read_bytes(file)
+        return self._sha256.get(file, "")
+
+    def _read_bytes(self, file: str) -> bytes | None:
+        """The file's bytes, every read checked against the first: once a file changes on disk, its
+        facts and lines no longer agree, so it is reported unavailable instead of read."""
         try:
-            return hashlib.sha256((self.root / file).read_bytes()).hexdigest()
+            content = (self.root / file).read_bytes()
         except FileNotFoundError:
             self._unavailable[file] = "disappeared after inventory"
-            return ""
+            return None
+        digest = hashlib.sha256(content).hexdigest()
+        if self._sha256.setdefault(file, digest) != digest:
+            self._unavailable[file] = "changed on disk after the index first read it"
+            return None
+        return content
 
     def _available_files(self, files: Sequence[str]) -> tuple[str, ...]:
         available = []
@@ -745,13 +818,6 @@ def _require_inside(root: Path, files: Iterable[str]) -> None:
         path = root / file
         if path.is_symlink() or not path.resolve().is_relative_to(resolved_root):
             raise UnsafePathError(f"{file} is a symbolic link or lies outside {root}")
-
-
-def _split_lines(text: str) -> tuple[str, ...]:
-    """Lines split at newlines only, as the parser counts them; ``str.splitlines`` also splits at form
-    feeds and other separators, which would shift every line number after them."""
-    lines = text.replace("\r", "").split("\n")
-    return tuple(lines[:-1] if lines and lines[-1] == "" else lines)
 
 
 def _changed_paths(status: str) -> list[str]:

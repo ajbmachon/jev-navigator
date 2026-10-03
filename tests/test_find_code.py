@@ -233,9 +233,9 @@ def test_budget_receipt_does_not_start_unused_scope_scans(
     actual_scan = code_index.scan_facts
     scanned: list[tuple[str, ...]] = []
 
-    def observe_scan(files, root, lines_of, unparsed):
+    def observe_scan(files, root, unparsed):
         scanned.append(tuple(files))
-        return actual_scan(files, root, lines_of, unparsed)
+        return actual_scan(files, root, unparsed)
 
     monkeypatch.setattr(code_index, "scan_facts", observe_scan)
     index.functions_in("broken.js")

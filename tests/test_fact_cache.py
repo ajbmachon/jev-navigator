@@ -5,7 +5,7 @@ from threading import Barrier
 
 import pytest
 
-from jev_navigator.index import fact_cache
+from jev_navigator.index import fact_cache, languages, spans
 from jev_navigator.index.fact_cache import FactCache
 from jev_navigator.index.scope_scan import Unparsed, scan_facts
 
@@ -67,9 +67,7 @@ def example(tmp_path):
     source = tmp_path / "module.py"
     source.write_bytes(content)
     unparsed = Unparsed()
-    facts = scan_facts(
-        ["module.py"], tmp_path, lambda file: (tmp_path / file).read_text().splitlines(), unparsed
-    )
+    facts = scan_facts(["module.py"], tmp_path, unparsed)
     assert not unparsed.files
     assert facts["module.py"].calls
     return content, facts["module.py"]
@@ -87,7 +85,14 @@ def test_roundtrip_rebinds_paths_without_retaining_source(tmp_path, example):
     assert all(content.decode() not in p.read_text() for p in cache.root.rglob("*.json"))
 
 
-def test_content_language_parser_and_rules_invalidate(tmp_path, example, monkeypatch):
+@pytest.fixture
+def rule_identity_reset(request):
+    """Rules patched in a test change the identity the fact cache computes once per process."""
+    fact_cache._rules_identity.cache_clear()
+    request.addfinalizer(fact_cache._rules_identity.cache_clear)
+
+
+def test_content_language_parser_and_rules_invalidate(tmp_path, example, monkeypatch, rule_identity_reset):
     content, facts = example
     cache = FactCache(tmp_path / "cache")
     cache.save("module.py", content, facts)
@@ -98,7 +103,8 @@ def test_content_language_parser_and_rules_invalidate(tmp_path, example, monkeyp
     cache.parser = previous_parser + "-different"
     assert cache.load("module.py", content) is None
     cache.parser = previous_parser
-    monkeypatch.setattr(fact_cache, "FACT_RULE_VERSION", fact_cache.FACT_RULE_VERSION + "-different")
+    monkeypatch.setitem(languages.FUNCTION_KINDS, "python", ("function_definition", "lambda"))
+    fact_cache._rules_identity.cache_clear()
     assert cache.load("module.py", content) is None
 
 
@@ -142,7 +148,7 @@ def test_concurrent_writers_publish_one_complete_entry(tmp_path, example, monkey
     assert cache.load("module.py", content) == facts
 
 
-def test_node_name_fix_reparses_facts_cached_by_the_previous_rule_version(tmp_path, monkeypatch):
+def test_facts_cached_under_other_rules_are_parsed_again(tmp_path, monkeypatch, rule_identity_reset):
     from jev_navigator.index.code_index import CodeIndex
     from jev_navigator.index.scope_scan import FileFacts, FileStructure
     from jev_navigator.index.spans import Span
@@ -157,8 +163,9 @@ def test_node_name_fix_reparses_facts_cached_by_the_previous_rule_version(tmp_pa
     collapsed = Span("box.ts", 1, 1, "Box")
     old = FileFacts(FileStructure((collapsed,), (collapsed,), ()), (), (), False)
     with monkeypatch.context() as previous:
-        previous.setattr(fact_cache, "FACT_RULE_VERSION", "combined-facts-v8-export-surface")
+        previous.setitem(languages.FUNCTION_KINDS, "typescript", ("function_declaration",))
         FactCache(cache_root).save("box.ts", content, old)
+    fact_cache._rules_identity.cache_clear()
     scans = []
     index = CodeIndex.from_directory(
         repo,
@@ -168,3 +175,23 @@ def test_node_name_fix_reparses_facts_cached_by_the_previous_rule_version(tmp_pa
     assert [span.name for span in index.functions_in("box.ts")] == ["v"]
     assert {span.name for span in index.symbols_in("box.ts")} == {"Box", "v"}
     assert any(event[1] == "started" for event in scans)
+
+
+def test_a_change_to_the_code_that_reads_matches_is_a_cache_miss(tmp_path, example, monkeypatch, request):
+    # Arrange
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    edited = tmp_path / "spans.py"
+    edited.write_text(Path(spans.__file__).read_text() + "\n# an edit to how matches become facts\n")
+    request.addfinalizer(fact_cache._match_reader_source.cache_clear)
+    request.addfinalizer(fact_cache._rules_identity.cache_clear)
+
+    # Act
+    monkeypatch.setattr(spans, "__file__", str(edited))
+    fact_cache._match_reader_source.cache_clear()
+    fact_cache._rules_identity.cache_clear()
+    reused = cache.load("module.py", content)
+
+    # Assert
+    assert reused is None

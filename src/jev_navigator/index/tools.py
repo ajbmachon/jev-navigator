@@ -7,7 +7,7 @@ import json
 import logging
 import subprocess
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 AST_GREP = "ast-grep"
 RIPGREP = "rg"
 _NO_MATCHES_EXIT = 1
+MAX_FILES_PER_COMMAND = 300
+MAX_ARGUMENT_BYTES = 128 * 1024
 
 
 class ToolFailedError(RuntimeError):
@@ -39,12 +41,15 @@ def ast_grep_version() -> str:
     return run_command([AST_GREP, "--version"], Path.cwd()).strip()
 
 
-def ast_grep_rules(rules_yaml: str, files: Sequence[str], cwd: Path, config: str | None = None) -> list[dict]:
-    """The matches of ``rules_yaml`` over ``files``. ``config``, when given, is sgconfig YAML text
-    (a ``languageGlobs`` remapping, say); it is written to a temporary file outside every repository
-    and passed with ``-c``."""
+def ast_grep_rules(
+    rules_yaml: str, files: Sequence[str], cwd: Path, config: str | None = None
+) -> Iterator[dict]:
+    """The matches of ``rules_yaml`` over ``files``, one at a time as ast-grep prints them, so no
+    process's whole output is ever held. ``config``, when given, is sgconfig YAML text (a
+    ``languageGlobs`` remapping, say); it is written to a temporary file outside every repository and
+    passed with ``-c``."""
     if not files:
-        return []
+        return
     with ExitStack() as resources:
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml]
         if config is not None:
@@ -52,38 +57,76 @@ def ast_grep_rules(rules_yaml: str, files: Sequence[str], cwd: Path, config: str
             path = Path(directory) / "sgconfig.yml"
             path.write_text(config)
             command += ["--config", str(path)]
-        output = run_command(
-            [*command, "--json=compact", *files],
-            cwd,
-            no_match_exit=_NO_MATCHES_EXIT,
-        )
-    return _json_list(output)
+        for chunk in file_chunks(files):
+            yield from _json_lines([*command, "--json=stream", *chunk], cwd)
+
+
+def file_chunks(files: Sequence[str]) -> Iterator[Sequence[str]]:
+    """``files`` in order, split so no command gets more than ``MAX_FILES_PER_COMMAND`` paths or
+    ``MAX_ARGUMENT_BYTES`` of them, whatever the size of the scope."""
+    start, size = 0, 0
+    for position, file in enumerate(files):
+        length = len(file.encode()) + 1
+        full = position - start >= MAX_FILES_PER_COMMAND or size + length > MAX_ARGUMENT_BYTES
+        if position > start and full:
+            yield files[start:position]
+            start, size = position, 0
+        size += length
+    if start < len(files):
+        yield files[start:]
+
+
+def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
+    """Each line the command prints, parsed as JSON while it runs. stderr goes to a file, so a full
+    stderr pipe cannot stall the command; the process is killed if the reader stops early."""
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(list(arguments), cwd=cwd, stdout=subprocess.PIPE, stderr=errors, text=True)
+        try:
+            for line in process.stdout:
+                if line.strip():
+                    yield json.loads(line)
+        except BaseException:
+            process.kill()
+            raise
+        finally:
+            process.stdout.close()
+            returncode = process.wait()
+        if returncode not in (0, _NO_MATCHES_EXIT):
+            errors.seek(0)
+            detail = errors.read().decode(errors="replace").strip()[:300]
+            raise ToolFailedError(f"{arguments[0]} exited {returncode}: {detail}")
 
 
 def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
     """The lines holding ``text``. JSON events are split at newlines only, since a line of code may
     hold a Unicode line separator that ``str.splitlines`` would split."""
-    if not files:
-        return []
-    output = run_command(
-        [RIPGREP, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text, *files],
-        cwd,
-        no_match_exit=_NO_MATCHES_EXIT,
-    )
-    events = (json.loads(line) for line in output.split("\n") if line.strip())
-    return [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
+    command = [RIPGREP, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
+    hits = []
+    for chunk in file_chunks(files):
+        output = run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
+        events = (json.loads(line) for line in output.split("\n") if line.strip())
+        hits += [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
+    return hits
 
 
-def ripgrep_files(text: str, files: Sequence[str], cwd: Path) -> tuple[str, ...]:
-    """Every supplied file containing the exact text, without a result-count cutoff."""
-    if not files:
+def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -> tuple[str, ...]:
+    """Every supplied file containing any of the exact ``texts``, without a result-count cutoff. The
+    texts go to ripgrep in a pattern file, one per line, so their number never meets the argument
+    limit."""
+    patterns = [texts] if isinstance(texts, str) else list(texts)
+    if not files or not patterns:
         return ()
-    output = run_command(
-        [RIPGREP, "--files-with-matches", "--null", "--fixed-strings", "--", text, *files],
-        cwd,
-        no_match_exit=_NO_MATCHES_EXIT,
-    )
-    return tuple(path.removeprefix("./") for path in output.split("\0") if path)
+    if any("\n" in pattern for pattern in patterns):
+        raise ValueError("a text searched for by file cannot hold a line break")
+    with tempfile.NamedTemporaryFile("w", prefix="jev-navigator-patterns-", suffix=".txt") as pattern_file:
+        pattern_file.write("".join(f"{pattern}\n" for pattern in patterns))
+        pattern_file.flush()
+        command = [RIPGREP, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_file.name]
+        found: list[str] = []
+        for chunk in file_chunks(files):
+            output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
+            found += [path.removeprefix("./") for path in output.split("\0") if path]
+    return tuple(found)
 
 
 def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
@@ -136,10 +179,6 @@ def _decoded(field: dict) -> str:
 
 def git(arguments: Sequence[str], cwd: Path) -> str:
     return run_command(["git", *arguments], cwd)
-
-
-def _json_list(output: str) -> list[dict]:
-    return json.loads(output) if output.strip() else []
 
 
 def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) -> None:

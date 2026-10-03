@@ -233,13 +233,10 @@ def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp
     (tmp_path / "notes.md").write_text("# notes\n")
     (tmp_path / "module.py").write_text("def greet(): return 1\n")
 
-    def lines_of(path: str) -> list[str]:
-        return (tmp_path / path).read_text().splitlines()
-
     empty = FileFacts(FileStructure((), (), ()), (), ())
 
-    unsupported = scan_facts(["notes.md"], tmp_path, lines_of, Unparsed())
-    mixed = scan_facts(["module.py", "notes.md"], tmp_path, lines_of, Unparsed())
+    unsupported = scan_facts(["notes.md"], tmp_path, Unparsed())
+    mixed = scan_facts(["module.py", "notes.md"], tmp_path, Unparsed())
 
     assert unsupported == {"notes.md": empty}
     assert mixed["module.py"].structure.functions == (Span("module.py", 1, 1, "greet"),)

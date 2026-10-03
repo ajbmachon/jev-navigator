@@ -8,7 +8,7 @@ ERROR nodes, so incomplete coverage stays visible."""
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -133,19 +133,26 @@ def language_of(path: str) -> str | None:
     return LANGUAGE_BY_SUFFIX.get(PurePosixPath(path).suffix)
 
 
-def language_for(path: str, lines: Sequence[str] | None = None) -> str | None:
-    """The language ``path`` parses as: like ``language_of``, but a JavaScript file whose leading
-    comments carry the ``@flow`` pragma parses as ``flow`` (with the tsx grammar)."""
+def parse_language(path: str, content: bytes) -> str | None:
+    """The language a file holding ``content`` parses as: like ``language_of``, but a JavaScript file
+    whose leading comments carry the ``@flow`` pragma parses as ``flow`` (with the tsx grammar)."""
     language = language_of(path)
-    if language == "javascript" and lines is not None and has_flow_pragma(lines):
+    if language == "javascript" and has_flow_pragma(split_lines(content.decode(errors="replace"))):
         return FLOW_LANGUAGE
     return language
+
+
+def split_lines(text: str) -> tuple[str, ...]:
+    """Lines split at newlines only, as the parser counts them; ``str.splitlines`` also splits at form
+    feeds and other separators, which would shift every line number after them."""
+    lines = text.replace("\r", "").split("\n")
+    return tuple(lines[:-1] if lines and lines[-1] == "" else lines)
 
 
 _FLOW_PRAGMA = re.compile(r"@flow\b")
 
 
-def has_flow_pragma(lines: Sequence[str]) -> bool:
+def has_flow_pragma(lines: Iterable[str]) -> bool:
     """True when a leading comment of the source carries the ``@flow`` pragma. Only comments before
     the first line of code count — never ``@flow`` in a string or the body — and the scan stops at
     that first code line, however far down it sits: leading comments may be arbitrarily long. A

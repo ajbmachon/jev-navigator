@@ -31,10 +31,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from ..cache_root import cache_root
 from .answers import Answer, JevResponse, answer_from_json
 from .relations import without_quoted_code
 
-DEFAULT_SHARED_STORE = Path.home() / ".cache/jev-navigator/answers.sqlite"
 SHARED_STORE_VARIABLE = "JEV_NAVIGATOR_ANSWER_STORE"
 SKELETON_ITEM_FIELDS = frozenset(
     {"file", "lines", "commit", "file_sha256", "reached_by", "span_key", "name", "place"}
@@ -199,7 +199,7 @@ class SqliteAnswerStore:
     runs read and write the file at once. A record is stored without its request, sent bytes and
     skeleton, so no code, state or question text reaches this file whatever the caller keeps.
 
-    Provisional (open question O29 for André): the location defaults to ``DEFAULT_SHARED_STORE``
+    Provisional (open question O29 for André): the location defaults to ``default_shared_store()``
     under the JVN cache root, overridable with ``SHARED_STORE_VARIABLE``, and answers never expire.
     """
 
@@ -340,9 +340,13 @@ def run_answer_store(pack: Path, shared: Path | None = None) -> LayeredAnswerSto
 
 
 def shared_store_path(environment: Mapping[str, str] | None = None) -> Path:
-    """The shared store's file: ``SHARED_STORE_VARIABLE`` when set, else ``DEFAULT_SHARED_STORE``."""
+    """The shared store's file: ``SHARED_STORE_VARIABLE`` when set, else ``default_shared_store()``."""
     environment = os.environ if environment is None else environment
-    return Path(environment.get(SHARED_STORE_VARIABLE) or DEFAULT_SHARED_STORE)
+    return Path(environment.get(SHARED_STORE_VARIABLE) or default_shared_store())
+
+
+def default_shared_store() -> Path:
+    return cache_root() / "answers.sqlite"
 
 
 def _code_free(record: AnswerRecord) -> AnswerRecord:

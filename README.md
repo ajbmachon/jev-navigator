@@ -183,8 +183,8 @@ An explicitly selected output directory must be new or empty. Each evidence pack
 - `journal.jsonl`: every masked request as sent (state, questions and body bytes, so it holds
   code) and the exact provider responses, as the run progresses.
 - `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
-  written to the machine's shared answer store (`~/.cache/jev-navigator/answers.sqlite`, or
-  `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
+  written to the machine's shared answer store (`$XDG_CACHE_HOME/jev-navigator/answers.sqlite`,
+  `~/.cache` when the variable is unset, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
   same questions replays from it after one live request that learns the served model (Find All and
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
   `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
@@ -274,12 +274,21 @@ out of the root (through a linked directory or `..`), raises `UnsafePathError` w
 before any tool reads it.
 
 The index extracts symbols, declarations, calls and non-call references together in one ast-grep
-pass over the files a lookup actually needs. Exact-name lookups first use ripgrep to narrow the
-candidate files; opening a known span parses its file directly. The resulting per-file facts are
-cached by source bytes, language, ast-grep version and rule version, so a new index can reuse facts
-without treating changed source or changed parser rules as current. Each call site's binding is
-computed once. There is no default file-count refusal or parser timeout, and no requested file is
-silently omitted.
+pass over the files a lookup actually needs. The pass runs a few hundred files per ast-grep process
+and turns each match into its fact as ast-grep prints it, so memory holds the facts, never the
+parser's output, and no command line outgrows the system's argument limit. Facts that start on the
+same line are ordered by their position in the line, so every run returns them in the same order.
+Exact-name lookups first use ripgrep to narrow the candidate files, and `prefetch_names` narrows
+several names with one ripgrep; opening a known span parses its file directly. The resulting
+per-file facts are cached by source bytes, language, ast-grep version, the rule text and the source
+of the code that reads the matches, in `$XDG_CACHE_HOME/jev-navigator/facts` (`~/.cache` when the
+variable is unset), so a new index can reuse facts without treating changed source or changed
+parser rules as current. A file that changes on disk after the index first read it is
+reported as unavailable rather than read in its new form. Each call
+site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
+per argument for the life of the index. The index keeps the lines of a bounded number of recently
+read files (`LINE_CACHE_FILES`). There is no default file-count refusal or parser timeout, and no requested file is silently
+omitted.
 
 Before that pass, `.js` files whose leading comments (before any code, after an optional byte-order
 mark or shebang) carry the `@flow` pragma are separated from plain JavaScript. They ride on the tsx

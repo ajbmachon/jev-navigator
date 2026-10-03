@@ -32,6 +32,8 @@ Run in the source directory, or add `--repo /path/to/repo`. Dirty trees and non-
 Output defaults to a unique `./jvn-results/` directory. Trace starts must be repository-relative
 `PATH:LINE` values inside a function or method, not a class declaration. Unknown entry? Find first,
 inspect the returned function, then trace it. Quote the entire natural-language argument once.
+Do not edit files in scope while a search runs: a file that changes is reported unavailable, and a
+search that finds nothing then ends `scope_incomplete` instead of `nothing_left`.
 
 For agents and pipelines, discover the current contract with `jvn schema find`, `jvn schema findall`
 or `jvn schema trace`; use `jvn help COMMAND` for examples. Pass inline/file/stdin JSON:
@@ -60,7 +62,7 @@ journal without a finished manifest. Preserve the diagnostic and existing output
 
 Find All and Trace judge at most 16 functions per request and send their requests in parallel; a Find
 opening still asks about all its neighbours in one request. Every answer goes to
-one shared answer store, `~/.cache/jev-navigator/answers.sqlite`, which holds hashes, locations and
+one shared answer store, `$XDG_CACHE_HOME/jev-navigator/answers.sqlite` (`~/.cache` when unset), which holds hashes, locations and
 answers, never code. A later run at the same commit replays from it after one live request. Give each
 experiment or eval arm its own store with `--answer-store PATH` (or `JEV_NAVIGATOR_ANSWER_STORE`) so
 arms never reuse each other's answers; stderr names the store in use. `jvn trace` reports
