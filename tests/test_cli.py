@@ -54,10 +54,11 @@ def test_an_empty_find_reports_how_much_of_the_scope_it_examined(tmp_path: Path)
 
     # Assert
     assert manifest["search"]["outcome"] == "scope_incomplete"
-    assert (manifest["search"]["files_examined"], manifest["search"]["code_files"]) == (1, 3)
+    assert (manifest["search"]["files_judged"], manifest["search"]["files_read"]) == (1, 1)
+    assert manifest["search"]["code_files"] == 3
     assert (
-        "Outcome: **scope_incomplete, not found: 1 of 3 code files examined, 2 never reached**"
-        in (output / "report.md").read_text()
+        "Outcome: **scope_incomplete (not found: Jev judged code in 1 of 3 files; 0 more were read only "
+        "to list links; 2 never reached)**" in (output / "report.md").read_text()
     )
 
 
@@ -65,21 +66,22 @@ def test_an_empty_find_reports_how_much_of_the_scope_it_examined(tmp_path: Path)
     ("search", "summary"),
     [
         (
-            {"outcome": "nothing_left", "files_examined": 4, "code_files": 4},
-            "nothing_left, not found in this scope: all 4 code files examined",
+            {"outcome": "nothing_left", "files_judged": 2, "files_read": 7, "code_files": 7},
+            "nothing_left (nothing left worth opening: Jev judged code in 2 of 7 files; all 7 were read)",
         ),
         (
             {
                 "outcome": "scope_incomplete",
-                "files_examined": 4,
-                "code_files": 6,
+                "files_judged": 1,
+                "files_read": 5,
+                "code_files": 7,
                 "unparsed_files": ["a.js"],
                 "unavailable_files": {"b.py": "disappeared after inventory"},
             },
-            "scope_incomplete, not found: 4 of 6 code files examined, 2 never reached, "
-            "1 parsed only partly, 1 gone from disk",
+            "scope_incomplete (not found: Jev judged code in 1 of 7 files; 4 more were read only to list "
+            "links; 2 never reached; 1 parsed only partly; 1 gone from disk)",
         ),
-        ({"outcome": "budget", "files_examined": 1, "code_files": 6}, "budget"),
+        ({"outcome": "budget", "files_judged": 1, "files_read": 1, "code_files": 6}, "budget"),
         ({"outcome": "scope_incomplete", "coverage": "partial"}, "scope_incomplete"),
     ],
 )

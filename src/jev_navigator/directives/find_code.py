@@ -210,9 +210,10 @@ class FindResult:
     absent: one "no" about one place can be wrong. When nothing is found, rank the opened places by
     their probability; the best one is the likeliest place. ``starts`` holds the start places with
     their verdicts: a start is never a find, because the caller already had it. ``unparsed_files``
-    lists scope files the index could not parse. ``files_examined`` of ``code_files`` scope code files
-    were parsed by the search; while any was never reached or could not be parsed, the outcome is
-    never ``nothing_left``."""
+    lists scope files the index could not parse. Of ``code_files`` scope code files, Jev judged code in
+    ``files_judged``; ``files_read`` counts those plus the files the search only parsed to list
+    neighbours. While any file was never read or could not be parsed, the outcome is never
+    ``nothing_left``."""
 
     outcome: Outcome
     found: tuple[Visit, ...]
@@ -231,12 +232,17 @@ class FindResult:
     parser_scans_completed: tuple[str, ...] = ()
     parser_scans_pending: tuple[str, ...] = ()
     unavailable_files: Mapping[str, str] = field(default_factory=dict)
-    files_examined: int = 0
+    files_judged: int = 0
+    files_read: int = 0
     code_files: int = 0
 
     @property
+    def files_read_only(self) -> int:
+        return self.files_read - self.files_judged
+
+    @property
     def files_never_reached(self) -> int:
-        return self.code_files - self.files_examined
+        return self.code_files - self.files_read
 
 
 @dataclass(order=True)
@@ -1100,6 +1106,8 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
     pending_scans = index.parser_scans_pending
     unavailable = index.unavailable_files
     code_files = {file for file in index.available_files if language_of(file)}
+    judged_files = code_files & _opened_files(search)
+    read_files = judged_files | (code_files & index.parsed_files)
     search.history.append(
         _stop_step(search, outcome, not_inspected, unparsed, completed_scans, pending_scans, unavailable)
     )
@@ -1121,9 +1129,15 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
         completed_scans,
         pending_scans,
         unavailable,
-        len(code_files & index.parsed_files),
+        len(judged_files),
+        len(read_files),
         len(code_files),
     )
+
+
+def _opened_files(search: _Search) -> set[str]:
+    opened = (*search.starts, *search.found, *search.searched, *search.unsure)
+    return {visit.code.span.file for visit in opened}
 
 
 def _stop_step(

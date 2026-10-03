@@ -93,6 +93,25 @@ def test_a_low_neighbour_score_keeps_the_neighbour_as_not_inspected(sample_index
     assert result.found == () and result.unsure == () and result.searched == ()
 
 
+def test_an_empty_search_counts_files_judged_apart_from_files_only_read_to_list_neighbours(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
+        choices={"open_first": {"none": 1.0}},
+    )
+
+    # Act
+    result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
+
+    # Assert
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
+    assert {visit.code.span.file for visit in result.starts} == {"app/orders.py"}
+    assert (result.files_judged, result.files_read_only, result.files_never_reached) == (1, 4, 2)
+    assert result.code_files == 7
+
+
 def test_a_system_discovered_initial_candidate_can_be_found(sample_index: CodeIndex) -> None:
     target = sample_index.find_definition("check_limits")[0]
     candidate = function_place(sample_index, target, "automatic entry selection")

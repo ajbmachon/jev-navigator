@@ -510,9 +510,10 @@ A low neighbour score only lowers that neighbour's priority; it is never treated
 is not there. The search runs out of places when no start or pick waits and no neighbour scores
 above the no bar (0.20 by default). It then ends as `nothing_left` only if its own moves parsed every
 code file in scope without a grammar error; otherwise it ends as `scope_incomplete`. The remaining
-files are never parsed just to choose the label. `FindResult.files_examined` and `code_files` say how
-much of the scope the search parsed, and the CLI prints it, for example `scope_incomplete, not found:
-31 of 189 code files examined, 158 never reached`. A start place is judged but never ends the search as found, because
+files are never parsed just to choose the label. Of `FindResult.code_files`, `files_judged` counts the
+files whose code Jev judged and `files_read` adds the files read only to list neighbours; the CLI
+prints all three, for example `scope_incomplete (not found: Jev judged code in 1 of 7 files; 4 more
+were read only to list links; 2 never reached)`. A start place is judged but never ends the search as found, because
 the caller already had it; `FindResult.starts` keeps each start with its verdict. Each neighbour's
 signature names its file and lines: a function quotes its first line; a window around a call, reference
 or key outside any function gives its line range and quotes that line; a stretch chosen by position (the

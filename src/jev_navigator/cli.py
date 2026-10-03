@@ -947,7 +947,8 @@ def _manifest(
                 for entry in result.not_inspected
             ],
             "unparsed_files": sorted(result.unparsed_files),
-            "files_examined": result.files_examined,
+            "files_judged": result.files_judged,
+            "files_read": result.files_read,
             "code_files": result.code_files,
             "parser_scans": {
                 "completed": list(result.parser_scans_completed),
@@ -1101,24 +1102,21 @@ def _included_in_opened_span(candidate, result: FindResult) -> str | None:
 
 
 def _outcome_summary(search: dict) -> str:
-    """The outcome name; an empty Find also says how much of the scope its own moves examined."""
+    """The outcome name; an empty Find also says how much of the scope Jev judged and code read."""
     outcome = str(search["outcome"])
-    if "files_examined" not in search:
+    if "files_judged" not in search or outcome not in ("nothing_left", "scope_incomplete"):
         return outcome
+    judged, read, total = search["files_judged"], search["files_read"], search["code_files"]
+    seen = f"Jev judged code in {judged} of {total} files"
     if outcome == "nothing_left":
-        return f"{outcome}, not found in this scope: all {search['code_files']} code files examined"
-    if outcome != "scope_incomplete":
-        return outcome
-    never_reached = search["code_files"] - search["files_examined"]
-    gaps = [f"{never_reached} never reached"]
+        return f"{outcome} (nothing left worth opening: {seen}; all {total} were read)"
+    parts = [f"not found: {seen}", f"{read - judged} more were read only to list links"]
+    parts.append(f"{total - read} never reached")
     if search["unparsed_files"]:
-        gaps.append(f"{len(search['unparsed_files'])} parsed only partly")
+        parts.append(f"{len(search['unparsed_files'])} parsed only partly")
     if search["unavailable_files"]:
-        gaps.append(f"{len(search['unavailable_files'])} gone from disk")
-    return (
-        f"{outcome}, not found: {search['files_examined']} of {search['code_files']} code files examined, "
-        + ", ".join(gaps)
-    )
+        parts.append(f"{len(search['unavailable_files'])} gone from disk")
+    return f"{outcome} ({'; '.join(parts)})"
 
 
 _FRONTIER_REASONS = {
