@@ -23,15 +23,16 @@ from jev_navigator.index.units import (
     Edge,
     EdgeKind,
     EstablishedBy,
+    Item,
     LineAnchor,
     Origin,
     RangeAnchor,
     SymbolAnchor,
     UnitKind,
     best_piece,
+    items_to_judge,
     list_units,
-    read_piece_text,
-    read_unit_text,
+    read_ranges,
     read_units,
     resolve_anchors,
     unit_score,
@@ -262,7 +263,9 @@ def test_a_function_larger_than_the_box_is_cut_into_pieces_of_at_most_60_lines(s
         "app/big.py:1-149#p1",
         "app/big.py:1-149#p2",
     ]
-    assert read_piece_text(shop, big, big.pieces[1]) == _lines(BIG, 61, 120)
+    second = items_to_judge(big)[1]
+    assert second == Item("app/big.py:1-149#p1", "app/big.py", ((61, 120),))
+    assert read_ranges(shop, second.file, second.ranges) == _lines(BIG, 61, 120)
 
 
 def test_a_piece_over_the_box_is_named_too_large_to_judge_and_left_out_of_the_judged_pieces(
@@ -278,6 +281,7 @@ def test_a_piece_over_the_box_is_named_too_large_to_judge_and_left_out_of_the_ju
     assert second.chars > 5_000
     assert image.judged_pieces == (first,)
     assert image.too_large_pieces == (second,)
+    assert items_to_judge(image) == (Item("app/image.py:1-67#p0", "app/image.py", ((1, 60),)),)
 
 
 def test_a_unit_over_the_box_with_at_most_60_lines_is_one_piece_too_large_to_judge(
@@ -293,7 +297,7 @@ def test_a_unit_over_the_box_with_at_most_60_lines_is_one_piece_too_large_to_jud
 
     # Assert
     assert [(piece.start, piece.end, piece.too_large_to_judge) for piece in logo.pieces] == [(1, 2, True)]
-    assert logo.judged_pieces == ()
+    assert logo.judged_pieces == () and items_to_judge(logo) == ()
 
 
 def test_a_long_function_that_fits_the_box_stays_one_unit(shop: CodeIndex) -> None:
@@ -302,7 +306,8 @@ def test_a_long_function_that_fits_the_box_stays_one_unit(shop: CodeIndex) -> No
 
     # Assert: 300 lines, about 9,600 characters, far under the 76,800-character box.
     assert long_unit.pieces == ()
-    assert read_unit_text(shop, long_unit) == _lines(LONG_BUT_SMALL, 1, 300)
+    assert items_to_judge(long_unit) == (Item("app/long.py:1-300", "app/long.py", ((1, 300),)),)
+    assert read_ranges(shop, long_unit.path, long_unit.ranges) == _lines(LONG_BUT_SMALL, 1, 300)
 
 
 def test_a_cut_function_scores_by_its_best_piece_and_keeps_piece_ranges(shop: CodeIndex) -> None:
@@ -505,7 +510,9 @@ def test_a_files_top_level_code_is_one_unit_without_function_bodies(shop: CodeIn
     assert (top.kind, top.symbol, top.nested_in) == (UnitKind.TOP_LEVEL, "<top level>", None)
     assert top.ranges == ((1, 6), (13, 15), (21, 21))
     assert (top.start, top.end) == (1, 21)
-    text = read_unit_text(shop, top)
+    assert items_to_judge(top) == (Item("app/routes.py:top", "app/routes.py", ((1, 6), (13, 15), (21, 21))),)
+    text = read_ranges(shop, top.path, top.ranges)
+    assert read_ranges(shop, top.path, json.loads(json.dumps(top.ranges))) == text  # as a request's lines
     assert text == "\n".join((_lines(ROUTES, 1, 6), _lines(ROUTES, 13, 15), _lines(ROUTES, 21, 21)))
     assert "return save(request)" not in text and 'return "settings"' not in text
     assert top.content_sha256 == _sha256(text)

@@ -11,8 +11,8 @@ Spans are lines, so functions on the same lines have the same text and are one u
 first named of them. A function nested in another is a unit of its own (``nested_in`` names the
 function holding it), but a listing leaves it out: its text is already inside its holder's.
 
-Records hold locations and hashes, never code; ``read_unit_text`` and ``read_piece_text`` read the
-code through the index when a request needs it.
+Records hold locations and hashes, never code. ``items_to_judge`` gives what a request judges (the
+unit, or its pieces that fit the box) and ``read_ranges`` reads their code through the index.
 """
 
 from __future__ import annotations
@@ -212,13 +212,29 @@ def list_units(index: CodeIndex, files: Sequence[str], *, box_chars: int) -> Uni
     return UnitListing(units, unlisted)
 
 
-def read_unit_text(index: CodeIndex, unit: Unit) -> str:
-    """The unit's own text: its lines, or for top-level code its runs of lines joined in order."""
-    return "\n".join(_read(index, unit.path, start, end) for start, end in unit.ranges)
+@dataclass(frozen=True)
+class Item:
+    """One thing a request judges: a whole unit, or one piece of a unit larger than the box."""
+
+    id: str
+    file: str
+    ranges: tuple[LineRange, ...]
 
 
-def read_piece_text(index: CodeIndex, unit: Unit, piece: Piece) -> str:
-    return _read(index, unit.path, piece.start, piece.end)
+def items_to_judge(unit: Unit) -> tuple[Item, ...]:
+    """The whole unit, or for a cut unit its pieces that fit the box; a piece too large to judge is
+    never an item."""
+    if not unit.pieces:
+        return (Item(unit.id, unit.path, unit.ranges),)
+    return tuple(
+        Item(unit.piece_id(piece), unit.path, ((piece.start, piece.end),)) for piece in unit.judged_pieces
+    )
+
+
+def read_ranges(index: CodeIndex, file: str, ranges: Iterable[Sequence[int]]) -> str:
+    """The code of ``ranges`` of ``file``, joined in order with a newline: a unit's or a piece's own
+    text, the one way it is read."""
+    return "\n".join(index.read_slice(Span(file, start, end)).text for start, end in ranges)
 
 
 def unit_score(unit: Unit, scores: Mapping[str, float]) -> float | None:
@@ -372,8 +388,7 @@ class _SourceFile:
         symbol: str,
         nested_in: str | None = None,
     ) -> Unit:
-        slices = [self._index.read_slice(Span(self._file, start, end)) for start, end in ranges]
-        text = "\n".join(code.text for code in slices)
+        text = read_ranges(self._index, self._file, ranges)
         pieces = self._pieces(ranges) if _request_chars(text) > self._box_chars else ()
         return Unit(
             unit_id,
@@ -383,7 +398,7 @@ class _SourceFile:
             symbol,
             language_of(self._file) or "",
             is_test_file(self._file),
-            slices[0].commit,
+            self._index.read_slice(Span(self._file, *ranges[0])).commit,
             _sha256(text),
             nested_in,
             pieces,
@@ -398,7 +413,7 @@ class _SourceFile:
         return tuple(self._piece(number, start, end) for number, (start, end) in enumerate(cuts))
 
     def _piece(self, number: int, start: int, end: int) -> Piece:
-        text = _read(self._index, self._file, start, end)
+        text = read_ranges(self._index, self._file, ((start, end),))
         chars = _request_chars(text)
         return Piece(number, start, end, _sha256(text), chars, chars > self._box_chars)
 
@@ -519,10 +534,6 @@ def _names(qualified: str, symbol: str) -> bool:
 
 def _is_named(span: Span) -> bool:
     return bool(span.name) and not span.name.startswith("<")
-
-
-def _read(index: CodeIndex, file: str, start: int, end: int) -> str:
-    return index.read_slice(Span(file, start, end)).text
 
 
 def _request_chars(text: str) -> int:

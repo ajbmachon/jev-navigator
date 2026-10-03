@@ -274,7 +274,7 @@ than AST parent identities. The `jvn stats` CLI writes these measurements as JSO
 
 ```python
 from jev_navigator.index.units import (
-    LineAnchor, RangeAnchor, SymbolAnchor, list_units, read_unit_text, resolve_anchors, write_units,
+    LineAnchor, RangeAnchor, SymbolAnchor, items_to_judge, list_units, read_ranges, resolve_anchors,
 )
 
 BOX = 76_800  # characters the request may give the unit: Jev's box for state plus longest question
@@ -282,6 +282,8 @@ listing = list_units(index, index.files, box_chars=BOX)
 for unit in listing.units:
     print(unit.id, unit.kind, unit.symbol, unit.content_sha256[:12], unit.nested_in)
 print(listing.unlisted)  # files that gave no units, each with its reason
+for item in items_to_judge(listing.units[0]):  # the unit, or its pieces that fit the box
+    print(item.id, item.ranges, read_ranges(index, item.file, item.ranges)[:60])
 
 anchors = [LineAnchor("app/routes.py", 21), RangeAnchor("app/orders.py", 5, 7), SymbolAnchor("OrderService.place")]
 resolved = resolve_anchors(index, anchors, box_chars=BOX)
@@ -296,9 +298,10 @@ once: a nested function or callback is a unit of its own, reached through an anc
 holder:
 `OrderService.place`, `Basket.total.helper`, and for an anonymous callback its holder and the line it
 starts on, `registerRoutes.<anonymous:4>`. `content_sha256` hashes the unit's own text, so an unchanged function keeps its
-hash when other lines of its file change. The record holds locations and hashes, never code:
-`read_unit_text` and `read_piece_text` read the code through the index. `write_units` and
-`read_units` store records as one JSON object per line.
+hash when other lines of its file change. The record holds locations and hashes, never code; its
+`ranges` are its (start, end) line pairs in file order, one for a function and one per run for
+top-level code. `read_ranges(index, file, ranges)` is the one reader of that code, joining the ranges
+in order with a newline. `write_units` and `read_units` store records as one JSON object per line.
 
 Top-level code is a file's lines outside every function and method, class bodies included, kept as
 runs of lines in order (`ranges`) without the blank lines at their edges. A file whose top-level code
@@ -311,7 +314,9 @@ A unit whose text fits `box_chars` is one item, whatever its length. Only a larg
 each piece has its own range, hash and size. A piece still larger than the box is
 `too_large_to_judge`: it keeps its range and size, and `judged_pieces` leaves it out. A cut unit
 stays one unit: `unit_score` gives it its best piece's score, and `best_piece` names that piece's
-lines as the place to read. Item ids for pieces are `unit.piece_id(piece)`, the unit id plus `#p<index>`.
+lines as the place to read. `items_to_judge(unit)` gives what a request judges: the whole unit as
+one `Item(id, file, ranges)`, or each piece that fits the box, with the id `unit.piece_id(piece)`,
+the unit id plus `#p<index>`.
 
 Anchors resolve by lines, through the same units. A line names the innermost unit holding it: a
 function, or the file's top-level code when it lies outside every function, even top-level code the
