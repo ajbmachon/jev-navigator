@@ -45,16 +45,16 @@ PERFORMS = Check(
 HANDS_OFF = Check(
     name="hands_off",
     instructions=(
-        "Does `{item}.code` pass the behaviour described in `target` on to other code that carries it out?"
+        "Does a line in `{item}.code` call, register, schedule or dispatch other code as a step of the"
+        " behaviour described in `target`?"
     ),
     yes=Criterion(
-        "`{item}.code` calls, registers, schedules or dispatches to the code that does the described work.",
+        "A line in `{item}.code` hands work on to other code as part of the described behaviour, judged"
+        " from what the line itself shows: the call, its arguments and where it sits.",
+        not_for="Code that only receives the outcome after the work is done.",
         examples=(f"{EXAMPLE_BEHAVIOUR}: an order handler that calls the limit check before saving.",),
     ),
-    no=Criterion(
-        "`{item}.code` does not call, register or dispatch to the code that does the described work.",
-        not_for="Code that only receives the outcome after the work is done.",
-    ),
+    no=Criterion("No line in `{item}.code` hands the described behaviour on to other code."),
 )
 
 SELECTS_OR_CONFIGURES = Check(
