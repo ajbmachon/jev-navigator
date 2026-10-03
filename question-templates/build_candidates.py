@@ -45,7 +45,7 @@ SAME_BEHAVIOUR_USE = (
     " the duplication candidates."
 )
 
-FIND_V2_MATCH_REVISION = "v2"
+FIND_V2_MATCH_REVISION = "v3"
 FIND_V2_ROLES_REVISION = "v1"
 FIND_V2_SCOPE = "src/jev_navigator/judgments/"
 FIND_V2_UNITS_PER_REQUEST = 16

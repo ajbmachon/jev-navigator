@@ -155,14 +155,21 @@ def test_role_questions_are_four_independent_nouls_per_unit_in_one_request(sampl
     assert {question["type"] for question in questions.values()} == {"noul"}
 
 
-def test_the_match_question_is_asked_without_criteria_as_jgrep_asks_it(sample_index: CodeIndex) -> None:
+def test_the_match_question_points_at_its_whole_unit_without_criteria_as_jgrep_asks_it(
+    sample_index: CodeIndex,
+) -> None:
     # Act
     requests = rendered(sample_index, [MATCH], REQUEST, units=3)
 
     # Assert
-    questions = [question for _, asked in requests for question in asked.values()]
-    assert len(questions) == 3
-    assert all(set(question) == {"type", "instructions"} for question in questions)
+    asked = [
+        (question_id, question) for _, questions in requests for question_id, question in questions.items()
+    ]
+    assert len(asked) == 3
+    assert all(set(question) == {"type", "instructions"} for _, question in asked)
+    for question_id, question in asked:
+        unit = f"items[{question_id.rsplit('#', 1)[1]}]"
+        assert set(named_paths(question)) == {unit, TARGET}
 
 
 def test_each_per_unit_question_names_its_own_unit_and_no_other(sample_index: CodeIndex) -> None:
