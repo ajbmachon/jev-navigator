@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -19,9 +20,9 @@ from jev_navigator.judgments.review import CapturingJevClient
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.templates import (
     BEHAVIOR_ROLE_QUESTIONS,
+    BEST_FEW_QUESTIONS,
     MATCH,
     TARGET,
-    TEMPLATES,
     target_state,
     unit_entry,
 )
@@ -79,10 +80,10 @@ def wording_edits(template: Check) -> list[Check]:
 
 def test_each_template_id_changes_when_its_wording_changes() -> None:
     # Arrange
-    ids = [template.question_id for template in TEMPLATES]
+    ids = [template.question_id for template in BEST_FEW_QUESTIONS]
 
     # Act
-    edited = {template.question_id: wording_edits(template) for template in TEMPLATES}
+    edited = {template.question_id: wording_edits(template) for template in BEST_FEW_QUESTIONS}
 
     # Assert
     assert len(set(ids)) == len(ids) == 1 + len(BEHAVIOR_ROLE_QUESTIONS)
@@ -152,6 +153,21 @@ def test_role_questions_are_four_independent_nouls_per_unit_in_one_request(sampl
     assert len(asked) == 12
     assert set(BEHAVIOR_ROLE_QUESTIONS) == BEHAVIOR_ROLES
     assert all(roles == BEHAVIOR_ROLES for roles in roles_per_unit.values())
+    assert {question["type"] for question in questions.values()} == {"noul"}
+
+
+def test_the_best_few_request_also_asks_the_match_question_for_each_unit(sample_index: CodeIndex) -> None:
+    # Act
+    requests = rendered(sample_index, BEST_FEW_QUESTIONS, REQUEST, units=3)
+
+    # Assert
+    assert len(requests) == 1
+    _, questions = requests[0]
+    asked = Counter(question_id.rsplit("#", 1)[0] for question_id in questions)
+    role_ids = {role.question_id for role in BEHAVIOR_ROLE_QUESTIONS.values()}
+    assert asked[MATCH.question_id] == 3
+    assert sum(count for question_id, count in asked.items() if question_id in role_ids) == 12
+    assert len(questions) == 15
     assert {question["type"] for question in questions.values()} == {"noul"}
 
 

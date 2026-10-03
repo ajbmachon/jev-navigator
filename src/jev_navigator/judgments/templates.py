@@ -85,7 +85,9 @@ CONSUMES = Check(
 BEHAVIOR_ROLE_QUESTIONS: Mapping[str, Check] = {
     role.name: role for role in (PERFORMS, HANDS_OFF, SELECTS_OR_CONFIGURES, CONSUMES)
 }
-TEMPLATES: tuple[Check, ...] = (MATCH, *BEHAVIOR_ROLE_QUESTIONS.values())
+BEST_FEW_QUESTIONS: tuple[Check, ...] = (MATCH, *BEHAVIOR_ROLE_QUESTIONS.values())
+"""Every question the best few's shared request asks of each unit: the match question again and the
+four role questions. It holds every template."""
 
 
 def target_state(request: Mapping) -> dict:

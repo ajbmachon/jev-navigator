@@ -18,7 +18,13 @@ from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check
 from jev_navigator.judgments.review import CapturingJevClient, export_for_review
-from jev_navigator.judgments.templates import BEHAVIOR_ROLE_QUESTIONS, MATCH, target_state, unit_entry
+from jev_navigator.judgments.templates import (
+    BEHAVIOR_ROLE_QUESTIONS,
+    BEST_FEW_QUESTIONS,
+    MATCH,
+    target_state,
+    unit_entry,
+)
 
 HERE = Path(__file__).parent
 SECRET_REFUSAL = "the check that refuses to send a request that still contains a secret"
@@ -144,7 +150,7 @@ def write_find_v2_candidates(index: CodeIndex) -> None:
     write_find_v2_candidate(index, roles, best_few, FIND_V2_REQUEST, "find_v2_roles", FIND_V2_ROLES_REVISION)
     write_find_v2_candidate(
         index,
-        [MATCH, *roles],
+        BEST_FEW_QUESTIONS,
         best_few,
         FIND_V2_REQUEST,
         "find_v2_best_few",
