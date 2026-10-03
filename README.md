@@ -353,7 +353,8 @@ else:
   folder label (`src/`, or `/src/*` for files directly in `src`), used as an `include` entry with the
   same other filters, keeps exactly the files it counts. Raise the cap with `max_files`.
 - An unusable field raises `InvalidScopeError` naming it (`/scope/languages`, `/scope/changed_since`,
-  `/scope/repo`).
+  `/scope/repo`). `checked_root(scope)` runs the `/scope/repo` check alone, for a caller that reads
+  files inside the folder before it resolves the scope.
 
 ### Static trace graphs
 

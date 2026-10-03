@@ -97,7 +97,7 @@ class ScopeRefusal:
 
 
 def resolve_scope(scope: Scope) -> ResolvedScope | ScopeRefusal:
-    root = _checked_root(scope)
+    root = checked_root(scope)
     _check_languages(scope)
     changed_since_commit = _resolved_ref(root, scope.changed_since)
     files = [path for path in tools.listed_files(root) if _kept_by_path(scope, path)]
@@ -136,7 +136,9 @@ def counts_by_language(files: Iterable[str]) -> dict[str, int]:
     return dict(Counter(language_of(file) or MARKUP for file in files))
 
 
-def _checked_root(scope: Scope) -> Path:
+def checked_root(scope: Scope) -> Path:
+    """The scope's repository folder; the one check of ``/scope/repo``, which a request also runs
+    before it reads anchors inside the folder."""
     root = Path(scope.repo)
     if not root.is_dir():
         raise InvalidScopeError("/scope/repo", f"{root} is not a directory")

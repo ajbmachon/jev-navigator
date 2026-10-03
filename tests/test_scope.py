@@ -13,6 +13,7 @@ from jev_navigator.index.scope import (
     ResolvedScope,
     Scope,
     ScopeRefusal,
+    checked_root,
     is_test_file,
     resolve_scope,
 )
@@ -303,6 +304,16 @@ def test_a_missing_repository_is_named(tmp_path: Path) -> None:
         resolve_scope(_scope(tmp_path / "absent"))
 
     assert raised.value.path == "/scope/repo"
+
+
+def test_a_repository_that_is_a_file_is_named_before_any_file_is_read(tmp_path: Path) -> None:
+    write_files(tmp_path, {"repo.py": SOURCE})
+
+    with pytest.raises(InvalidScopeError) as raised:
+        checked_root(_scope(tmp_path / "repo.py"))
+
+    assert raised.value.path == "/scope/repo"
+    assert checked_root(_scope(tmp_path)) == tmp_path
 
 
 def test_changed_since_outside_git_is_named(tmp_path: Path) -> None:
