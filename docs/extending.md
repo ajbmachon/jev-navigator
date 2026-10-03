@@ -289,19 +289,22 @@ print([unit.id for unit in resolved.units], resolved.unresolved)
 ```
 
 A unit is one function, one method, or one file's top-level code. Its id is the location
-`path:start-end`; top-level code is `path:top`. Its `symbol` names every holder:
+`path:start-end`; top-level code is `path:top`. `list_units` lists the functions and methods no
+other function holds, and each file's top-level code, so every line of code sits in a listed unit
+once: a nested function or callback is a unit of its own, reached through an anchor, and
+`nested_in` names the function unit whose text already holds it. A unit's `symbol` names every
+holder:
 `OrderService.place`, `Basket.total.helper`, and for an anonymous callback its holder and the line it
-starts on, `registerRoutes.<anonymous:4>`. `nested_in` names the function unit whose text already
-holds a nested one. `content_sha256` hashes the unit's own text, so an unchanged function keeps its
+starts on, `registerRoutes.<anonymous:4>`. `content_sha256` hashes the unit's own text, so an unchanged function keeps its
 hash when other lines of its file change. The record holds locations and hashes, never code:
 `read_unit_text` and `read_piece_text` read the code through the index. `write_units` and
 `read_units` store records as one JSON object per line.
 
 Top-level code is a file's lines outside every function and method, class bodies included, kept as
 runs of lines in order (`ranges`) without the blank lines at their edges. A file whose top-level code
-is only imports, comments and blank lines lists no top-level unit. Files the parser does not read
-(Markdown, JSON and other languages) give no units and are named in `unlisted`, as is a file that
-disappeared after the inventory.
+is only imports, comments, directives such as `"use client"`, lines of closing brackets and blank
+lines lists no top-level unit. A file in a language JVN does not parse gives no units and is named
+in `unlisted` with `language not supported`, as is a file that disappeared after the inventory.
 
 A unit whose text fits `box_chars` is one item, whatever its length. Only a larger unit is cut into
 `pieces` of at most 60 lines, in order, with no overlap and never across two runs of top-level code;
@@ -316,8 +319,8 @@ listing leaves out. A range names each unit its non-blank lines touch, without t
 another one it names. A symbol, optionally qualified (`OrderService.place`) and optionally limited
 to one `file`, names every matching definition, each like the range of its lines: a class names its
 top-level code and its methods. Resolved units are marked `reached_by: anchor`. A file outside the
-scope, a line outside its file, a reversed range or an unknown symbol is reported in `unresolved`
-with its problem, and a file is parsed only after its anchor is known to point inside it.
+scope, a file in a language JVN does not parse, a line outside its file, a reversed range or an
+unknown symbol is reported in `unresolved` with its problem, and a file is parsed only after its anchor is known to point inside it.
 
 Spans are lines, so functions on the same lines are one unit named by the first named one, and a
 callback that shares a line with top-level code (`app.post("/orders", (req, res) => ...)`) takes

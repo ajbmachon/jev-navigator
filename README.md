@@ -210,7 +210,7 @@ index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
 
-units.list_units(index, files, box_chars=76_800)  # functions, methods and each file's top-level code
+units.list_units(index, files, box_chars=76_800)  # outermost functions and methods, top-level code
 units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=76_800)  # line, range or symbol
 
 operations.slice_around(index, file, line)  # the enclosing function, or a window

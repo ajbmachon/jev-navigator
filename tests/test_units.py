@@ -109,6 +109,24 @@ class Basket:
 
 ONE_LINE_NESTED = "function pick(items) { return items.map((item) => item.id); }\n"
 ONE_LINE_METHODS = "export const pair = { first() { return 1; }, second() { return 2; } };\n"
+PANEL = """\
+"use client";
+// A panel that opens.
+import { useState } from "react";
+
+export function Panel() {
+  const [open] = useState(false);
+  return open;
+}
+"""
+VITE_CONFIG = """\
+import { defineConfig } from "vite";
+
+export default defineConfig(() => {
+  return { base: "/" };
+}
+);
+"""
 MOUNT = """\
 import express from "express";
 express.Router().use("/api", require("./api"));
@@ -149,6 +167,8 @@ SHOP = {
     "web/pick.ts": ONE_LINE_NESTED,
     "web/pair.ts": ONE_LINE_METHODS,
     "web/mount.js": MOUNT,
+    "web/panel.tsx": PANEL,
+    "web/vite.config.ts": VITE_CONFIG,
     "tests/test_routes.py": TEST_FILE,
     "README.md": "# Shop\n",
     "config.json": '{"retries": 3}\n',
@@ -306,26 +326,45 @@ def test_a_cut_function_scores_by_its_best_piece_and_keeps_piece_ranges(shop: Co
 
 def test_an_anonymous_callback_is_named_by_its_holder(sample_index: CodeIndex) -> None:
     # Act
-    units = _units_by_id(sample_index, ("web/routes.ts",))
+    resolved = resolve_anchors(sample_index, (LineAnchor("web/routes.ts", 4),), box_chars=JEV_BOX)
 
     # Assert
-    callback = units["web/routes.ts:4-4"]
-    assert callback.symbol == "registerRoutes.<anonymous:4>"
+    [callback] = resolved.units
+    assert (callback.id, callback.symbol) == ("web/routes.ts:4-4", "registerRoutes.<anonymous:4>")
     assert callback.kind == UnitKind.FUNCTION
     assert callback.nested_in == "web/routes.ts:3-5"
-    assert units["web/routes.ts:3-5"].symbol == "registerRoutes"
+
+
+def test_round_zero_lists_outermost_units_and_every_line_of_code_is_in_one(shop: CodeIndex) -> None:
+    source_files = tuple(file for file in shop.files if file.endswith((".py", ".ts", ".tsx", ".js")))
+
+    # Act
+    listed = list_units(shop, source_files, box_chars=JEV_BOX).units
+
+    # Assert: a nested function's text is already inside its holder's, so it is not listed, and
+    # every function the parser finds lies inside a listed unit.
+    assert all(unit.nested_in is None for unit in listed)
+    assert "app/basket.py:6-7" not in {unit.id for unit in listed}
+    for function in (span for file in source_files for span in shop.functions_in(file)):
+        assert any(
+            unit.path == function.file and unit.start <= function.start and function.end <= unit.end
+            for unit in listed
+        ), function
 
 
 def test_methods_and_nested_functions_are_qualified_by_every_holder(shop: CodeIndex) -> None:
     # Act
     units = _units_by_id(shop, ("app/basket.py",))
+    helper = resolve_anchors(shop, (LineAnchor("app/basket.py", 7),), box_chars=JEV_BOX).units
 
     # Assert
     assert [(unit.symbol, unit.kind, unit.nested_in) for unit in units.values()] == [
         ("Basket.add", UnitKind.METHOD, None),
         ("Basket.total", UnitKind.METHOD, None),
-        ("Basket.total.helper", UnitKind.FUNCTION, "app/basket.py:5-8"),
         ("<top level>", UnitKind.TOP_LEVEL, None),
+    ]
+    assert [(unit.symbol, unit.kind, unit.nested_in) for unit in helper] == [
+        ("Basket.total.helper", UnitKind.FUNCTION, "app/basket.py:5-8")
     ]
 
 
@@ -356,8 +395,11 @@ def test_files_the_parser_cannot_read_are_named_with_their_reason(shop: CodeInde
     # Act
     listing = list_units(shop, ("README.md", "config.json", "app/routes.py"), box_chars=JEV_BOX)
 
+    anchored = resolve_anchors(shop, (LineAnchor("README.md", 1),), box_chars=JEV_BOX)
+
     # Assert
     assert {unit.path for unit in listing.units} == {"app/routes.py"}
+    assert [item.problem for item in anchored.unresolved] == ["language not supported"]
     assert listing.unlisted == {
         "README.md": "language not supported",
         "config.json": "language not supported",
@@ -475,6 +517,14 @@ def test_a_file_of_only_imports_has_no_top_level_unit(shop: CodeIndex) -> None:
 
     # Assert: comments, blank lines and imports, also over several lines, are not top-level code.
     assert sorted(units) == ["app/only_imports.py:10-11", "web/wire.ts:12-14"]
+
+
+def test_a_directive_and_a_line_of_closing_brackets_are_not_top_level_code(shop: CodeIndex) -> None:
+    # Act
+    units = _units_by_id(shop, ("web/panel.tsx", "web/vite.config.ts"))
+
+    # Assert: "use client" above imports, and the `);` left after a callback, list no top-level unit.
+    assert sorted(units) == ["web/panel.tsx:5-8", "web/vite.config.ts:3-5"]
 
 
 def test_a_require_inside_other_code_is_top_level_code(shop: CodeIndex) -> None:

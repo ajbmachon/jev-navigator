@@ -29,6 +29,8 @@ _SCRIPT_SIDE_EFFECT_IMPORT = re.compile(r"""^[ \t]*import\s*['"][^'"]+['"][ \t]*
 _SCRIPT_REQUIRE_STATEMENT = re.compile(
     r"""^[ \t]*(?:(?:const|let|var)\s+[^=\n]+=\s*)?require\(\s*['"][^'"]+['"]\s*\)[ \t]*;?[ \t]*$""", re.M
 )
+_PYTHON_IMPORT_STATEMENTS = (_PYTHON_FROM, _PYTHON_IMPORT)
+_SCRIPT_IMPORT_STATEMENTS = (_SCRIPT_FROM, _SCRIPT_SIDE_EFFECT_IMPORT, _SCRIPT_REQUIRE_STATEMENT)
 _SCRIPT_BARE = re.compile(r"""(?:\brequire\(\s*|\bimport\s*\(\s*|^[ \t]*import\s+)['"]([^'"]+)['"]""", re.M)
 _SCRIPT_SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".mjs", ".cjs", ".jsx")
 # ESM TypeScript imports a module by the name it compiles to, so `./x.js` names `x.ts` when it exists.
@@ -209,19 +211,17 @@ def _keep_literal(match: re.Match) -> str:
     return "\n" * text.count("\n") if text.startswith("/") else text
 
 
-def non_code_lines(source: str, path: str) -> frozenset[int]:
-    """The 1-based lines of ``source`` holding nothing but imports, comments and whitespace. An
-    import written over several lines covers every line it spans. A script's ``require`` counts as
-    an import only as a whole statement (``const x = require("x")``), never inside other code."""
-    if path.endswith(".py"):
-        code = _PYTHON_COMMENT.sub("", source)
-        imports = (_PYTHON_FROM, _PYTHON_IMPORT)
-    else:
-        code = _without_script_comments(source)
-        imports = (_SCRIPT_FROM, _SCRIPT_SIDE_EFFECT_IMPORT, _SCRIPT_REQUIRE_STATEMENT)
-    lines = code.split("\n")
-    blank = {number for number, line in enumerate(lines, 1) if not line.strip()}
-    return frozenset(blank | _lines_matched(code, imports))
+def without_comments(source: str, path: str) -> str:
+    """``source`` with its comments removed and every line break kept, so lines keep their numbers."""
+    return _PYTHON_COMMENT.sub("", source) if path.endswith(".py") else _without_script_comments(source)
+
+
+def import_lines(source: str, path: str) -> frozenset[int]:
+    """The 1-based lines import statements cover; an import over several lines covers every line it
+    spans. A script's ``require`` counts only as a whole statement (``const x = require("x")``),
+    never inside other code."""
+    statements = _PYTHON_IMPORT_STATEMENTS if path.endswith(".py") else _SCRIPT_IMPORT_STATEMENTS
+    return frozenset(_lines_matched(without_comments(source, path), statements))
 
 
 def _lines_matched(code: str, patterns: tuple[re.Pattern[str], ...]) -> set[int]:

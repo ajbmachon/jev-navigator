@@ -7,6 +7,10 @@ box is cut, into pieces of up to 60 lines with no overlap; a piece never spans t
 stays one unit, scored by its best piece. A piece still over the box is too large to judge: it is
 named with its range and size and never judged.
 
+Spans are lines, so functions on the same lines have the same text and are one unit, named by the
+first named of them. A function nested in another is a unit of its own (``nested_in`` names the
+function holding it), but a listing leaves it out: its text is already inside its holder's.
+
 Records hold locations and hashes, never code; ``read_unit_text`` and ``read_piece_text`` read the
 code through the index when a request needs it.
 """
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
@@ -22,7 +27,7 @@ from typing import TextIO
 
 from .bindings import BindingStatus
 from .code_index import CodeIndex
-from .imports import non_code_lines
+from .imports import import_lines, without_comments
 from .languages import language_of
 from .scope import is_test_file
 from .spans import Span, holder_of
@@ -30,6 +35,8 @@ from .spans import Span, holder_of
 PIECE_LINES = 60
 TOP_LEVEL_SYMBOL = "<top level>"
 UNSUPPORTED_LANGUAGE = "language not supported"
+_DIRECTIVE = re.compile(r"""^\s*["']use (?:client|server|strict)["']\s*;?\s*$""")
+_CLOSING_BRACKETS = re.compile(r"^[\s)\]};,]*$")
 
 LineRange = tuple[int, int]
 
@@ -191,9 +198,11 @@ class UnitListing:
 
 
 def list_units(index: CodeIndex, files: Sequence[str], *, box_chars: int) -> UnitListing:
-    """Every function and method of ``files`` and each file's top-level code, in file order and then
-    by position, parsing every source file in one batched scan. A file whose top-level code is only
-    imports, comments and blank lines lists no top-level unit."""
+    """The functions and methods of ``files`` that no other function holds, and each file's top-level
+    code, in file order and then by position, parsing every source file in one batched scan. Every
+    line of code is in a listed unit. A file whose top-level code is only imports, comments,
+    directives (``"use client"``), lines of closing brackets and blank lines lists no top-level unit.
+    A file in a language JVN does not parse, or gone since the inventory, is named in ``unlisted``."""
     files = tuple(dict.fromkeys(files))
     source_files = tuple(file for file in files if language_of(file))
     index.functions_in_files(source_files)
@@ -310,8 +319,9 @@ class _SourceFile:
         self.top_level = self._top_level_unit(functions)
 
     def listed(self) -> tuple[Unit, ...]:
-        top_level = () if self.top_level is None or self._only_imports_and_comments() else (self.top_level,)
-        return (*self.functions, *top_level)
+        outermost = tuple(unit for unit in self.functions if unit.nested_in is None)
+        top_level = () if self.top_level is None or self._holds_no_code() else (self.top_level,)
+        return (*outermost, *top_level)
 
     def unit_at(self, line: int) -> Unit | None:
         holding = [unit for unit in self.functions if unit.start <= line <= unit.end]
@@ -342,8 +352,8 @@ class _SourceFile:
             return None
         return self._unit(f"{self._file}:top", ranges, UnitKind.TOP_LEVEL, TOP_LEVEL_SYMBOL)
 
-    def _only_imports_and_comments(self) -> bool:
-        non_code = non_code_lines("\n".join(self._lines), self._file)
+    def _holds_no_code(self) -> bool:
+        non_code = _non_code_lines("\n".join(self._lines), self._file)
         return all(line in non_code for start, end in self.top_level.ranges for line in range(start, end + 1))
 
     def _without_blank_edges(self, run: LineRange) -> LineRange | None:
@@ -457,13 +467,24 @@ class _AnchorResolver:
         if file not in self._index.files:
             return f"{file} is not in scope"
         if not language_of(file):
-            return f"{file} is not in a language JVN parses"
+            return UNSUPPORTED_LANGUAGE
         return ""
 
     def _source(self, file: str) -> _SourceFile:
         if file not in self._sources:
             self._sources[file] = _SourceFile(self._index, file, self._box_chars)
         return self._sources[file]
+
+
+def _non_code_lines(source: str, file: str) -> frozenset[int]:
+    """Lines holding nothing but imports, comments, a directive, closing brackets or whitespace."""
+    code = without_comments(source, file).split("\n")
+    trivial = {
+        number
+        for number, line in enumerate(code, 1)
+        if _CLOSING_BRACKETS.match(line) or _DIRECTIVE.match(line)
+    }
+    return frozenset(trivial) | import_lines(source, file)
 
 
 def _one_per_range(spans: Iterable[Span]) -> tuple[Span, ...]:
