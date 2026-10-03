@@ -384,7 +384,7 @@ def test_cancelled_navigation_writes_a_resumable_evidence_pack(tmp_path: Path) -
 @pytest.fixture
 def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
     """``main`` without credentials or a search: each pack request is recorded by parameter name and
-    answered with ``outcome``."""
+    answered with ``outcome``, or raises ``error`` when one is set."""
     from jev_navigator import cli
 
     class Client:
@@ -394,10 +394,12 @@ def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
             pass
 
     signature = inspect.signature(cli.create_evidence_pack)
-    calls: dict = {"outcome": "found", "packs": []}
+    calls: dict = {"outcome": "found", "packs": [], "error": None}
 
     def create_evidence_pack(*args, **kwargs):
         calls["packs"].append(signature.bind(*args, **kwargs).arguments)
+        if calls["error"] is not None:
+            raise calls["error"]
         return {"search": {"outcome": calls["outcome"], "calls": 1}, "provider": {"requested_model": "test"}}
 
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
@@ -415,6 +417,88 @@ def test_main_maps_a_cancelled_pack_to_the_shell_interrupt_status(tmp_path: Path
 
     # Assert
     assert status == 130
+
+
+def _provider_refusal() -> Exception:
+    sdk = pytest.importorskip("typesafe_sdk")
+    httpx2 = pytest.importorskip("httpx2")
+    return sdk.TypeSafeAuthenticationError(401, {}, httpx2.Headers(), message="the API key is invalid")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        lambda: ValueError("repository revision changed since the evidence pack"),
+        lambda: FileNotFoundError("no such repository"),
+        lambda: subprocess.CalledProcessError(128, ["git", "rev-parse", "HEAD"]),
+        lambda: ModuleNotFoundError("No module named 'typesafe_sdk'"),
+        _provider_refusal,
+    ],
+    ids=["value", "file", "git", "missing-extra", "provider-refusal"],
+)
+def test_an_expected_failure_is_one_line_and_exit_status_one(
+    tmp_path: Path, offline_main: dict, capsys: pytest.CaptureFixture[str], error
+) -> None:
+    # Arrange
+    offline_main["error"] = error()
+
+    # Act
+    status = main(["find", "the policy", "--repo", str(tmp_path), "--out", str(tmp_path / "out")])
+
+    # Assert
+    assert status == 1
+    assert capsys.readouterr().err == f"jvn find: {offline_main['error']}\n"
+
+
+def test_an_unexpected_failure_keeps_its_traceback(tmp_path: Path) -> None:
+    script = (
+        "import sys\n"
+        "from jev_navigator import cli\n"
+        "class Client:\n"
+        "    model = 'test'\n"
+        "    def close(self):\n"
+        "        pass\n"
+        "def broken(*args, **kwargs):\n"
+        "    raise TypeError('a programming bug')\n"
+        "cli._load_typesafe_environment = lambda environment: None\n"
+        "cli.TypeSafeJevClient = Client\n"
+        "cli.create_evidence_pack = broken\n"
+        "raise SystemExit(cli.main(sys.argv[1:]))\n"
+    )
+    arguments = ["find", "the policy", "--repo", str(tmp_path), "--out", str(tmp_path / "out")]
+
+    result = subprocess.run([sys.executable, "-c", script, *arguments], text=True, capture_output=True)
+
+    assert result.returncode == 1
+    assert "Traceback (most recent call last)" in result.stderr
+    assert result.stderr.endswith("TypeError: a programming bug\n")
+    assert "jvn find:" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("error", "reported"),
+    [(ValueError("no indexable files"), True), (TypeError("a programming bug"), False)],
+    ids=["expected", "unexpected"],
+)
+def test_statistics_report_expected_failures_and_raise_unexpected_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], error, reported
+) -> None:
+    from jev_navigator import cli
+
+    class Index:
+        @staticmethod
+        def from_directory(*args, **kwargs):
+            raise error
+
+    monkeypatch.setattr(cli, "CodeIndex", Index)
+    arguments = ["stats", "--repo", str(tmp_path), "--out", str(tmp_path / "out")]
+
+    if reported:
+        assert main(arguments) == 1
+        assert f"jvn stats: {error}" in capsys.readouterr().err
+    else:
+        with pytest.raises(TypeError, match="a programming bug"):
+            main(arguments)
 
 
 @pytest.mark.parametrize(

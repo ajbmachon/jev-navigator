@@ -642,7 +642,7 @@ class Judge:
         original = error.original_error
         try:
             self._journal_failure(request_id, original, raw)
-        except Exception as failure_error:
+        except Exception as failure_error:  # noqa: BLE001 - noted on the original, which re-raises
             original.add_note(
                 "The logical request failure could not be recorded either: "
                 f"{type(failure_error).__name__}: {failure_error}"
