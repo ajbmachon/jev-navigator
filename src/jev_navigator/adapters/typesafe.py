@@ -340,5 +340,15 @@ class TypeSafeJevClient:
             close()
 
 
+def provider_errors() -> tuple[type[Exception], ...]:
+    """The TypeSafe SDK's error base, such as a refused key or a rate limit, when the ``typesafe``
+    extra is installed; none without it, since nothing can raise one then."""
+    try:
+        from typesafe_sdk import TypeSafeError
+    except ImportError:
+        return ()
+    return (TypeSafeError,)
+
+
 def _duration_ms(started_ns: int) -> float:
     return (perf_counter_ns() - started_ns) / 1_000_000
