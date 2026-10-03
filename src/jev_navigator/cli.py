@@ -996,8 +996,8 @@ def _drop_search_code(search: dict, index: CodeIndex) -> None:
     visits = [visit for group in ("found", "starts", "searched", "unsure") for visit in search.get(group, [])]
     for visit in visits:
         visit.pop("code", None)
-        if "source" in visit:
-            visit["source"] = source_shown(visit["source"])
+        if "place" in visit:
+            visit["source"] = source_shown(visit["source"], visit["place"])
     for entry in search.get("not_inspected", []):
         entry["signature"] = place_label(index, entry["place"])
     search["history"] = [_step_without_code(step, index) for step in search.get("history", [])]

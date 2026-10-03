@@ -35,20 +35,25 @@ def place_label(index: CodeIndex, place_key: str) -> str:
     return f"{location} {symbol.name}" if symbol is not None and symbol.name else location
 
 
+def relation_shown(relation: str, place_key: str) -> str:
+    """A place's relation as a run file keeps it, located at the line its key names (a window's
+    mention line, a function's first line), so one place shows one line everywhere."""
+    file, _, line = place_location(place_key).rpartition(":")
+    return without_quoted_code(relation, file, int(line))
+
+
 def relationship_shown(relationship: Mapping | None, place_key: str) -> Mapping | None:
     """A place's relationship with its relation as a run file keeps it."""
     if not relationship or "relation" not in relationship:
         return relationship
-    file, _, line = place_location(place_key).rpartition(":")
-    return {**relationship, "relation": without_quoted_code(relationship["relation"], file, int(line))}
+    return {**relationship, "relation": relation_shown(relationship["relation"], place_key)}
 
 
-def source_shown(source: Mapping) -> dict:
-    """A code source with its ``reached_by`` as a run file keeps it."""
+def source_shown(source: Mapping, place_key: str) -> dict:
+    """The code source of the place ``place_key`` with its ``reached_by`` as a run file keeps it."""
     if "reached_by" not in source:
         return dict(source)
-    reached_by = without_quoted_code(source["reached_by"], source["file"], source["lines"][0])
-    return {**source, "reached_by": reached_by}
+    return {**source, "reached_by": relation_shown(source["reached_by"], place_key)}
 
 
 def step_shown(step: Mapping) -> dict:
@@ -57,7 +62,7 @@ def step_shown(step: Mapping) -> dict:
         name: [_entry_shown(entry) for entry in value] if name in _NEIGHBOUR_LISTS else value
         for name, value in step.get("judgments", {}).items()
     }
-    fetched = [source_shown(source) for source in step.get("fetched", [])]
+    fetched = [source_shown(source, step["arguments"]["place"]) for source in step.get("fetched", [])]
     return {**step, "judgments": judgments, "fetched": fetched}
 
 

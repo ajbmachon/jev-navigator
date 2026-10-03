@@ -73,6 +73,12 @@ def files_holding_code(folder: Path) -> list[str]:
     return sorted(path.name for path in folder.iterdir() if holds_code(path))
 
 
+def files_outside_the_answer_store_holding_code(folder: Path) -> list[str]:
+    """Until claude/perf-judge's store change is merged, a key mention still reaches answers.jsonl;
+    once it is, these tests use files_holding_code and this helper goes."""
+    return [name for name in files_holding_code(folder) if name != "answers.jsonl"]
+
+
 def find_pack(repository: Path, output: Path, workflow: str, max_calls: int, **options) -> dict:
     return create_evidence_pack(
         repository,
@@ -373,7 +379,7 @@ def test_a_default_run_folder_never_stores_a_mentioned_key(
     # Assert
     mention = KEY_MENTION_SCOPES[scope][2]
     assert f"mentions a key ({mention})" in neighbour_relations(manifest)
-    assert [name for name in files_holding_code(tmp_path / "pack") if name != "answers.jsonl"] == []
+    assert files_outside_the_answer_store_holding_code(tmp_path / "pack") == []
 
 
 @pytest.mark.parametrize("scope", sorted(KEY_MENTION_SCOPES))
@@ -383,3 +389,79 @@ def test_keep_requests_keeps_a_key_mention_relation_verbatim(tmp_path: Path, sco
 
     # Assert
     assert any(MARKER in relation for relation in neighbour_relations(manifest))
+
+
+def test_a_budget_stop_after_opening_a_key_mention_keeps_the_key_out_of_resume_state(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    files, start, _ = KEY_MENTION_SCOPES["dictionary key"]
+    mentions = {
+        f"app/mention_{number}.py": f"def mention_{number}(config):\n    return config['{MARKER}']\n"
+        for number in range(5)
+    }
+    repository = tmp_path / "repository"
+    commit_files(repository, {**files, **mentions})
+    output = tmp_path / "pack"
+
+    # Act
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        TARGET,
+        (start,),
+        output,
+        SearchBudget(max_calls=3, beam_width=1),
+        ScriptedJevClient(nouls=lambda question_id, question, state: 0.5),
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Assert
+    opened_by_mention = [
+        visit
+        for visit in manifest["search"]["searched"] + manifest["search"]["unsure"]
+        if visit["source"]["reached_by"].startswith("mentions a key")
+    ]
+    assert manifest["search"]["outcome"] == "budget"
+    assert opened_by_mention
+    assert files_outside_the_answer_store_holding_code(output) == []
+
+
+def strings_starting_with(value: object, prefix: str) -> set[str]:
+    if isinstance(value, dict):
+        return {text for item in value.values() for text in strings_starting_with(item, prefix)}
+    if isinstance(value, list):
+        return {text for item in value for text in strings_starting_with(item, prefix)}
+    return {value} if isinstance(value, str) and value.startswith(prefix) else set()
+
+
+def test_a_key_mention_outside_any_function_is_shown_at_its_mention_line_everywhere(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    preamble = "".join(f"STEP_{number} = {number}\n" for number in range(1, 15))
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/settings.py": f"def limit(config):\n    return config['{MARKER}']\n",
+            "app/other.py": f"{preamble}print(CONFIG['{MARKER}'])\n",
+        },
+    )
+
+    # Act
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        TARGET,
+        ("app/settings.py:2",),
+        tmp_path / "pack",
+        SearchBudget(max_calls=5, beam_width=1),
+        ScriptedJevClient(nouls=lambda question_id, question, state: 0.5),
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Assert
+    opened = [visit["place"] for visit in manifest["search"]["searched"] + manifest["search"]["unsure"]]
+    assert any(place.startswith("app/other.py:15~") for place in opened)
+    assert strings_starting_with(manifest, "mentions a key") == {"mentions a key (app/other.py:15)"}
