@@ -225,6 +225,13 @@ _PYTHON_ROLES = (
     ReferenceRole("receiver", ("kind: attribute\nfield: object",), not_regex="^(self|cls)$"),
     ReferenceRole("type", ("kind: type\nstopBy: end",)),
     ReferenceRole(
+        "base",
+        (
+            "kind: argument_list\n"
+            "inside:\n  stopBy: neighbor\n  kind: class_definition\n  field: superclasses",
+        ),
+    ),
+    ReferenceRole(
         "condition",
         (
             "kind: comparison_operator",
@@ -251,6 +258,7 @@ _SCRIPT_ROLES = (
     ReferenceRole("export", ("kind: export_specifier", "kind: export_statement")),
     ReferenceRole("return", ("kind: return_statement",)),
     ReferenceRole("receiver", ("kind: member_expression\nfield: object",)),
+    ReferenceRole("base", ("kind: class_heritage",)),
     ReferenceRole(
         "condition",
         (
@@ -265,6 +273,7 @@ _SCRIPT_ROLES = (
 
 _TYPED_SCRIPT_ROLES = (
     *_SCRIPT_ROLES,
+    ReferenceRole("base", ("kind: extends_clause",)),
     ReferenceRole(
         "type",
         kind="type_identifier",

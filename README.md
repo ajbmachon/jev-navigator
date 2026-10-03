@@ -417,7 +417,9 @@ contain the code described in `target.description`?" and, per neighbour code lis
 callers in test files after the others; callees, proven production targets first and then the ones
 called from fewest places; code that
 refers to it or that it passes on without a call, as an argument, collection entry, assignment,
-decorator, export, return, method receiver or type; the other functions of its file, nearest
+decorator, export, return, method receiver, type or base class; for a class, its methods and then
+the methods it inherits from base classes in scope, nearest base first, an override hiding the base's
+method; the other functions of its file, nearest
 first; lines anywhere in scope (docs and config too) that mention its environment variables or its
 quoted keys (six characters or more with a dot, underscore, colon, slash or dash), the
 rarest key first, skipping a key found on more than 30 lines; co-changed files; and the lines before and
@@ -469,8 +471,8 @@ note, and `Visit.code` ends at the last shown line). If the first line cannot fi
 `not_inspected` with reason `budget`; Resume with a larger slice budget inspects that same source.
 `questions=SearchQuestions(found=...,
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
-`places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `same_file`,
-`keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the index and the
+`places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `members`,
+`same_file`, `keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the index and the
 opened code that returns places. Pass a subset, or add a function of your own; `MOVES` itself is
 read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
 `context_for_comment` takes `moves=` too. The directives take their check (`check=`) as a parameter too.

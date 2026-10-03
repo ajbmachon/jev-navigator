@@ -20,6 +20,7 @@ from jev_navigator.directives.places import (
     range_place,
     window_place,
 )
+from jev_navigator.index import tools
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
 
@@ -663,3 +664,207 @@ def test_document_window_navigation_retains_text_edges_without_syntax_scanning(t
     assert index.callee_edges(opened.span) == ()
     assert index.functions_in("README.md") == ()
     assert index.read_window("README.md", 1).text == 'The setting is "policy.limit".'
+
+
+def members_of(index: CodeIndex, name: str) -> list[Place]:
+    opened = index.read_slice(index.find_definition(name)[0])
+    return neighbours(index, opened, moves={"members": MOVES["members"]})
+
+
+def test_a_class_offers_the_methods_it_inherits_nearest_base_first(tmp_path: Path) -> None:
+    # Arrange: saleor's mutation hierarchy, cut down; graphene calls the inherited `mutate`.
+    index = committed_index(
+        tmp_path,
+        {
+            "core/mutations.py": (
+                "class BaseMutation:\n"
+                "    @classmethod\n"
+                "    def mutate(cls, root, info, **data):\n"
+                "        return cls.perform_mutation(root, info, **data)\n\n"
+                "    @classmethod\n"
+                "    def perform_mutation(cls, root, info, **data):\n"
+                "        raise NotImplementedError()\n\n\n"
+                "class ModelMutation(BaseMutation):\n"
+                "    @classmethod\n"
+                "    def clean_input(cls, info, data):\n"
+                "        return data\n"
+            ),
+            "checkout/mutations.py": (
+                "from core.mutations import ModelMutation\n\n\n"
+                "class CheckoutCreate(ModelMutation):\n"
+                "    @classmethod\n"
+                "    def perform_mutation(cls, root, info, **data):\n"
+                "        return data\n"
+            ),
+        },
+    )
+
+    # Act
+    offered = members_of(index, "CheckoutCreate")
+
+    # Assert: the override hides the base's perform_mutation, and the nearest base comes first.
+    assert [place.key for place in offered] == ["core/mutations.py:13-14", "core/mutations.py:3-4"]
+    assert "inherited by CheckoutCreate from ModelMutation" in offered[0].signature
+    assert "inherited by CheckoutCreate from BaseMutation" in offered[1].signature
+
+
+SCRIPT_BASE = (
+    "export class BaseAdapter {\n"
+    "  createObject(className: string) {\n    return className;\n  }\n"
+    "  find(className: string) {\n    return [];\n  }\n"
+    "}\n"
+)
+SCRIPT_SUBCLASS = (
+    'import { BaseAdapter } from "./base";\n\n'
+    "export class PostgresAdapter extends BaseAdapter {\n"
+    "  find(className: string) {\n    return [className];\n  }\n"
+    "}\n"
+)
+
+
+def test_a_script_class_offers_the_methods_it_inherits_through_extends(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(tmp_path, {"src/base.ts": SCRIPT_BASE, "src/postgres.ts": SCRIPT_SUBCLASS})
+
+    # Act
+    offered = members_of(index, "PostgresAdapter")
+
+    # Assert
+    assert [place.key for place in offered] == ["src/base.ts:2-4"]
+    assert "inherited by PostgresAdapter from BaseAdapter" in offered[0].signature
+
+
+def test_a_base_class_offers_the_classes_that_extend_it(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(tmp_path, {"src/base.ts": SCRIPT_BASE, "src/postgres.ts": SCRIPT_SUBCLASS})
+
+    # Act
+    offered = {place.key: place.signature for place in offered_from(index, "src/base.ts", 1)}
+
+    # Assert
+    assert "refers to BaseAdapter as base" in offered["src/postgres.ts:3-7"]
+
+
+def test_a_window_in_a_long_class_offers_its_methods_outside_the_window(tmp_path: Path) -> None:
+    # Arrange
+    attributes = "".join(f"    FIELD_{number} = {number}\n" for number in range(MAX_DEFINITION_LINES))
+    index = committed_index(
+        tmp_path,
+        {
+            "mutations.py": "class CreateOrder:\n"
+            + attributes
+            + "\n    def save(self):\n        return self\n"
+        },
+    )
+    opened = place_for_line(index, "mutations.py", 65, "start").open()
+
+    # Act
+    offered = neighbours(index, opened, moves={"members": MOVES["members"]})
+
+    # Assert
+    assert [place.key for place in offered] == ["mutations.py:123-124"]
+    assert "method of CreateOrder" in offered[0].signature
+
+
+def test_a_class_named_like_its_base_lists_no_method_as_inherited_from_itself(tmp_path: Path) -> None:
+    # Arrange: the base comes from outside the scope, so its name finds only the subclass.
+    index = committed_index(
+        tmp_path,
+        {
+            "http.py": "from framework import Request\n\n\nclass Request(Request):\n"
+            "    def json(self):\n        return {}\n"
+        },
+    )
+
+    # Act
+    offered = members_of(index, "Request")
+
+    # Assert
+    assert offered == []
+
+
+def test_an_inherited_method_reached_through_a_name_only_base_is_marked_unproven(tmp_path: Path) -> None:
+    # Arrange: CheckoutCreate names ModelMutation without importing it; the next base is proven.
+    index = committed_index(
+        tmp_path,
+        {
+            "mutations.py": "class BaseMutation:\n    def mutate(self):\n        return 1\n\n\n"
+            "class ModelMutation(BaseMutation):\n    pass\n",
+            "checkout.py": "class CheckoutCreate(ModelMutation):\n    pass\n",
+        },
+    )
+
+    # Act
+    offered = members_of(index, "CheckoutCreate")
+
+    # Assert
+    assert [place.key for place in offered] == ["mutations.py:2-3"]
+    assert "inherited by CheckoutCreate from BaseMutation, candidate:" in offered[0].signature
+
+
+def test_the_leftmost_base_defining_a_method_is_the_one_offered(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "jobs.py": "class Zeta:\n    def run(self):\n        return 'zeta'\n\n\n"
+            "class Alpha:\n    def run(self):\n        return 'alpha'\n\n\n"
+            "class Job(Zeta, Alpha):\n    pass\n"
+        },
+    )
+
+    # Act
+    offered = members_of(index, "Job")
+
+    # Assert
+    assert [place.key for place in offered] == ["jobs.py:2-3"]
+
+
+def test_finding_a_class_s_bases_parses_no_file_its_methods_merely_mention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    scanned: list[str] = []
+    real_rules = tools.ast_grep_rules
+
+    def recording_rules(rules, files, cwd, config=None):
+        scanned.extend(files)
+        return real_rules(rules, files, cwd, config=config)
+
+    monkeypatch.setattr(tools, "ast_grep_rules", recording_rules)
+    index = committed_index(
+        tmp_path,
+        {
+            "base.py": "class Base:\n    def run(self):\n        return 1\n",
+            "sub.py": "from base import Base\n\n\nclass Sub(Base):\n"
+            "    def go(self):\n        return [far_away_helper]\n",
+            "far.py": "def far_away_helper():\n    return 2\n",
+        },
+    )
+
+    # Act
+    offered = members_of(index, "Sub")
+
+    # Assert
+    assert [place.key for place in offered] == ["base.py:2-3"]
+    assert "far.py" not in scanned
+
+
+def test_a_class_s_methods_leave_out_functions_nested_in_them_and_nested_classes_methods(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "base.py": "class Outer:\n    def run(self):\n        def helper():\n            return 1\n\n"
+            "        return helper()\n\n    class Inner:\n        def deep(self):\n            return 2\n",
+            "sub.py": "from base import Outer\n\n\nclass Sub(Outer):\n    pass\n",
+        },
+    )
+
+    # Act
+    offered = members_of(index, "Sub")
+
+    # Assert
+    assert [place.key for place in offered] == ["base.py:2-6"]
