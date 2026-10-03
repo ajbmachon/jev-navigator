@@ -12,6 +12,7 @@ from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
 
+from .file_shape import refusal_of
 from .spans import TextHit
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,11 @@ logger = logging.getLogger(__name__)
 AST_GREP = "ast-grep"
 RIPGREP = "rg"
 _NO_MATCHES_EXIT = 1
+NEUTRAL_AST_GREP_CONFIG = "ruleDirs: []\n"
+"""The smallest sgconfig ast-grep accepts. Passed with ``--config`` it replaces the discovery of the
+analysed repository's own sgconfig.yml, which is customer content: its ``languageGlobs`` would change
+what a file is parsed as, and its ``customLanguages`` makes ast-grep load a library the repository
+names. Confirmed with ast-grep 0.45.1 that ``--config`` replaces discovery and is not merged with it."""
 MAX_FILES_PER_COMMAND = 300
 MAX_ARGUMENT_BYTES = 128 * 1024
 
@@ -42,23 +48,47 @@ def ast_grep_version() -> str:
 
 
 def ast_grep_rules(
-    rules_yaml: str, files: Sequence[str], cwd: Path, config: str | None = None
+    rules_yaml: str,
+    files: Sequence[str],
+    cwd: Path,
+    config: str | None = None,
+    *,
+    refused: dict[str, str],
 ) -> Iterator[dict]:
     """The matches of ``rules_yaml`` over ``files``, one at a time as ast-grep prints them, so no
-    process's whole output is ever held. ``config``, when given, is sgconfig YAML text (a
-    ``languageGlobs`` remapping, say); it is written to a temporary file outside every repository and
-    passed with ``-c``."""
-    if not files:
+    process's whole output is ever held. Every parse passes through here: a file whose estimated parse
+    peak is over the bound (``file_shape.MAX_PARSE_PEAK_MB``) is never handed to ast-grep. Each such
+    file is added to ``refused`` with its reason when the iteration starts, so read ``refused`` after
+    the matches. ast-grep always runs with a JVN-owned sgconfig: ``config``, when given, is sgconfig
+    YAML text (a ``languageGlobs`` remapping, say), otherwise ``NEUTRAL_AST_GREP_CONFIG``. It is
+    written to a temporary file outside every repository and passed with ``--config``, so the
+    repository being analysed never configures the parser."""
+    parseable, skipped = _split_by_parse_peak(files, cwd)
+    refused.update(skipped)
+    if not parseable:
         return
     with ExitStack() as resources:
-        command = [AST_GREP, "scan", "--inline-rules", rules_yaml]
-        if config is not None:
-            directory = resources.enter_context(tempfile.TemporaryDirectory(prefix="jev-navigator-sgconfig-"))
-            path = Path(directory) / "sgconfig.yml"
-            path.write_text(config)
-            command += ["--config", str(path)]
-        for chunk in file_chunks(files):
+        directory = resources.enter_context(tempfile.TemporaryDirectory(prefix="jev-navigator-sgconfig-"))
+        path = Path(directory) / "sgconfig.yml"
+        path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
+        command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
+        for chunk in file_chunks(parseable):
             yield from _json_lines([*command, "--json=stream", *chunk], cwd)
+
+
+def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], dict[str, str]]:
+    parseable: list[str] = []
+    refused: dict[str, str] = {}
+    for file in files:
+        try:
+            reason = refusal_of(cwd, file)
+        except OSError:
+            reason = None
+        if reason is None:
+            parseable.append(file)
+        else:
+            refused[file] = reason
+    return parseable, refused
 
 
 def file_chunks(files: Sequence[str]) -> Iterator[Sequence[str]]:

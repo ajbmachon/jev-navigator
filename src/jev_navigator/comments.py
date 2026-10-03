@@ -5,8 +5,8 @@ cheap facts about it, and the comments a diff touched. No model is involved.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from . import operations
@@ -82,6 +82,7 @@ class FoundComments:
 
     kept: tuple[CommentBlock, ...]
     dropped: tuple[DroppedComment, ...] = ()
+    refused_files: Mapping[str, str] = field(default_factory=dict)
 
 
 def find_comments(
@@ -96,8 +97,14 @@ def find_comments(
     keep it; ``noise_reason`` (dividers, licence headers, bare tool directives) is one ready-made
     choice. Facts in each block come from ``fact_rules``."""
     chosen = files if files is not None else [file for file in index.files if language_of(file)]
-    blocks = [block for file in chosen for block in _comments_in_file(index, file, fact_rules)]
-    return _split(blocks, drop)
+    blocks: list[CommentBlock] = []
+    refused: dict[str, str] = {}
+    for file in chosen:
+        found, reason = _comments_in_file(index, file, fact_rules)
+        blocks.extend(found)
+        if reason is not None:
+            refused[file] = reason
+    return replace(_split(blocks, drop), refused_files=refused)
 
 
 def comments_in_diff(
@@ -112,7 +119,8 @@ def comments_in_diff(
     a comment left alone above changed code is the classic stale comment."""
     changed = _changed_lines(index, base, head)
     found = find_comments(index, sorted(changed), fact_rules=fact_rules)
-    return _split([block for block in found.kept if _touches(block, changed[block.span.file])], drop)
+    touched = [block for block in found.kept if _touches(block, changed[block.span.file])]
+    return replace(_split(touched, drop), refused_files=found.refused_files)
 
 
 def _split(blocks: Sequence[CommentBlock], drop: DropRule | None) -> FoundComments:
@@ -158,19 +166,28 @@ def comment_facts(text: str, rules: Sequence[FactRule] = DEFAULT_COMMENT_RULES) 
     return find_facts(text, rules)
 
 
-def _comments_in_file(index: CodeIndex, file: str, rules: Sequence[FactRule]) -> list[CommentBlock]:
+def _comments_in_file(
+    index: CodeIndex, file: str, rules: Sequence[FactRule]
+) -> tuple[list[CommentBlock], str | None]:
+    """The file's comment blocks, or no blocks and the reason when the parse guard refused the file."""
+    refused: dict[str, str] = {}
+    raw = _comment_ranges(_comment_nodes(index, file, refused))
+    if file in refused:
+        return [], refused[file]
     lines = index.lines(file)
-    raw = _comment_nodes(index, file)
     blocks = [_block(index, file, lines, start, end, rules) for start, end in _merge_adjacent(raw, lines)]
-    return sorted(blocks + _docstrings(index, file, lines, rules), key=lambda block: block.span.start)
+    return sorted(blocks + _docstrings(index, file, lines, rules), key=lambda block: block.span.start), None
 
 
-def _comment_nodes(index: CodeIndex, file: str) -> list[tuple[int, int]]:
+def _comment_nodes(index: CodeIndex, file: str, refused: dict[str, str]) -> list[dict]:
     language = language_of(file)
     if language is None:
         return []
     rule = f"id: comment\nlanguage: {language}\nrule:\n  kind: comment"
-    matches = tools.ast_grep_rules(rule, [file], index.root)
+    return list(tools.ast_grep_rules(rule, [file], index.root, refused=refused))
+
+
+def _comment_ranges(matches: Sequence[dict]) -> list[tuple[int, int]]:
     return sorted(
         (match["range"]["start"]["line"] + 1, match["range"]["end"]["line"] + 1) for match in matches
     )

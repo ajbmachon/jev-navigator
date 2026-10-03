@@ -306,7 +306,12 @@ lines mention can be hidden there: a call to such a name has status `unknown`, w
 reason, unless a definition in another file, not imported from one of them, settles it. A completed
 search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
 fact scans completed and which remain pending. A file that disappears after the working-directory
-inventory was built is reported separately as unavailable. Any ast-grep or ripgrep failure other
+inventory was built is reported separately as unavailable. So is a file too large to parse safely:
+`tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
+estimated parse peak (from the length of each line, `index/file_shape.py`) is over 250 MB, about
+70,000 characters on one line, and `unavailable_files` gives the estimated peak and the longest line.
+The file keeps its path in import relations, a name that may be defined in it binds `unknown`, and
+`find_comments` lists it in `refused_files`. Any ast-grep or ripgrep failure other
 than that verified disappearance still fails the lookup that triggered it.
 
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a

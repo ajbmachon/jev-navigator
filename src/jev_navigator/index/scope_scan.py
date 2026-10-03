@@ -12,7 +12,7 @@ names they may hide.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import tools
@@ -89,24 +89,32 @@ class FileFacts:
     export_names: tuple[str, ...] = ()
     # The first and last line of each stretch the grammar's ERROR nodes span, in file order.
     unparsed_lines: tuple[tuple[int, int], ...] = ()
+    # Why the guard kept the file from the parser; such facts are empty and are never cached.
+    refusal: str | None = None
 
 
 def scan_facts(files: Sequence[str], root: Path, unparsed: Unparsed) -> dict[str, FileFacts]:
     """Parse supported source files once; return empty facts for unsupported paths. Each match is
     turned into its fact as the parser prints it, so memory holds facts, never the parser's output."""
     found = {file: _FileFound() for file in files}
+    refused: dict[str, str] = {}
     supported_files = tuple(file for file in files if language_of(file) is not None)
     for config, group, languages in _scan_groups(supported_files, root):
         rules = fact_rules(languages)
         if config is None:
-            matches = tools.ast_grep_rules(rules, group, root)
+            matches = tools.ast_grep_rules(rules, group, root, refused=refused)
         else:
-            matches = tools.ast_grep_rules(rules, group, root, config=config)
+            matches = tools.ast_grep_rules(rules, group, root, config=config, refused=refused)
         for match in matches:
             found[match["file"]].add(match)
     unparsed.add("facts", [file for file, facts in found.items() if facts.error_lines])
     incomplete = unparsed.files
-    return {file: facts.finished(file in incomplete) for file, facts in found.items()}
+    return {
+        file: replace(facts.finished(file in incomplete), refusal=refused[file])
+        if file in refused
+        else facts.finished(file in incomplete)
+        for file, facts in found.items()
+    }
 
 
 def fact_rules(languages: Sequence[str]) -> str:

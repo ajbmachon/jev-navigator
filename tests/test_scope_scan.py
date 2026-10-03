@@ -24,9 +24,9 @@ def ast_grep_runs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str | None
     runs: list[tuple[str, str | None, list[str]]] = []
     original_rules = tools.ast_grep_rules
 
-    def counted_rules(rules: str, files, cwd, config=None):
+    def counted_rules(rules: str, files, cwd, config=None, *, refused):
         runs.append((rules.split("\n", 1)[0], config, list(files)))
-        return original_rules(rules, files, cwd, config=config)
+        return original_rules(rules, files, cwd, config=config, refused=refused)
 
     monkeypatch.setattr(tools, "ast_grep_rules", counted_rules)
     return runs
@@ -218,8 +218,8 @@ def test_an_external_parser_failure_is_not_relabelled_as_incomplete(
 ) -> None:
     (tmp_path / "module.py").write_text("def run():\n    return 1\n")
 
-    def fail_parser(rules, files, cwd, config=None):
-        del rules, files, cwd, config
+    def fail_parser(rules, files, cwd, config=None, *, refused):
+        del rules, files, cwd, config, refused
         raise tools.ToolFailedError("ast-grep failed for a real tool reason")
 
     monkeypatch.setattr(tools, "ast_grep_rules", fail_parser)

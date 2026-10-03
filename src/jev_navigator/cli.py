@@ -1133,7 +1133,8 @@ def _report(manifest: dict) -> str:
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "
         f"{len(search['unparsed_files'])} files failed a completed parser scan. "
         f"Pending parser scans: {', '.join(search['parser_scans']['pending']) or 'none'}.",
-        f"- Files unavailable (disappeared or changed on disk): {len(search['unavailable_files'])}.",
+        "- Files unavailable (disappeared or changed on disk, or too large to parse): "
+        f"{len(search['unavailable_files'])}.",
         "",
         "## Opened code",
         "",

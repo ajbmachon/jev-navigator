@@ -246,7 +246,8 @@ class CodeIndex:
 
     @property
     def unavailable_files(self) -> dict[str, str]:
-        """Inventory entries that disappeared after this working-directory index was created."""
+        """Files this index cannot read facts from, each with the reason: an inventory entry that disappeared
+        after the index was created, or a file too large to parse safely."""
         return dict(self._unavailable)
 
     @property
@@ -530,7 +531,10 @@ class CodeIndex:
                 if self._read_bytes(file) is None:
                     continue
                 self._remember_facts(file, facts)
-                self._fact_cache.save(file, contents[file], facts)
+                if facts.refusal is None:
+                    self._fact_cache.save(file, contents[file], facts)
+                else:
+                    self._unavailable[file] = facts.refusal
 
     def _load_cached_facts(self, files: Sequence[str]) -> dict[str, bytes]:
         """Remembers the persisted facts of ``files``; returns the bytes of those still to parse.

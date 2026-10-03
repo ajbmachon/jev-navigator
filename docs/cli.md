@@ -221,7 +221,7 @@ judgments and remaining coverage to a partial evidence pack.
 The result includes `seed_search`, and `search` records `found`, `unsure`, `searched`, source hashes,
 request identities, the static graph and coverage gaps. `functions_examined` means every enumerated
 function was judged; it does not prove the model found every behavior. `scope_incomplete` retains
-unsupported, unparsed or unavailable files. See the library composition in [extending.md](extending.md#compose-a-seed-first-find-all-search).
+unsupported, unparsed or unavailable files; a file too large to parse safely is unavailable, with the reason. See the library composition in [extending.md](extending.md#compose-a-seed-first-find-all-search).
 
 `seed_search.calls` counts seed discovery; `search.enumeration_calls` counts the following enumeration.
 Their sum is `search.calls`, the whole workflow's actual model-request count.
