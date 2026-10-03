@@ -13,7 +13,7 @@ from types import MappingProxyType
 
 from ..index.bindings import Binding
 from ..index.code_index import CodeIndex
-from ..index.spans import CallEdge, CodeSlice, Reference, Span, TextHit
+from ..index.spans import CallEdge, CodeSlice, Span, TextHit
 
 MAX_DEFINITION_LINES = 120
 REST_OF_FILE_LINES = 40
@@ -178,10 +178,9 @@ def neighbours_and_omissions(
 ) -> tuple[list[Place], list[Place]]:
     """The places each move lists for ``opened``, at most ``per_kind`` per move, in the order of
     ``moves`` (default ``MOVES``: callers, callees, code that refers to it without calling it, code
-    it passes on without calling, a class's own and inherited methods, the other functions of its
-    file, lines anywhere in scope that mention its quoted keys or environment variables, files
-    usually committed with it, and the lines before and after it). A move is any function of the
-    index and the opened code that returns
+    it passes on without calling, the other functions of its file, lines anywhere in scope that
+    mention its quoted keys or environment variables, files usually committed with it, and the lines
+    before and after it). A move is any function of the index and the opened code that returns
     places, so callers can drop moves or add their own. The places cut by the cap come back
     separately, so a caller can report them as not inspected.
 
@@ -269,106 +268,6 @@ def _passed_on(index: CodeIndex, opened: CodeSlice) -> list[Place]:
         relation = f"passed on by {source} as {ref.role}"
         places += [function_place(index, span, relation, binding=ref.binding) for span in targets]
     return places
-
-
-def _members(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    """The methods of the opened class, or of the class a window opened inside: its own, then those
-    it inherits from base classes in scope, nearest base first (depth first, left to right). A name
-    comes from the nearest class that defines it, so an override hides the base's method."""
-    owner = _opened_class(index, opened.span)
-    if owner is None:
-        return []
-    places = []
-    named: set[str] = set()
-    for holder, binding in _class_and_bases(index, owner):
-        relation = (
-            f"method of {owner.name}" if holder == owner else f"inherited by {owner.name} from {holder.name}"
-        )
-        for method in _methods_of(index, holder):
-            if method.name not in named:
-                named.add(method.name)
-                places.append(function_place(index, method, relation, binding=binding))
-    return places
-
-
-def _opened_class(index: CodeIndex, opened: Span) -> Span | None:
-    named = [span for span in _classes_in(index, opened.file) if span.name == opened.name]
-    return min((span for span in named if span.contains(opened.start)), key=Span.size, default=None)
-
-
-def _class_and_bases(index: CodeIndex, owner: Span) -> list[tuple[Span, Binding | None]]:
-    """The class, then every base class in scope it reaches, once each, with the weakest binding on
-    the way to it (none for the class itself)."""
-    reached: list[tuple[Span, Binding | None]] = []
-    seen: set[Span] = set()
-    pending: list[tuple[Span, Binding | None]] = [(owner, None)]
-    while pending:
-        current, binding = pending.pop()
-        if current in seen:
-            continue
-        seen.add(current)
-        reached.append((current, binding))
-        pending += reversed([(base, _weaker(binding, link)) for base, link in _bases_of(index, current)])
-    return reached
-
-
-def _bases_of(index: CodeIndex, owner: Span) -> list[tuple[Span, Binding | None]]:
-    """The classes ``owner`` names as its bases, in the order its head lists them."""
-    references = [ref for ref in index.references_in(_class_head(index, owner)) if ref.role == "base"]
-    bases = []
-    for ref in sorted(references, key=lambda ref: (ref.line, _column_of(index, ref))):
-        targets = (
-            [ref.binding.target] if ref.binding and ref.binding.target else index.find_definition(ref.name)
-        )
-        bases += [(target, ref.binding) for target in targets if _is_class(index, target)]
-    return bases
-
-
-def _class_head(index: CodeIndex, owner: Span) -> Span:
-    """The lines from ``class`` to the line that opens its body, so only the head's names are bound."""
-    lines = index.lines(owner.file)
-    for number in range(owner.start, owner.end + 1):
-        code = lines[number - 1].split("#", 1)[0].rstrip()
-        if code.endswith(":") or "{" in code:
-            return replace(owner, end=number)
-    return owner
-
-
-def _column_of(index: CodeIndex, ref: Reference) -> int:
-    match = re.search(rf"\b{re.escape(ref.name)}\b", index.lines(ref.file)[ref.line - 1])
-    return match.start() if match else 0
-
-
-def _weaker(earlier: Binding | None, link: Binding | None) -> Binding | None:
-    """A chain of bases is only as proven as its least proven link."""
-    return earlier if earlier is not None and not earlier.proven else link
-
-
-def _methods_of(index: CodeIndex, owner: Span) -> list[Span]:
-    """The named functions whose innermost holder is ``owner``: its methods, not functions nested in
-    them and not the methods of a nested class."""
-    symbols = index.symbols_in(owner.file)
-    return [
-        function
-        for function in index.functions_in(owner.file)
-        if _is_named(function) and _holder(symbols, function) == owner
-    ]
-
-
-def _holder(symbols: Sequence[Span], span: Span) -> Span | None:
-    holding = (
-        other for other in symbols if other != span and other.start <= span.start <= span.end <= other.end
-    )
-    return min(holding, key=Span.size, default=None)
-
-
-def _is_class(index: CodeIndex, span: Span) -> bool:
-    return span in _classes_in(index, span.file)
-
-
-def _classes_in(index: CodeIndex, file: str) -> list[Span]:
-    functions = set(index.functions_in(file))
-    return [span for span in index.symbols_in(file) if span not in functions]
 
 
 def _with_binding(relation: str, binding: Binding | None) -> str:
@@ -494,7 +393,6 @@ MOVES: Mapping[str, Move] = MappingProxyType(
         "callees": _callees,
         "referenced_by": _referenced_by,
         "passed_on": _passed_on,
-        "members": _members,
         "same_file": _same_file,
         "keys_mentioned": _keys_mentioned,
         "co_changed": _co_changed,
