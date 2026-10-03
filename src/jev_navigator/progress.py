@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import sys
 import threading
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 
 from .judgments.answers import TokenTotal, reported_input_tokens, reported_output_tokens
 from .judgments.journal import JournalRequest, JsonlJournal, RawResponse
+from .run_files import place_location, step_shown
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -128,9 +130,27 @@ class TerminalProgress:
 
 
 class ProgressJournal(JsonlJournal):
-    def __init__(self, path: Path, progress: TerminalProgress) -> None:
-        super().__init__(path, keep_request_text=True)
+    """Without ``keep_request_text`` a history step shows each neighbour by ``place_label`` (the CLI
+    sets one that adds the symbol name once the index exists) and every relation as a run file keeps
+    it."""
+
+    def __init__(self, path: Path, progress: TerminalProgress, *, keep_request_text: bool = False) -> None:
+        super().__init__(path, keep_request_text=keep_request_text)
         self.progress = progress
+        self.place_label: Callable[[str], str] = place_location
+
+    def record_step(self, step: Mapping) -> None:
+        super().record_step(step if self.keep_request_text else self._shown(step))
+
+    def _shown(self, step: Mapping) -> dict:
+        shown = step_shown(step)
+        judgments = shown["judgments"]
+        if "could_contain" in judgments:
+            judgments["could_contain"] = [
+                {**offered, "signature": self.place_label(offered["place"])}
+                for offered in judgments["could_contain"]
+            ]
+        return shown
 
     def record_request(self, request: JournalRequest) -> str:
         request_id = super().record_request(request)

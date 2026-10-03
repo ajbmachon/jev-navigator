@@ -229,6 +229,7 @@ class HangingClient:
         self.released.set()
 
 
+@pytest.mark.usefixtures("python_sigint_handler")
 def test_an_interrupt_with_requests_in_flight_cancels_them_and_sends_nothing_new() -> None:
     # Arrange
     client = HangingClient(in_flight_before_interrupt=2)

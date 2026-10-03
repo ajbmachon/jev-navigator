@@ -177,11 +177,10 @@ An explicitly selected output directory must be new or empty. Each evidence pack
 
 - `manifest.json`: schema version, navigator build fingerprint and source revision, inspected
   repository revision, explicit budget and thresholds, requested and served model, elapsed time,
-  versioned code spans, raw probabilities, full search history, uninspected frontier, and unparsed
-  files.
-- `report.md`: a readable outcome, source table, found code, and coverage caveat.
-- `journal.jsonl`: every masked request as sent (state, questions and body bytes, so it holds
-  code) and the exact provider responses, as the run progresses.
+  versioned code locations (`path:start-end` with file hashes; neighbours as `path:line name`), raw
+  probabilities, full search history, uninspected frontier, and unparsed files.
+- `report.md`: a readable outcome, source table, found locations, and coverage caveat.
+- `journal.jsonl`: request hashes and exact provider responses as the run progresses.
 - `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
   written to the machine's shared answer store (`$XDG_CACHE_HOME/jev-navigator/answers.sqlite`,
   `~/.cache` when the variable is unset, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
@@ -189,9 +188,13 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
   `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
+- `resume.json` (budget-stopped or cancelled runs): the frontier as locations; Resume re-reads the
+  code from the unchanged repository.
 
-The manifest and report contain inspected source code. Keep packs for private repositories in a
-private artifact store; the repository includes only a small public-format sample under
+By default the manifest, report, journal and resume state hold no source code, only locations and
+hashes; a relation that quotes a mentioned key reads `mentions a key (path:line)`. `--keep-requests` (JSON `"keep_requests": true`) also keeps the code and full neighbour
+signatures in the manifest and report and the exact request text in the journal; use it only for
+your own or open-source code. The repository includes only a small public-format sample under
 [`examples/evidence-pack`](examples/evidence-pack).
 
 ## Layer 1: index, operations and comments (no model)
@@ -501,11 +504,19 @@ Large openings split independent neighbour questions through the same Judge batc
 discarding candidates or previews. The global pick is optional: when its full request or option set
 exceeds provider capability, `open_first.unavailable` records why and individual neighbour scores
 still order the complete frontier. Every live sub-request counts toward the selected call allowance.
+Once the allowance has refused a request, the search keeps opening places only while the answer store
+still answers them; the first round that gets no answer at all ends the search as `budget`, and the
+places it did not open stay in `not_inspected` for Resume.
 Only HTTP 400 with `detail.error_type` equal to `max_tokens_exceeded` is a size refusal;
 mentions of that text in question IDs or unrelated error messages do not trigger splitting.
 A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code
-is not there. The search ends as `nothing_left` when no start or pick waits and no neighbour scores
-above the no bar (0.20 by default). A start place is judged but never ends the search as found, because
+is not there. The search runs out of places when no start or pick waits and no neighbour scores
+above the no bar (0.20 by default). It then ends as `nothing_left` only if its own moves parsed every
+code file in scope without a grammar error; otherwise it ends as `scope_incomplete`. The remaining
+files are never parsed just to choose the label. Of `FindResult.code_files`, `files_judged` counts the
+files in which Jev judged code (the opened places, not whole files) and `files_read` adds the files
+read only to list neighbours; the CLI prints all three, for example `scope_incomplete (not found: Jev
+judged code in 1 of 7 files; 4 more were read only to list links; 2 never reached)`. A start place is judged but never ends the search as found, because
 the caller already had it; `FindResult.starts` keeps each start with its verdict. Each neighbour's
 signature names its file and lines: a function quotes its first line; a window around a call, reference
 or key outside any function gives its line range and quotes that line; a stretch chosen by position (the
@@ -517,7 +528,7 @@ judged, start places apart in `starts`); and `not_inspected`, each entry with it
 `deprioritized`, `capped` or `depth`) and its `QueueTier`: `START`, `PICK` or `MOVE`. Resume
 preserves that role, so waiting starts still open before picks and are never reported as new finds.
 `searched` means "opened and judged at or below the no bar, probability kept", and `nothing_left`
-means "nothing left worth opening"; neither proves that the code does not exist, because one "no" about
+means "nothing left worth opening in a scope the search parsed whole"; neither proves that the code does not exist, because one "no" about
 one place can be wrong. When nothing reaches the yes bar, rank the opened places by their
 `contains_target` probability: the best-scored place is the likeliest one. Pass the result back as
 `resume=` to continue from that frontier with a fresh budget. Pass `commit=` to require that the index

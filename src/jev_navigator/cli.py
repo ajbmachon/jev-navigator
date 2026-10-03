@@ -13,6 +13,7 @@ import sys
 from collections.abc import MutableMapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from time import monotonic
 
@@ -33,8 +34,13 @@ from .judgments.store import SHARED_STORE_VARIABLE, default_shared_store, run_an
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
+from .run_files import place_label, source_shown, step_shown
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
+KEEP_REQUESTS_HELP = (
+    "Keep the code and full request text in the run folder (default: code locations and request "
+    "hashes only); for your own or open-source code"
+)
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
 POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
@@ -86,6 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_calls=budget.max_calls,
                 verbose=args.verbose,
                 answer_store=answer_store,
+                keep_requests=args.keep_requests,
             )
         else:
             resume_from = Path(args.resume).expanduser() if getattr(args, "resume", None) else None
@@ -101,6 +108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     thresholds=Thresholds.from_env(),
                     verbose=args.verbose,
                     answer_store=answer_store,
+                    keep_requests=args.keep_requests,
                     workflow=args.command,
                     resume_from=resume_from,
                 )
@@ -141,7 +149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     else:
         print(f"evidence pack: {output.resolve()}")
-        print(f"outcome: {search_outcome} ({calls} live calls)")
+        print(f"outcome: {_outcome_summary(result)} ({calls} live calls)")
         if resume_directory is not None:
             print(f"resume: use --resume {output.resolve()} with the same target and repository")
     return 130 if search_outcome == "cancelled" else 0
@@ -244,8 +252,10 @@ def create_evidence_pack(
     answer_store: Path | None = None,
     workflow: str = "find",
     resume_from: Path | None = None,
+    keep_requests: bool = False,
 ) -> dict:
-    """Run the real index/search owners and persist their reviewable evidence."""
+    """Run the real index/search owners and persist their reviewable evidence. By default the pack
+    keeps code locations and request hashes; ``keep_requests`` also keeps the code and request text."""
     if workflow not in ("find", "findall"):
         raise ValueError(f"unknown search workflow: {workflow}")
     repository = repository.resolve()
@@ -262,7 +272,7 @@ def create_evidence_pack(
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
-    journal = ProgressJournal(journal_path, progress)
+    journal = ProgressJournal(journal_path, progress, keep_request_text=keep_requests)
     progress.start()
     outcome = "failed"
     try:
@@ -277,6 +287,7 @@ def create_evidence_pack(
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
+        journal.place_label = partial(place_label, index)
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
         checkpoint = SavedSearch(None)
@@ -408,7 +419,8 @@ def create_evidence_pack(
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
             manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
-
+        if not keep_requests:
+            _drop_code(manifest, index)
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
@@ -521,6 +533,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     trace.add_argument("--verbose", action="store_true", help="Print expanded masked model requests")
     _add_answer_store_argument(trace)
+    trace.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
     stats = commands.add_parser(
         "stats",
         help="count and rank parsed functions/classes without model calls",
@@ -659,6 +672,7 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         action="store_true",
         help="show expanded masked requests on stderr (default: concise live progress)",
     )
+    find.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -947,6 +961,9 @@ def _manifest(
                 for entry in result.not_inspected
             ],
             "unparsed_files": sorted(result.unparsed_files),
+            "files_judged": result.files_judged,
+            "files_read": result.files_read,
+            "code_files": result.code_files,
             "parser_scans": {
                 "completed": list(result.parser_scans_completed),
                 "pending": list(result.parser_scans_pending),
@@ -958,6 +975,41 @@ def _manifest(
             ],
         },
     }
+
+
+def _drop_code(manifest: dict, index: CodeIndex) -> None:
+    """Leave each place as its location: the code it held stays in the repository."""
+    _drop_entry_code(manifest.get("entry_selection") or {}, index)
+    for name in ("search", "seed_search"):
+        _drop_search_code(manifest.get(name) or {}, index)
+
+
+def _drop_entry_code(entry_selection: dict, index: CodeIndex) -> None:
+    for decision in entry_selection.get("decisions", []):
+        for option in decision.get("options", []):
+            option.pop("description", None)
+    for candidate in entry_selection.get("candidates", []):
+        candidate["signature"] = place_label(index, candidate["place"])
+
+
+def _drop_search_code(search: dict, index: CodeIndex) -> None:
+    visits = [visit for group in ("found", "starts", "searched", "unsure") for visit in search.get(group, [])]
+    for visit in visits:
+        visit.pop("code", None)
+        if "place" in visit:
+            visit["source"] = source_shown(visit["source"], visit["place"])
+    for entry in search.get("not_inspected", []):
+        entry["signature"] = place_label(index, entry["place"])
+    search["history"] = [_step_without_code(step, index) for step in search.get("history", [])]
+
+
+def _step_without_code(step: dict, index: CodeIndex) -> dict:
+    shown = step_shown(step)
+    for fetched in shown["fetched"]:
+        fetched.pop("code", None)
+    for offered in shown["judgments"].get("could_contain", []):
+        offered["signature"] = place_label(index, offered["place"])
+    return shown
 
 
 def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previous: dict | None) -> dict:
@@ -1023,7 +1075,8 @@ def _find_all_report(manifest: dict) -> str:
     lines += ["", "## Matching bodies", ""]
     for value in search["found"]:
         source = value["source"]
-        lines += [f"### {source['file']}:{source['lines'][0]}", "", "```", value["code"], "```", ""]
+        lines += [f"### {source['file']}:{source['lines'][0]}-{source['lines'][1]}", ""]
+        lines += _code_block(value, "")
     return "\n".join(lines) + "\n"
 
 
@@ -1098,6 +1151,24 @@ def _included_in_opened_span(candidate, result: FindResult) -> str | None:
     return None
 
 
+def _outcome_summary(search: dict) -> str:
+    """The outcome name; an empty Find also says how much of the scope Jev judged and code read."""
+    outcome = str(search["outcome"])
+    if "files_judged" not in search or outcome not in ("nothing_left", "scope_incomplete"):
+        return outcome
+    judged, read, total = search["files_judged"], search["files_read"], search["code_files"]
+    seen = f"Jev judged code in {judged} of {total} files"
+    if outcome == "nothing_left":
+        return f"{outcome} (nothing left worth opening: {seen}; all {total} were read)"
+    parts = [f"not found: {seen}", f"{read - judged} more were read only to list links"]
+    parts.append(f"{total - read} never reached")
+    if search["unparsed_files"]:
+        parts.append(f"{len(search['unparsed_files'])} parsed only partly")
+    if search["unavailable_files"]:
+        parts.append(f"{len(search['unavailable_files'])} gone from disk")
+    return f"{outcome} ({'; '.join(parts)})"
+
+
 _FRONTIER_REASONS = {
     "target_found": "Search stopped after finding a match",
     "deprioritized": "Candidate score did not exceed the opening threshold",
@@ -1108,6 +1179,11 @@ _FRONTIER_REASONS = {
     "scope_incomplete": "Source scope incomplete",
     "neighbours_per_kind": "Configured neighbour limit reached",
 }
+
+
+def _code_block(place: dict, language: str) -> list[str]:
+    """The place's code, when the pack kept it (``--keep-requests``); otherwise only its location."""
+    return [f"```{language}", place["code"], "```", ""] if "code" in place else []
 
 
 def _report(manifest: dict) -> str:
@@ -1122,7 +1198,7 @@ def _report(manifest: dict) -> str:
         f"- Revision: `{source['revision']}`",
         f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes']) or 'whole directory'}",
         f"- Target: {manifest['target']}",
-        f"- Outcome: **{search['outcome']}**",
+        f"- Outcome: **{_outcome_summary(search)}**",
         *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
@@ -1161,10 +1237,7 @@ def _report(manifest: dict) -> str:
             "",
             f"Raw P(contains target): **{visit['probability']:.3f}**. Reached by `{source['reached_by']}`.",
             "",
-            f"```{language}",
-            visit["code"],
-            "```",
-            "",
+            *_code_block(visit, language),
         ]
     lines += [
         "## Candidates not independently opened",

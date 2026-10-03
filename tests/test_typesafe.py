@@ -482,6 +482,7 @@ def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.parametrize("deliver", ["any_thread", "main_thread"])
+@pytest.mark.usefixtures("python_sigint_handler")
 def test_sigint_returns_the_active_http_place_as_resumable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deliver: str
 ) -> None:

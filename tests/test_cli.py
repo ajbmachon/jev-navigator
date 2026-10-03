@@ -16,6 +16,7 @@ from git_repos import commit_files
 from jev_navigator.cli import (
     SCHEMA_VERSION,
     _load_typesafe_environment,
+    _outcome_summary,
     _scope_warning,
     create_evidence_pack,
     main,
@@ -23,6 +24,69 @@ from jev_navigator.cli import (
 from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
 from jev_navigator.testing import ScriptedJevClient
+
+
+def test_an_empty_find_reports_how_much_of_the_scope_it_examined(tmp_path: Path) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(repository, {"app/entry.py": "def handle(item):\n    return item\n"})
+    commit_files(
+        repository,
+        {
+            "app/mail.py": "def send(letter):\n    return letter\n",
+            "app/billing.py": "def bill(account):\n    return account\n",
+        },
+    )
+    client = ScriptedJevClient(nouls=lambda question_id, question, state: 0.04)
+    output = tmp_path / "evidence"
+
+    # Act
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/entry.py:2",),
+        output,
+        SearchBudget(),
+        client,
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Assert
+    assert manifest["search"]["outcome"] == "scope_incomplete"
+    assert (manifest["search"]["files_judged"], manifest["search"]["files_read"]) == (1, 1)
+    assert manifest["search"]["code_files"] == 3
+    assert (
+        "Outcome: **scope_incomplete (not found: Jev judged code in 1 of 3 files; 0 more were read only "
+        "to list links; 2 never reached)**" in (output / "report.md").read_text()
+    )
+
+
+@pytest.mark.parametrize(
+    ("search", "summary"),
+    [
+        (
+            {"outcome": "nothing_left", "files_judged": 2, "files_read": 7, "code_files": 7},
+            "nothing_left (nothing left worth opening: Jev judged code in 2 of 7 files; all 7 were read)",
+        ),
+        (
+            {
+                "outcome": "scope_incomplete",
+                "files_judged": 1,
+                "files_read": 5,
+                "code_files": 7,
+                "unparsed_files": ["a.js"],
+                "unavailable_files": {"b.py": "disappeared after inventory"},
+            },
+            "scope_incomplete (not found: Jev judged code in 1 of 7 files; 4 more were read only to list "
+            "links; 2 never reached; 1 parsed only partly; 1 gone from disk)",
+        ),
+        ({"outcome": "budget", "files_judged": 1, "files_read": 1, "code_files": 6}, "budget"),
+        ({"outcome": "scope_incomplete", "coverage": "partial"}, "scope_incomplete"),
+    ],
+)
+def test_the_outcome_summary_says_how_much_of_the_scope_an_empty_find_examined(search, summary) -> None:
+    assert _outcome_summary(search) == summary
 
 
 def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -> None:

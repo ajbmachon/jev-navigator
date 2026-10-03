@@ -37,6 +37,7 @@ from ..history import (
     judge_history_async,
 )
 from ..index.code_index import CodeIndex
+from ..index.languages import language_of
 from ..index.spans import CodeSlice
 from ..judgments.answers import JevResponse, NoulAnswer
 from ..judgments.client import JEV_INPUT_BOX_CHARS, QUESTION_RESERVE_CHARS, InputBudgetExceededError
@@ -209,8 +210,10 @@ class FindResult:
     absent: one "no" about one place can be wrong. When nothing is found, rank the opened places by
     their probability; the best one is the likeliest place. ``starts`` holds the start places with
     their verdicts: a start is never a find, because the caller already had it. ``unparsed_files``
-    lists scope files the index could not parse; while it is not empty the outcome is never
-    ``nothing_left``."""
+    lists scope files the index could not parse. Of ``code_files`` scope code files, Jev judged code
+    (the opened places, not whole files) in ``files_judged``; ``files_read`` counts those plus the
+    files the search only parsed to list neighbours. While any file was never read or could not be
+    parsed, the outcome is never ``nothing_left``."""
 
     outcome: Outcome
     found: tuple[Visit, ...]
@@ -229,6 +232,17 @@ class FindResult:
     parser_scans_completed: tuple[str, ...] = ()
     parser_scans_pending: tuple[str, ...] = ()
     unavailable_files: Mapping[str, str] = field(default_factory=dict)
+    files_judged: int = 0
+    files_read: int = 0
+    code_files: int = 0
+
+    @property
+    def files_read_only(self) -> int:
+        return self.files_read - self.files_judged
+
+    @property
+    def files_never_reached(self) -> int:
+        return self.code_files - self.files_read
 
 
 @dataclass(order=True)
@@ -264,6 +278,7 @@ class _Search:
     set_aside: list[NotInspected] = field(default_factory=list)
     steps: int = 0
     cap_reached: bool = False
+    replay_exhausted: bool = False
     counter: itertools.count = field(default_factory=itertools.count)
 
     def push(
@@ -368,13 +383,14 @@ async def find_code_async(
     initial_candidates: Sequence[tuple[Place, float]] = (),
 ) -> FindResult:
     """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
-    masking, the store, the journal and the history work exactly as in ``find_code``."""
+    masking, the store, the journal and the history work exactly as in ``find_code``. Opening places
+    runs ripgrep, git and the parser, so it runs in a worker thread and the event loop stays free."""
     options = _SearchOptions(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
     )
     search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, index)) is None:
-        opened = _open_round(index, search, judge)
+        opened = await asyncio.to_thread(_open_round, index, search, judge)
         if not opened:
             continue
         responses = await asyncio.gather(
@@ -478,6 +494,12 @@ def _settled_response(future: Future):
 
 
 def _merge_round(search: _Search, opened: list[_Opening], responses: list) -> None:
+    """After the call cap refused a live request, only stored answers can still come back; a round
+    that got none means the store holds nothing for the frontier, so opening more places is waste.
+    Counting unreplayed store records instead would never stop a Resume: its store carries the
+    earlier run's answers for places that run already judged, which this run never asks again."""
+    answered = [response for response in responses if not isinstance(response, _Unanswered)]
+    search.replay_exhausted = search.cap_reached and not answered
     for opening, response in zip(opened, responses, strict=True):
         if response is _Unanswered.CANCELLED:
             _set_aside_unasked(search, opening, "cancelled")
@@ -581,7 +603,7 @@ def _stop_reason(search: _Search, index: CodeIndex) -> Outcome | None:
     if search.stop_judgment is not None and search.stop_judgment.outcome == HistoryOutcome.FOUND:
         return Outcome.STOP_RULE
     steps_used = search.budget.max_steps is not None and search.steps >= search.budget.max_steps
-    if steps_used:
+    if steps_used or search.replay_exhausted:
         return Outcome.BUDGET
     if not search.worth_opening():
         if search.cap_reached:
@@ -591,13 +613,13 @@ def _stop_reason(search: _Search, index: CodeIndex) -> Outcome | None:
 
 
 def _nothing_worth_opening(search: _Search, index: CodeIndex) -> Outcome:
-    """``nothing_left`` only when every scope file was parsed; code in an unparsed file was never
-    offered, so the search cannot say it looked everywhere."""
+    """``nothing_left`` only when the search itself parsed every scope file without a grammar error;
+    code in a file it never reached or could not parse was never offered. The remaining files are
+    never parsed just to choose this label."""
     if search.unsure:
         return Outcome.UNSURE_ONLY
-    return (
-        Outcome.SCOPE_INCOMPLETE if index.unparsed_files or index.unavailable_files else Outcome.NOTHING_LEFT
-    )
+    unexamined = index.parser_scans_pending or index.observed_unparsed_files or index.unavailable_files
+    return Outcome.SCOPE_INCOMPLETE if unexamined else Outcome.NOTHING_LEFT
 
 
 @dataclass(frozen=True)
@@ -916,7 +938,11 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
     item, code, candidates = opening.item, opening.code, opening.candidates
     found_probability = response.noul(search.questions.found.question_id).probability
     visit = Visit(
-        item.place.key, code, item.path, found_probability, search.thresholds.noul_verdict(found_probability)
+        item.place.key,
+        code,
+        item.path,
+        found_probability,
+        search.thresholds.noul_verdict(found_probability),
     )
     _file_visit(search, visit, item.tier)
     picked = _picked_slot(search, response)
@@ -1083,6 +1109,9 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
     completed_scans = index.parser_scans_completed
     pending_scans = index.parser_scans_pending
     unavailable = index.unavailable_files
+    code_files = {file for file in index.available_files if language_of(file)}
+    judged_files = code_files & _opened_files(search)
+    read_files = judged_files | (code_files & index.parsed_files)
     search.history.append(
         _stop_step(search, outcome, not_inspected, unparsed, completed_scans, pending_scans, unavailable)
     )
@@ -1104,7 +1133,15 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
         completed_scans,
         pending_scans,
         unavailable,
+        len(judged_files),
+        len(read_files),
+        len(code_files),
     )
+
+
+def _opened_files(search: _Search) -> set[str]:
+    opened = (*search.starts, *search.found, *search.searched, *search.unsure)
+    return {visit.code.span.file for visit in opened}
 
 
 def _stop_step(
