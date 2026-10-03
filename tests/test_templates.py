@@ -68,19 +68,21 @@ def resolve(state: Mapping, path: str) -> object:
     return value
 
 
+def wording_edits(template: Check) -> list[Check]:
+    """The template with one character added to each piece of its wording."""
+    edits = [replace(template, instructions=template.instructions + " ")]
+    if template.yes is not None and template.no is not None:
+        edits.append(replace(template, yes=replace(template.yes, what=template.yes.what + " ")))
+        edits.append(replace(template, no=replace(template.no, what=template.no.what + " ")))
+    return edits
+
+
 def test_each_template_id_changes_when_its_wording_changes() -> None:
     # Arrange
     ids = [template.question_id for template in TEMPLATES]
 
     # Act
-    edited = {
-        template.question_id: [
-            replace(template, instructions=template.instructions + " "),
-            replace(template, yes=replace(template.yes, what=template.yes.what + " ")),
-            replace(template, no=replace(template.no, what=template.no.what + " ")),
-        ]
-        for template in TEMPLATES
-    }
+    edited = {template.question_id: wording_edits(template) for template in TEMPLATES}
 
     # Assert
     assert len(set(ids)) == len(ids) == 1 + len(BEHAVIOR_ROLE_QUESTIONS)
@@ -151,6 +153,16 @@ def test_role_questions_are_four_independent_nouls_per_unit_in_one_request(sampl
     assert set(BEHAVIOR_ROLE_QUESTIONS) == BEHAVIOR_ROLES
     assert all(roles == BEHAVIOR_ROLES for roles in roles_per_unit.values())
     assert {question["type"] for question in questions.values()} == {"noul"}
+
+
+def test_the_match_question_is_asked_without_criteria_as_jgrep_asks_it(sample_index: CodeIndex) -> None:
+    # Act
+    requests = rendered(sample_index, [MATCH], REQUEST, units=3)
+
+    # Assert
+    questions = [question for _, asked in requests for question in asked.values()]
+    assert len(questions) == 3
+    assert all(set(question) == {"type", "instructions"} for question in questions)
 
 
 def test_each_per_unit_question_names_its_own_unit_and_no_other(sample_index: CodeIndex) -> None:

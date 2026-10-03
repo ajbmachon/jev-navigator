@@ -754,7 +754,9 @@ def _neighbour_batch(search: _Search, request: _OpeningRequest) -> tuple[Check, 
     def rebind(text: str) -> str:
         return text.replace(f"{ITEM_PLACEHOLDER}.preview", f"{ITEM_PLACEHOLDER}.{CODE_FIELD}")
 
-    def criterion(value: Criterion) -> Criterion:
+    def criterion(value: Criterion | None) -> Criterion | None:
+        if value is None:
+            return None
         return replace(
             value,
             what=rebind(value.what),

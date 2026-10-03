@@ -1,0 +1,100 @@
+{
+  "case_id": "same_behaviour:secrets-module",
+  "group_id": "jev-navigator-same_behaviour",
+  "revision_id": "v4",
+  "request": {
+    "model": "jev-latest",
+    "state": {
+      "subject": {
+        "code": "def mask_by_content(value: object, masker: Masker) -> object:\n    \"\"\"Masks nested JSON-like data so that a value hidden in one string is hidden in all of them.\"\"\"\n    return mask_everywhere(value, masker, masked_values(value, masker))"
+      },
+      "items": [
+        {
+          "file": "src/jev_navigator/judgments/secrets.py",
+          "lines": [
+            99,
+            102
+          ],
+          "code": "def mask_request(state: Mapping, questions: Mapping, masker: Masker) -> tuple[Mapping, Mapping, frozenset]:\n    \"\"\"The masked state and questions, and every value that was hidden in either.\"\"\"\n    values = masked_values([state, questions], masker)\n    return mask_everywhere(state, masker, values), mask_everywhere(questions, masker, values), values"
+        },
+        {
+          "file": "src/jev_navigator/judgments/secrets.py",
+          "lines": [
+            115,
+            127
+          ],
+          "code": "def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:\n    \"\"\"Masks every string by the masker's rules, then hides each of ``values`` wherever it still\n    appears. Keys are left as they are; ``refuse_if_secret`` refuses a request with one in a key.\"\"\"\n    longest_first = sorted(values - {MASK}, key=len, reverse=True)\n\n    @cache\n    def hide(text: str) -> str:\n        text = masker.mask(text)\n        for secret in longest_first:\n            text = text.replace(secret, MASK)\n        return text\n\n    return _each_string(value, hide)"
+        },
+        {
+          "file": "src/jev_navigator/judgments/secrets.py",
+          "lines": [
+            130,
+            134
+          ],
+          "code": "def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str, str]:\n    \"\"\"Options whose key would change under masking are dropped: a secret is never offered as a choice.\"\"\"\n    if masker is None:\n        return dict(options)\n    return {key: masker.mask(text) for key, text in options.items() if masker.mask(key) == key}"
+        }
+      ]
+    },
+    "questions": {
+      "same_behaviour@a35e3a20#0": {
+        "type": "noul",
+        "instructions": "Does `items[0].code` do the same thing as `subject.code`?",
+        "criteria": {
+          "true": {
+            "what": "Both compute the same result from the same kind of input, even if written differently.",
+            "examples": [
+              "Two functions that each sum item prices and apply the same 10 percent discount above 100."
+            ]
+          },
+          "false": {
+            "what": "They share names or helpers but do different work.",
+            "examples": [
+              "`parse_order` and `parse_refund` both call `json.loads` but build different records."
+            ]
+          }
+        }
+      },
+      "same_behaviour@a35e3a20#1": {
+        "type": "noul",
+        "instructions": "Does `items[1].code` do the same thing as `subject.code`?",
+        "criteria": {
+          "true": {
+            "what": "Both compute the same result from the same kind of input, even if written differently.",
+            "examples": [
+              "Two functions that each sum item prices and apply the same 10 percent discount above 100."
+            ]
+          },
+          "false": {
+            "what": "They share names or helpers but do different work.",
+            "examples": [
+              "`parse_order` and `parse_refund` both call `json.loads` but build different records."
+            ]
+          }
+        }
+      },
+      "same_behaviour@a35e3a20#2": {
+        "type": "noul",
+        "instructions": "Does `items[2].code` do the same thing as `subject.code`?",
+        "criteria": {
+          "true": {
+            "what": "Both compute the same result from the same kind of input, even if written differently.",
+            "examples": [
+              "Two functions that each sum item prices and apply the same 10 percent discount above 100."
+            ]
+          },
+          "false": {
+            "what": "They share names or helpers but do different work.",
+            "examples": [
+              "`parse_order` and `parse_refund` both call `json.loads` but build different records."
+            ]
+          }
+        }
+      }
+    }
+  },
+  "intended_uses": {
+    "same_behaviour@a35e3a20#0": "Yes lists the candidate as duplicated behaviour; unsure is listed separately; no is dropped from the duplication candidates.",
+    "same_behaviour@a35e3a20#1": "Yes lists the candidate as duplicated behaviour; unsure is listed separately; no is dropped from the duplication candidates.",
+    "same_behaviour@a35e3a20#2": "Yes lists the candidate as duplicated behaviour; unsure is listed separately; no is dropped from the duplication candidates."
+  }
+}

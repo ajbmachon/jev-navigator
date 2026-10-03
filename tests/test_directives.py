@@ -73,6 +73,33 @@ def test_export_for_review_refuses_a_question_without_an_intended_use(tmp_path: 
         export_for_review({}, {"q": {"type": "noul"}}, {}, tmp_path / "c.json", case_id="c", group_id="g")
 
 
+def test_export_for_review_refuses_to_replace_a_revision_with_a_different_request(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "find_code" / "v3" / "candidate.json"
+    questions = {"q": {"type": "noul", "instructions": "Is `slice.code` the limit check?"}}
+    uses = {"q": "stop when yes"}
+    export_for_review({"slice": {"code": "x = 1"}}, questions, uses, path, case_id="c", group_id="g")
+    reviewed = path.read_text()
+
+    # Act and assert
+    with pytest.raises(FileExistsError, match="find_code/v3/candidate.json"):
+        export_for_review({"slice": {"code": "x = 2"}}, questions, uses, path, case_id="c", group_id="g")
+    assert path.read_text() == reviewed
+
+
+def test_export_for_review_writes_an_unchanged_request_again_without_complaint(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "candidate.json"
+    request = ({"slice": {"code": "x = 1"}}, {"q": {"type": "noul"}}, {"q": "stop when yes"})
+    export_for_review(*request, path, case_id="c", group_id="g")
+
+    # Act
+    written = export_for_review(*request, path, case_id="c", group_id="g")
+
+    # Assert
+    assert json.loads(written.read_text())["request"]["state"] == {"slice": {"code": "x = 1"}}
+
+
 def test_the_capturing_client_answers_each_primitive_in_its_own_shape() -> None:
     # Arrange
     from jev_navigator.judgments.answers import ChoiceAnswer, NoulAnswer, ScoreAnswer

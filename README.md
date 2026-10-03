@@ -269,7 +269,7 @@ silently omitted.
 
 Before that pass, `.js` files whose leading comments (before any code, after an optional byte-order
 mark or shebang) carry the `@flow` pragma are separated from plain JavaScript. They ride on the tsx
-grammar — the closest available superset — through a `languageGlobs` sgconfig written outside the
+grammar, the closest available superset, through a `languageGlobs` sgconfig written outside the
 scanned repository. Plain JavaScript keeps the JavaScript grammar unchanged. The tsx grammar is not
 a Flow parser: unsupported constructs such as exact object types `{| |}`, `export opaque type`,
 variance annotations, `?T` in static property types and inexact objects `...` remain visible as
@@ -354,7 +354,7 @@ Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all
 thread. Both paths share one core: masking, the secret scan, the hash, the store lookup, the call
 budget, the journal and the recording are the same steps, and only the send differs (a direct call,
 or an awaited one). Batches of `check_each_async` and the places of each `find_code_async` round are
-sent with `asyncio.gather` — except that the first batch of a `check_each_async` whose served model
+sent with `asyncio.gather`, except that the first batch of a `check_each_async` whose served model
 is still unknown and which has an answer store goes out alone. Its live answer pins the served model,
 so the remaining batches can replay from the store exactly as the sequential path does. A sync method given an async client
 raises `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
@@ -572,8 +572,9 @@ records the result and attempt count. The first malformed reply survives a succe
 Run your function once with `CapturingJevClient` (from `jev_navigator.judgments.review`); it never
 calls Jev and answers every question neutrally. Write the captured, already-masked request with
 `export_for_review(state, questions, intended_uses, path, case_id=..., group_id=...)`: one JSON file
-with the request and, per question, what code does with the answer. Read it, or pass it to a
-question-review tool, before any paid call, and pilot a small set of cases first.
+with the request and, per question, what code does with the answer. It refuses to replace a file
+that already holds a different request, so a changed request is written as a new revision. Read it,
+or pass it to a question-review tool, before any paid call, and pilot a small set of cases first.
 
 ## Register a benchmark before running it
 

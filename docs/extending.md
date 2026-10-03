@@ -28,7 +28,8 @@ Code holds the goal, the loop and the stopping. Jev gets concrete state and one 
 
 1. Say what code will do with each answer, and what the costly error is.
 2. Do everything mechanical in code: which functions exist, who calls whom, which files changed.
-3. Ask one `Check` per item about a concrete property of supplied code, with yes and no criteria.
+3. Ask one `Check` per item about a concrete property of supplied code. Add yes and no criteria
+   when the instructions alone leave the boundary open; a `Check` takes both or neither.
 4. Never ask whether something is false, wrong or contradicts something; ask for the concrete
    property instead, and let code combine the answers.
 5. Handle every outcome: yes, no, unsure, and low confidence.
@@ -43,16 +44,16 @@ travel in state. `find_code` does not use these templates yet.
   only orders the returned group.
 - `unit_entry(index, span)` is one unit as Jev sees it: `file`, `lines` and `code`. The location is
   what `rebuild_request` re-reads the code from.
-- `MATCH` is asked of every unit in a round. It names its own unit and reads the description in
-  `target`.
+- `MATCH` is asked of every unit in a round, without criteria, as jgrep asks it. It names its own
+  unit and reads the description in `target`.
 - `BEHAVIOR_ROLE_QUESTIONS` are four independent yes or no questions for the best few, asked in one
   request: `performs`, `hands_off`, `selects_or_configures` and `consumes`. A unit can hold several
   roles. These names are the behaviour role list that a request's `want` and a result's labels use.
 
 Pass them to `Judge.check_every` with the unit entries and the shared state. Each template's id
 carries a hash of its wording, so a reworded template is a new question. Before a template is used
-for paid calls, `question-templates/build_find_v2_candidates.py` writes Meta Builder review files
-for it from this repository's own code.
+for paid calls, `question-templates/build_candidates.py` writes Meta Builder review files for it
+from this repository's own code.
 
 ## Worked example: which route handlers write an audit entry?
 

@@ -34,23 +34,26 @@ class Criterion:
 class Check:
     """A yes/no judgment about concrete supplied state. ``{item}`` in the instructions stands for
     one entry of a batched list, for example "Is `{item}.code` the implementation that
-    `doc.sentence` describes?"."""
+    `doc.sentence` describes?". ``yes`` and ``no`` come together or not at all: without them the
+    instructions alone define the answer."""
 
     name: str
     instructions: str
-    yes: Criterion
-    no: Criterion
+    yes: Criterion | None = None
+    no: Criterion | None = None
+
+    def __post_init__(self) -> None:
+        if (self.yes is None) != (self.no is None):
+            raise ValueError(f"{self.name}: give both the yes and the no criterion, or neither")
 
     @property
     def question_id(self) -> str:
         return f"{self.name}@{wording_hash(self.to_question())}"
 
     def to_question(self, item_path: str = "") -> dict:
-        question = {
-            "type": "noul",
-            "instructions": self.instructions,
-            "criteria": {"true": self.yes.to_json(), "false": self.no.to_json()},
-        }
+        question: dict = {"type": "noul", "instructions": self.instructions}
+        if self.yes is not None and self.no is not None:
+            question["criteria"] = {"true": self.yes.to_json(), "false": self.no.to_json()}
         if not item_path:
             return question
         return json.loads(json.dumps(question).replace(ITEM_PLACEHOLDER, item_path))

@@ -42,7 +42,9 @@ def export_for_review(
     group_id: str,
     revision_id: str = "v1",
 ) -> Path:
-    """``intended_uses`` says, per question id, what code does with the answer."""
+    """``intended_uses`` says, per question id, what code does with the answer. A file already
+    reviewed under ``path`` is never replaced by a different request: a changed request is a new
+    revision, so writing different content there raises ``FileExistsError``."""
     missing = set(questions) - set(intended_uses)
     if missing:
         raise ValueError(f"every question needs an intended use; missing: {sorted(missing)}")
@@ -53,8 +55,11 @@ def export_for_review(
         "request": {"model": LATEST_JEV, "state": dict(state), "questions": dict(questions)},
         "intended_uses": dict(intended_uses),
     }
+    text = json.dumps(candidate, indent=2) + "\n"
+    if path.exists() and path.read_text() != text:
+        raise FileExistsError(f"{path} already holds a different review request; write it as a new revision")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(candidate, indent=2) + "\n")
+    path.write_text(text)
     return path
 
 

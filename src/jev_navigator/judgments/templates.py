@@ -1,10 +1,10 @@
 """Find v2 question templates: fixed wording over variable state.
 
-Every unit in a round gets the match question, jgrep's one question per unit with the request's
-behaviour moved out of the wording into state. The best few units also get the four behaviour role
-questions, one Noul per role because a unit can play several. All of them read one shared state
-field, ``target``, built by ``target_state``; each per-unit question names its own unit and
-nothing else.
+Every unit in a round gets the match question, jgrep's one question per unit without criteria, with
+the request's behaviour moved out of the wording into state. The best few units also get the four
+behaviour role questions, one Noul per role because a unit can play several. All of them read one
+shared state field, ``target``, built by ``target_state``; each per-unit question names its own unit
+and nothing else.
 
 The four role names are the behaviour role list (``behavior_role``) that a request's ``want`` and a
 result's labels use.
@@ -25,8 +25,6 @@ EXAMPLE_BEHAVIOUR = "For the check that limits how many items an order may hold"
 MATCH = Check(
     name="match",
     instructions="Look only at `{item}.code`. Does that code match the description in `target`?",
-    yes=Criterion("The description in `target` fits what `{item}.code` does."),
-    no=Criterion("The description in `target` does not fit what `{item}.code` does."),
 )
 
 PERFORMS = Check(

@@ -1,0 +1,849 @@
+{
+  "case_id": "find_code:secret-refusal",
+  "group_id": "jev-navigator-find-code",
+  "revision_id": "v4",
+  "request": {
+    "model": "jev-latest",
+    "state": {
+      "target": {
+        "description": "the check that refuses to send a request that still contains a secret"
+      },
+      "slice": {
+        "file": "src/jev_navigator/judgments/secrets.py",
+        "lines": "99-102",
+        "code": "def mask_request(state: Mapping, questions: Mapping, masker: Masker) -> tuple[Mapping, Mapping, frozenset]:\n    \"\"\"The masked state and questions, and every value that was hidden in either.\"\"\"\n    values = masked_values([state, questions], masker)\n    return mask_everywhere(state, masker, values), mask_everywhere(questions, masker, values), values"
+      },
+      "candidates": [
+        {
+          "signature": "src/jev_navigator/judgments/judge.py:465 `def _prepare(self, state: Mapping, questions: Mapping) -> _Prepared:` (calls mask_request)",
+          "preview": "    def _prepare(self, state: Mapping, questions: Mapping) -> _Prepared:\n        hidden: frozenset[str] = frozenset()\n        if self.masker:\n            state, questions, hidden = mask_request(state, questions, self.masker)\n        refuse_if_secret(state, questions, self.scanner, hidden)\n        request_hash = request_sha256(state, questions)\n        stored = self.store.by_request(request_hash) if self.store else None\n        accepted = stored.response() if stored is not None and self._accepts(stored.model) else None",
+          "relationship": {
+            "move": "callers",
+            "relation": "calls mask_request",
+            "binding": {
+              "status": "resolved",
+              "reason": "imported from src/jev_navigator/judgments/secrets.py",
+              "proven": true,
+              "target": {
+                "file": "src/jev_navigator/judgments/secrets.py",
+                "start": 99,
+                "end": 102,
+                "name": "mask_request"
+              }
+            }
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/rebuild.py:34 `def rebuild_request(` (calls mask_request)",
+          "preview": "def rebuild_request(\n    record: AnswerRecord,\n    index_at_commit: CodeIndex,\n    shared: Mapping,\n    *,\n    masker: Masker | None = _DEFAULT_MASKER,\n) -> RebuiltRequest:\n    skeleton = record.skeleton",
+          "relationship": {
+            "move": "callers",
+            "relation": "calls mask_request",
+            "binding": {
+              "status": "resolved",
+              "reason": "imported from src/jev_navigator/judgments/secrets.py",
+              "proven": true,
+              "target": {
+                "file": "src/jev_navigator/judgments/secrets.py",
+                "start": 99,
+                "end": 102,
+                "name": "mask_request"
+              }
+            }
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/round.py:191 `def registered_request_sha256(` (calls mask_request)",
+          "preview": "def registered_request_sha256(\n    registration: RoundRegistration, state: dict, *, masker: Masker | None = DEFAULT_MASKER\n) -> str:\n    \"\"\"A request is part of the round only when asked with the registered questions.\n\n    Compare against the ``request_sha256`` an ``AnswerRecord`` (or a Journal line) already\n    carries: a stored answer whose hash differs was asked under other questions and must not\n    count towards the round. Use the same ``masker`` configuration as the Judge; the default",
+          "relationship": {
+            "move": "callers",
+            "relation": "calls mask_request",
+            "binding": {
+              "status": "resolved",
+              "reason": "imported from src/jev_navigator/judgments/secrets.py",
+              "proven": true,
+              "target": {
+                "file": "src/jev_navigator/judgments/secrets.py",
+                "start": 99,
+                "end": 102,
+                "name": "mask_request"
+              }
+            }
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:110 `def masked_values(value: object, masker: Masker) -> frozenset[str]:` (called by mask_request)",
+          "preview": "def masked_values(value: object, masker: Masker) -> frozenset[str]:\n    \"\"\"Every value the masker hides anywhere inside nested JSON-like data, keys included.\"\"\"\n    return frozenset(found for text in dict.fromkeys(_strings(value)) for found in masker.masked_values(text))",
+          "relationship": {
+            "move": "callees",
+            "relation": "called by mask_request",
+            "binding": {
+              "status": "resolved",
+              "reason": "defined in the same file",
+              "proven": true,
+              "target": {
+                "file": "src/jev_navigator/judgments/secrets.py",
+                "start": 110,
+                "end": 112,
+                "name": "masked_values"
+              }
+            }
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:115 `def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:` (called by mask_request)",
+          "preview": "def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:\n    \"\"\"Masks every string by the masker's rules, then hides each of ``values`` wherever it still\n    appears. Keys are left as they are; ``refuse_if_secret`` refuses a request with one in a key.\"\"\"\n    longest_first = sorted(values - {MASK}, key=len, reverse=True)\n\n    @cache\n    def hide(text: str) -> str:\n        text = masker.mask(text)",
+          "relationship": {
+            "move": "callees",
+            "relation": "called by mask_request",
+            "binding": {
+              "status": "resolved",
+              "reason": "defined in the same file",
+              "proven": true,
+              "target": {
+                "file": "src/jev_navigator/judgments/secrets.py",
+                "start": 115,
+                "end": 127,
+                "name": "mask_everywhere"
+              }
+            }
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:42 `class Masker(Protocol):` (passed on by mask_request as type)",
+          "preview": "class Masker(Protocol):\n    \"\"\"``mask`` hides secrets in one text; ``masked_values`` lists the values it hides there, so they\n    can be hidden everywhere else in the request too.\"\"\"\n\n    def mask(self, text: str) -> str: ...\n\n    def masked_values(self, text: str) -> list[str]: ...",
+          "relationship": {
+            "move": "passed_on",
+            "relation": "passed on by mask_request as type",
+            "binding": {
+              "status": "resolved",
+              "reason": "defined in the same file",
+              "proven": true,
+              "target": {
+                "file": "src/jev_navigator/judgments/secrets.py",
+                "start": 42,
+                "end": 48,
+                "name": "Masker"
+              }
+            }
+          }
+        },
+        {
+          "signature": "src/jev_navigator/history.py:353 `def questions(self) -> dict:` (passed on by mask_request as collection, candidate: name match only; 1 definitions in scope and no import names it)",
+          "preview": "    def questions(self) -> dict:\n        return {check.question_id: check.to_question() for check in self.checks.values()}",
+          "relationship": {
+            "move": "passed_on",
+            "relation": "passed on by mask_request as collection",
+            "binding": {
+              "status": "candidate",
+              "reason": "name match only; 1 definitions in scope and no import names it",
+              "proven": false
+            }
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:87 `def findings(self, text: str) -> list[str]:` (in the same file as mask_request)",
+          "preview": "    def findings(self, text: str) -> list[str]:\n        found = [match.group(0)[:12] for match in _KEY_MARKER_LINE.finditer(text)]\n        found += [match.group(0)[:8] for shape in _TOKEN_SHAPES for match in shape.finditer(text)]\n        found += [match.group(1)[:4] for match in _SECRET_ASSIGNMENT.finditer(text) if match.group(1) != MASK]\n        found += [\n            match.group(1)[:4]\n            for match in _QUOTED_ASSIGNMENT.finditer(text)\n            if _is_high_entropy(match.group(1))",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:105 `def mask_by_content(value: object, masker: Masker) -> object:` (in the same file as mask_request)",
+          "preview": "def mask_by_content(value: object, masker: Masker) -> object:\n    \"\"\"Masks nested JSON-like data so that a value hidden in one string is hidden in all of them.\"\"\"\n    return mask_everywhere(value, masker, masked_values(value, masker))",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:72 `def masked_values(self, text: str) -> list[str]:` (in the same file as mask_request)",
+          "preview": "    def masked_values(self, text: str) -> list[str]:\n        found = [match.group(0) for match in _PRIVATE_KEY_BLOCK.finditer(text)]\n        found += [match.group(0) for match in _KEY_MARKER_LINE.finditer(text)]\n        found += [match.group(0) for shape in _TOKEN_SHAPES for match in shape.finditer(text)]\n        found += [match.group(1) for match in _SECRET_ASSIGNMENT.finditer(text)]\n        found += [\n            match.group(1) for match in _QUOTED_ASSIGNMENT.finditer(text) if _is_high_entropy(match.group(1))\n        ]",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:130 `def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str, str]:` (in the same file as mask_request)",
+          "preview": "def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str, str]:\n    \"\"\"Options whose key would change under masking are dropped: a secret is never offered as a choice.\"\"\"\n    if masker is None:\n        return dict(options)\n    return {key: masker.mask(text) for key, text in options.items() if masker.mask(key) == key}",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:64 `def mask(self, text: str) -> str:` (in the same file as mask_request)",
+          "preview": "    def mask(self, text: str) -> str:\n        text = _PRIVATE_KEY_BLOCK.sub(MASK, text)\n        text = _KEY_MARKER_LINE.sub(MASK, text)\n        for shape in _TOKEN_SHAPES:\n            text = shape.sub(MASK, text)\n        text = _SECRET_ASSIGNMENT.sub(_mask_group, text)\n        return _QUOTED_ASSIGNMENT.sub(_mask_if_high_entropy, text)",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:137 `def refuse_if_secret(` (in the same file as mask_request)",
+          "preview": "def refuse_if_secret(\n    state: Mapping, questions: Mapping, scanner: Scanner | None, masked: frozenset[str] = frozenset()\n) -> None:\n    \"\"\"Refuses when a value masked elsewhere is still in the request (it can only sit in a key), or\n    when the scanner finds a secret.\"\"\"\n    texts = _strings(state) + _strings(questions)\n    if any(value in text for text in texts for value in masked):\n        raise SecretInRequestError(\"a masked value is still in the request, in a key; nothing was sent\")",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:52 `def findings(self, text: str) -> list[str]: ...` (in the same file as mask_request)",
+          "preview": "    def findings(self, text: str) -> list[str]: ...",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:152 `def _each_string(value: object, change: Callable[[str], str]) -> object:` (in the same file as mask_request)",
+          "preview": "def _each_string(value: object, change: Callable[[str], str]) -> object:\n    if isinstance(value, str):\n        return change(value)\n    if isinstance(value, Mapping):\n        return {key: _each_string(item, change) for key, item in value.items()}\n    if isinstance(value, list | tuple):\n        return [_each_string(item, change) for item in value]\n    return value",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:48 `def masked_values(self, text: str) -> list[str]: ...` (in the same file as mask_request)",
+          "preview": "    def masked_values(self, text: str) -> list[str]: ...",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:46 `def mask(self, text: str) -> str: ...` (in the same file as mask_request)",
+          "preview": "    def mask(self, text: str) -> str: ...",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:162 `def _strings(value: object) -> list[str]:` (in the same file as mask_request)",
+          "preview": "def _strings(value: object) -> list[str]:\n    if isinstance(value, str):\n        return [value]\n    if isinstance(value, Mapping):\n        return [text for key, item in value.items() for text in [str(key), *_strings(item)]]\n    if isinstance(value, list | tuple):\n        return [text for item in value for text in _strings(item)]\n    return []",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:172 `def _mask_group(match: re.Match) -> str:` (in the same file as mask_request)",
+          "preview": "def _mask_group(match: re.Match) -> str:\n    return match.group(0).replace(match.group(1), MASK)",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:176 `def _mask_if_high_entropy(match: re.Match) -> str:` (in the same file as mask_request)",
+          "preview": "def _mask_if_high_entropy(match: re.Match) -> str:\n    return _mask_group(match) if _is_high_entropy(match.group(1)) else match.group(0)",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:180 `def _is_high_entropy(value: str) -> bool:` (in the same file as mask_request)",
+          "preview": "def _is_high_entropy(value: str) -> bool:\n    counts = Counter(value)\n    bits = -sum(count / len(value) * math.log2(count / len(value)) for count in counts.values())\n    return bits >= HIGH_ENTROPY_BITS_PER_CHAR",
+          "relationship": {
+            "move": "same_file",
+            "relation": "in the same file as mask_request"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/judge.py:1-40 `\"\"\"Jev judgments as building blocks: yes/no checks over supplied items, picks over code-built` (start of a file committed with src/jev_navigator/judgments/secrets.py 2 times)",
+          "preview": "\"\"\"Jev judgments as building blocks: yes/no checks over supplied items, picks over code-built\noptions, and one function-calling decision per step.\n\nEvery request is masked, scanned, hashed and looked up in the answer store before any call, and\nevery fresh answer is stored with the thresholds that were in force.\n\"\"\"\n\nfrom __future__ import annotations",
+          "relationship": {
+            "move": "co_changed",
+            "relation": "start of a file committed with src/jev_navigator/judgments/secrets.py 2 times"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/rebuild.py:1-40 `\"\"\"Rebuild a stored batched request from the repository at its commit, and prove it is the same one.` (start of a file committed with src/jev_navigator/judgments/secrets.py 2 times)",
+          "preview": "\"\"\"Rebuild a stored batched request from the repository at its commit, and prove it is the same one.\n\nThe store never keeps client code. It keeps the question wording, the non-code fields of each item\n(file, lines, commit), and hashes of the code and of the shared state. ``rebuild_request`` re-reads\neach item's code from an index at that commit, adds the shared state the caller supplies, masks it\nas the judge did (a value hidden anywhere in the request is hidden everywhere), and compares the\nrequest hash with the stored one; when they differ it says which part changed.\n\"\"\"",
+          "relationship": {
+            "move": "co_changed",
+            "relation": "start of a file committed with src/jev_navigator/judgments/secrets.py 2 times"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:59-98 `@dataclass(frozen=True)` (the lines before src/jev_navigator/judgments/secrets.py:99-102)",
+          "preview": "@dataclass(frozen=True)\nclass SecretMasker:\n    \"\"\"Private-key blocks with their BEGIN and END lines, common token shapes, secret-named\n    assignments, and high-entropy quoted values in assignments.\"\"\"\n\n    def mask(self, text: str) -> str:\n        text = _PRIVATE_KEY_BLOCK.sub(MASK, text)\n        text = _KEY_MARKER_LINE.sub(MASK, text)",
+          "relationship": {
+            "move": "lines_before",
+            "relation": "the lines before src/jev_navigator/judgments/secrets.py:99-102"
+          }
+        },
+        {
+          "signature": "src/jev_navigator/judgments/secrets.py:103-142 `def mask_by_content(value: object, masker: Masker) -> object:` (the lines after src/jev_navigator/judgments/secrets.py:99-102)",
+          "preview": "\n\ndef mask_by_content(value: object, masker: Masker) -> object:\n    \"\"\"Masks nested JSON-like data so that a value hidden in one string is hidden in all of them.\"\"\"\n    return mask_everywhere(value, masker, masked_values(value, masker))\n\n\ndef masked_values(value: object, masker: Masker) -> frozenset[str]:",
+          "relationship": {
+            "move": "rest_of_file",
+            "relation": "the lines after src/jev_navigator/judgments/secrets.py:99-102"
+          }
+        }
+      ]
+    },
+    "questions": {
+      "contains_target@80e0fd2a": {
+        "type": "noul",
+        "instructions": "Does `slice.code` contain the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "A line or block in `slice.code` is itself the code the description names.",
+            "examples": [
+              "Description 'the check that limits items per order' and the slice holds `if len(order.items) > limit: raise`."
+            ]
+          },
+          "false": {
+            "what": "`slice.code` only calls, mentions or sits near that code, or does something else entirely.",
+            "not_for": "Code that merely has a similar name.",
+            "examples": [
+              "The slice calls `check_limits(order)` but the comparison is inside `check_limits`.",
+              "The slice formats an invoice."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#0": {
+        "type": "noul",
+        "instructions": "Does `candidates[0].preview`, under the signature `candidates[0].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#1": {
+        "type": "noul",
+        "instructions": "Does `candidates[1].preview`, under the signature `candidates[1].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#2": {
+        "type": "noul",
+        "instructions": "Does `candidates[2].preview`, under the signature `candidates[2].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#3": {
+        "type": "noul",
+        "instructions": "Does `candidates[3].preview`, under the signature `candidates[3].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#4": {
+        "type": "noul",
+        "instructions": "Does `candidates[4].preview`, under the signature `candidates[4].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#5": {
+        "type": "noul",
+        "instructions": "Does `candidates[5].preview`, under the signature `candidates[5].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#6": {
+        "type": "noul",
+        "instructions": "Does `candidates[6].preview`, under the signature `candidates[6].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#7": {
+        "type": "noul",
+        "instructions": "Does `candidates[7].preview`, under the signature `candidates[7].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#8": {
+        "type": "noul",
+        "instructions": "Does `candidates[8].preview`, under the signature `candidates[8].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#9": {
+        "type": "noul",
+        "instructions": "Does `candidates[9].preview`, under the signature `candidates[9].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#10": {
+        "type": "noul",
+        "instructions": "Does `candidates[10].preview`, under the signature `candidates[10].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#11": {
+        "type": "noul",
+        "instructions": "Does `candidates[11].preview`, under the signature `candidates[11].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#12": {
+        "type": "noul",
+        "instructions": "Does `candidates[12].preview`, under the signature `candidates[12].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#13": {
+        "type": "noul",
+        "instructions": "Does `candidates[13].preview`, under the signature `candidates[13].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#14": {
+        "type": "noul",
+        "instructions": "Does `candidates[14].preview`, under the signature `candidates[14].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#15": {
+        "type": "noul",
+        "instructions": "Does `candidates[15].preview`, under the signature `candidates[15].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#16": {
+        "type": "noul",
+        "instructions": "Does `candidates[16].preview`, under the signature `candidates[16].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#17": {
+        "type": "noul",
+        "instructions": "Does `candidates[17].preview`, under the signature `candidates[17].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#18": {
+        "type": "noul",
+        "instructions": "Does `candidates[18].preview`, under the signature `candidates[18].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#19": {
+        "type": "noul",
+        "instructions": "Does `candidates[19].preview`, under the signature `candidates[19].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#20": {
+        "type": "noul",
+        "instructions": "Does `candidates[20].preview`, under the signature `candidates[20].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#21": {
+        "type": "noul",
+        "instructions": "Does `candidates[21].preview`, under the signature `candidates[21].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#22": {
+        "type": "noul",
+        "instructions": "Does `candidates[22].preview`, under the signature `candidates[22].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#23": {
+        "type": "noul",
+        "instructions": "Does `candidates[23].preview`, under the signature `candidates[23].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "could_contain_target@1a6fddfe#24": {
+        "type": "noul",
+        "instructions": "Does `candidates[24].preview`, under the signature `candidates[24].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "criteria": {
+          "true": {
+            "what": "The signature and preview suggest this function itself implements the description.",
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ]
+          },
+          "false": {
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description.",
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ]
+          }
+        }
+      },
+      "open_first@73cf1e75": {
+        "type": "choice",
+        "instructions": "Which entry of `candidates` most likely contains the code described in `target.description`?",
+        "criteria": {
+          "0": "src/jev_navigator/judgments/judge.py:465 `def _prepare(self, state: Mapping, questions: Mapping) -> _Prepared:` (calls mask_request)",
+          "1": "src/jev_navigator/judgments/rebuild.py:34 `def rebuild_request(` (calls mask_request)",
+          "2": "src/jev_navigator/judgments/round.py:191 `def registered_request_sha256(` (calls mask_request)",
+          "3": "src/jev_navigator/judgments/secrets.py:110 `def masked_values(value: object, masker: Masker) -> frozenset[str]:` (called by mask_request)",
+          "4": "src/jev_navigator/judgments/secrets.py:115 `def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:` (called by mask_request)",
+          "5": "src/jev_navigator/judgments/secrets.py:42 `class Masker(Protocol):` (passed on by mask_request as type)",
+          "6": "src/jev_navigator/history.py:353 `def questions(self) -> dict:` (passed on by mask_request as collection, candidate: name match only; 1 definitions in scope and no import names it)",
+          "7": "src/jev_navigator/judgments/secrets.py:87 `def findings(self, text: str) -> list[str]:` (in the same file as mask_request)",
+          "8": "src/jev_navigator/judgments/secrets.py:105 `def mask_by_content(value: object, masker: Masker) -> object:` (in the same file as mask_request)",
+          "9": "src/jev_navigator/judgments/secrets.py:72 `def masked_values(self, text: str) -> list[str]:` (in the same file as mask_request)",
+          "10": "src/jev_navigator/judgments/secrets.py:130 `def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str, str]:` (in the same file as mask_request)",
+          "11": "src/jev_navigator/judgments/secrets.py:64 `def mask(self, text: str) -> str:` (in the same file as mask_request)",
+          "12": "src/jev_navigator/judgments/secrets.py:137 `def refuse_if_secret(` (in the same file as mask_request)",
+          "13": "src/jev_navigator/judgments/secrets.py:52 `def findings(self, text: str) -> list[str]: ...` (in the same file as mask_request)",
+          "14": "src/jev_navigator/judgments/secrets.py:152 `def _each_string(value: object, change: Callable[[str], str]) -> object:` (in the same file as mask_request)",
+          "15": "src/jev_navigator/judgments/secrets.py:48 `def masked_values(self, text: str) -> list[str]: ...` (in the same file as mask_request)",
+          "16": "src/jev_navigator/judgments/secrets.py:46 `def mask(self, text: str) -> str: ...` (in the same file as mask_request)",
+          "17": "src/jev_navigator/judgments/secrets.py:162 `def _strings(value: object) -> list[str]:` (in the same file as mask_request)",
+          "18": "src/jev_navigator/judgments/secrets.py:172 `def _mask_group(match: re.Match) -> str:` (in the same file as mask_request)",
+          "19": "src/jev_navigator/judgments/secrets.py:176 `def _mask_if_high_entropy(match: re.Match) -> str:` (in the same file as mask_request)",
+          "20": "src/jev_navigator/judgments/secrets.py:180 `def _is_high_entropy(value: str) -> bool:` (in the same file as mask_request)",
+          "21": "src/jev_navigator/judgments/judge.py:1-40 `\"\"\"Jev judgments as building blocks: yes/no checks over supplied items, picks over code-built` (start of a file committed with src/jev_navigator/judgments/secrets.py 2 times)",
+          "22": "src/jev_navigator/judgments/rebuild.py:1-40 `\"\"\"Rebuild a stored batched request from the repository at its commit, and prove it is the same one.` (start of a file committed with src/jev_navigator/judgments/secrets.py 2 times)",
+          "23": "src/jev_navigator/judgments/secrets.py:59-98 `@dataclass(frozen=True)` (the lines before src/jev_navigator/judgments/secrets.py:99-102)",
+          "24": "src/jev_navigator/judgments/secrets.py:103-142 `def mask_by_content(value: object, masker: Masker) -> object:` (the lines after src/jev_navigator/judgments/secrets.py:99-102)",
+          "none": "None of the entries is likely to contain it."
+        }
+      }
+    }
+  },
+  "intended_uses": {
+    "contains_target@80e0fd2a": "Yes (0.80 or more) ends the search and reports this code as found; unsure keeps it as an unsure place; no records it as searched without finding the target.",
+    "could_contain_target@1a6fddfe#0": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#1": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#2": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#3": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#4": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#5": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#6": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#7": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#8": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#9": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#10": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#11": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#12": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#13": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#14": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#15": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#16": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#17": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#18": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#19": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#20": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#21": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#22": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#23": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#24": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "open_first@73cf1e75": "When confidence is 0.70 or more and the answer is not 'none', that neighbour is opened first."
+  }
+}
