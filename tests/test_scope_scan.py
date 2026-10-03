@@ -650,3 +650,42 @@ def test_a_search_over_a_scope_with_grammar_errors_never_reports_nothing_left(tm
     assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.unparsed_files == {"src/native/RootTag.js"}
     assert result.history.steps[-1].judgments["unparsed_files"] == ["src/native/RootTag.js"]
+
+
+def test_an_empty_search_that_never_reached_every_file_says_so_without_parsing_the_rest(
+    tmp_path: Path, ast_grep_runs
+) -> None:
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "app/start.py": "def start():\n    return 1\n",
+            "app/billing.py": "def bill():\n    return 2\n",
+            "app/mail.py": "def send():\n    return 3\n",
+        },
+    )
+    judge = Judge(ScriptedJevClient(nouls=lambda question_id, question, state: 0.05))
+    start = [place_for_line(index, "app/start.py", 2, "start")]
+
+    # Act
+    result = find_code(index, judge, "where an order is shipped", start, moves={})
+
+    # Assert
+    parsed = {file for _rule, _config, files in ast_grep_runs for file in files}
+    assert parsed == {"app/start.py"}
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
+    assert result.parser_scans_pending == ("facts",)
+
+
+def test_an_empty_search_that_parsed_every_file_reports_nothing_left(tmp_path: Path) -> None:
+    # Arrange
+    index = committed(tmp_path, {"app/start.py": "def start():\n    return 1\n"})
+    judge = Judge(ScriptedJevClient(nouls=lambda question_id, question, state: 0.05))
+    start = [place_for_line(index, "app/start.py", 2, "start")]
+
+    # Act
+    result = find_code(index, judge, "where an order is shipped", start, moves={})
+
+    # Assert
+    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.parser_scans_pending == ()

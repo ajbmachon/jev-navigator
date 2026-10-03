@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -165,6 +167,45 @@ def test_find_code_async_searches_like_find_code(sample_index: CodeIndex) -> Non
     assert result.found[0].code.span.name == "check_limits"
     assert (result.steps, result.calls) == (expected.steps, expected.calls)
     assert sorted(map(str, async_client.requests)) == sorted(map(str, sync_client.requests))
+
+
+def test_find_code_async_keeps_the_event_loop_running_while_a_place_is_opened(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    start = place_for_line(sample_index, "app/orders.py", 6, "start")
+    opening: list[float] = []
+
+    def slow_open():
+        opening.append(time.monotonic())
+        time.sleep(0.2)
+        opening.append(time.monotonic())
+        return start.open()
+
+    judge = Judge(AsyncScriptedJevClient(ScriptedJevClient(nouls=limit_check_answers)))
+    ticks: list[float] = []
+
+    async def search_beside_a_ticker():
+        async def tick():
+            while True:
+                ticks.append(time.monotonic())
+                await asyncio.sleep(0.01)
+
+        ticker = asyncio.create_task(tick())
+        try:
+            return await find_code_async(
+                sample_index, judge, TARGET, [replace(start, open=slow_open)], moves={}
+            )
+        finally:
+            ticker.cancel()
+
+    # Act
+    result = run(search_beside_a_ticker())
+
+    # Assert
+    began, ended = opening[0], opening[1]
+    assert result.steps == 1
+    assert len([tick for tick in ticks if began < tick < ended]) >= 5
 
 
 def test_find_code_async_applies_the_stop_rule_through_the_async_history_check(

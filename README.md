@@ -501,6 +501,9 @@ Large openings split independent neighbour questions through the same Judge batc
 discarding candidates or previews. The global pick is optional: when its full request or option set
 exceeds provider capability, `open_first.unavailable` records why and individual neighbour scores
 still order the complete frontier. Every live sub-request counts toward the selected call allowance.
+Once the allowance has refused a request, the search keeps opening places only while the answer store
+still answers them; the first round that gets no answer at all ends the search as `budget`, and the
+places it did not open stay in `not_inspected` for Resume.
 Only HTTP 400 with `detail.error_type` equal to `max_tokens_exceeded` is a size refusal;
 mentions of that text in question IDs or unrelated error messages do not trigger splitting.
 A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code

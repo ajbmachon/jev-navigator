@@ -264,6 +264,7 @@ class _Search:
     set_aside: list[NotInspected] = field(default_factory=list)
     steps: int = 0
     cap_reached: bool = False
+    replay_exhausted: bool = False
     counter: itertools.count = field(default_factory=itertools.count)
 
     def push(
@@ -368,13 +369,14 @@ async def find_code_async(
     initial_candidates: Sequence[tuple[Place, float]] = (),
 ) -> FindResult:
     """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
-    masking, the store, the journal and the history work exactly as in ``find_code``."""
+    masking, the store, the journal and the history work exactly as in ``find_code``. Opening places
+    runs ripgrep, git and the parser, so it runs in a worker thread and the event loop stays free."""
     options = _SearchOptions(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
     )
     search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, index)) is None:
-        opened = _open_round(index, search, judge)
+        opened = await asyncio.to_thread(_open_round, index, search, judge)
         if not opened:
             continue
         responses = await asyncio.gather(
@@ -478,6 +480,10 @@ def _settled_response(future: Future):
 
 
 def _merge_round(search: _Search, opened: list[_Opening], responses: list) -> None:
+    """After the call cap refused a live request, only stored answers can still come back; a round
+    that got none means the store holds nothing for the frontier, so opening more places is waste."""
+    answered = [response for response in responses if not isinstance(response, _Unanswered)]
+    search.replay_exhausted = search.cap_reached and not answered
     for opening, response in zip(opened, responses, strict=True):
         if response is _Unanswered.CANCELLED:
             _set_aside_unasked(search, opening, "cancelled")
@@ -581,7 +587,7 @@ def _stop_reason(search: _Search, index: CodeIndex) -> Outcome | None:
     if search.stop_judgment is not None and search.stop_judgment.outcome == HistoryOutcome.FOUND:
         return Outcome.STOP_RULE
     steps_used = search.budget.max_steps is not None and search.steps >= search.budget.max_steps
-    if steps_used:
+    if steps_used or search.replay_exhausted:
         return Outcome.BUDGET
     if not search.worth_opening():
         if search.cap_reached:
@@ -591,13 +597,13 @@ def _stop_reason(search: _Search, index: CodeIndex) -> Outcome | None:
 
 
 def _nothing_worth_opening(search: _Search, index: CodeIndex) -> Outcome:
-    """``nothing_left`` only when every scope file was parsed; code in an unparsed file was never
-    offered, so the search cannot say it looked everywhere."""
+    """``nothing_left`` only when the search itself parsed every scope file without a grammar error;
+    code in a file it never reached or could not parse was never offered. The remaining files are
+    never parsed just to choose this label."""
     if search.unsure:
         return Outcome.UNSURE_ONLY
-    return (
-        Outcome.SCOPE_INCOMPLETE if index.unparsed_files or index.unavailable_files else Outcome.NOTHING_LEFT
-    )
+    unexamined = index.parser_scans_pending or index.observed_unparsed_files or index.unavailable_files
+    return Outcome.SCOPE_INCOMPLETE if unexamined else Outcome.NOTHING_LEFT
 
 
 @dataclass(frozen=True)

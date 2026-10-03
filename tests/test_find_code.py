@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from git_repos import commit_files
 
-from jev_navigator.directives.find_code import OPEN_FIRST, Outcome, SearchBudget, find_code
+from jev_navigator.directives.find_code import OPEN_FIRST, Outcome, SearchBudget, StopRule, find_code
 from jev_navigator.directives.places import (
     MOVES,
     Place,
@@ -22,6 +22,7 @@ from jev_navigator.directives.places import (
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
@@ -86,7 +87,7 @@ def test_a_low_neighbour_score_keeps_the_neighbour_as_not_inspected(sample_index
     result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
 
     # Assert
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert [visit.code.span.name for visit in result.starts] == ["place"]
     assert result.not_inspected and {entry.reason for entry in result.not_inspected} == {"deprioritized"}
     assert result.found == () and result.unsure == () and result.searched == ()
@@ -591,6 +592,80 @@ def test_a_global_call_cap_on_the_judge_ends_a_search_as_budget(sample_index: Co
     assert len(client.requests) == 2
 
 
+def places_chosen(result) -> list[str]:
+    return [
+        chosen["place"]
+        for step in result.history.steps
+        if step.operation == "choose_next"
+        for chosen in step.arguments["chosen"]
+    ]
+
+
+def test_a_capped_search_opens_no_place_after_a_round_the_cap_left_unanswered(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.9))
+    judge = Judge(client, max_calls=1)
+
+    # Act
+    result = find_code(
+        sample_index, judge, TARGET, start_at_place(sample_index), budget=SearchBudget(beam_width=1)
+    )
+
+    # Assert
+    offered = {entry["place"] for entry in result.history.steps[1].judgments["could_contain"]}
+    assert result.outcome == Outcome.BUDGET
+    assert len(client.requests) == 1
+    assert len(places_chosen(result)) == 2
+    assert {entry.place_key for entry in result.not_inspected} == offered
+    assert {entry.reason for entry in result.not_inspected} == {"budget"}
+
+
+def test_a_spent_call_budget_still_replays_every_stored_round_after_a_refused_request(
+    sample_index: CodeIndex, tmp_path: Path
+) -> None:
+    # Arrange
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    answers = scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.9)
+    first_client = ScriptedJevClient(nouls=answers, choices={"open_first": {"none": 1.0}})
+    budget = SearchBudget(beam_width=1)
+    first = find_code(
+        sample_index,
+        Judge(first_client, store=store, max_calls=3),
+        TARGET,
+        start_at_place(sample_index),
+        budget=budget,
+    )
+    replay_client = ScriptedJevClient()
+    replay_judge = Judge(
+        replay_client, store=JsonlAnswerStore(store.path), served_model=first_client.model, max_calls=0
+    )
+
+    never_satisfied = StopRule(
+        Check("never_satisfied", "Is the search done?", Criterion("Yes."), Criterion("No."))
+    )
+
+    # Act
+    replayed = find_code(
+        sample_index,
+        replay_judge,
+        TARGET,
+        start_at_place(sample_index),
+        budget=budget,
+        stop_rule=never_satisfied,
+    )
+
+    # Assert
+    assert first.steps == 3
+    assert replay_client.requests == []
+    assert replayed.stop_judgment is None
+    assert replayed.outcome == Outcome.BUDGET
+    assert replayed.steps == 3
+    assert places_chosen(replayed)[:3] == places_chosen(first)[:3]
+    assert len(places_chosen(replayed)) == 4
+
+
 def test_cached_search_answer_is_free_at_zero_live_call_budget(
     sample_index: CodeIndex, tmp_path: Path
 ) -> None:
@@ -645,7 +720,7 @@ def test_find_code_with_no_moves_opens_only_its_start(sample_index: CodeIndex) -
     result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index), moves={})
 
     # Assert
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.steps == 1 and len(client.requests) == 1
 
 
@@ -673,7 +748,7 @@ def test_default_search_limits_are_unbounded_and_a_finite_frontier_terminates(
         None,
         None,
     )
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.not_inspected == ()
 
 
@@ -1134,7 +1209,7 @@ def test_a_none_pick_queues_nothing(sample_index: CodeIndex) -> None:
     result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
 
     # Assert
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.steps == 1
 
 
@@ -1158,7 +1233,7 @@ def test_a_waiting_pick_keeps_the_search_going_when_no_move_scores_above_the_no_
 
     # Assert
     assert result.steps == 2
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
 
 
 def test_a_start_judged_to_hold_the_target_is_recorded_but_never_ends_the_search(
@@ -1177,7 +1252,7 @@ def test_a_start_judged_to_hold_the_target_is_recorded_but_never_ends_the_search
     result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
 
     # Assert
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.found == ()
     assert [(visit.code.span.name, visit.verdict) for visit in result.starts] == [("place", "yes")]
 
