@@ -1,3 +1,5 @@
+"""Exporting git blobs to disk: each blob at its path, refused escapes and missing objects."""
+
 from __future__ import annotations
 
 from pathlib import Path

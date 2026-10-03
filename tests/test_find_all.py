@@ -1,3 +1,5 @@
+"""Find All over the real index: connected code first, then disconnected functions, with honest coverage."""
+
 from pathlib import Path
 
 from jev_navigator.directives.find_all import find_all

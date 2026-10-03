@@ -1,3 +1,5 @@
+"""The optional LLM step: when it runs, retries of unparsable replies, durability and connector failures."""
+
 from __future__ import annotations
 
 import json

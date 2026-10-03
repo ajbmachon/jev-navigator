@@ -1,3 +1,5 @@
+"""The scope scan: each file parsed once, call sites bound once, and parser failures kept honest."""
+
 from __future__ import annotations
 
 from pathlib import Path

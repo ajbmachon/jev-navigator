@@ -19,14 +19,42 @@ requires = ["uv_build>=0.11.7,<0.12"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = ["mypy>=2.3.1,<2.4", "pytest", "ruff"]
 
 [tool.ruff]
 line-length = 110
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM", "N"]
+# Engine's strict clean-code set where JVN already meets it: no commented-out code (ERA001), a
+# literal __all__ of names (PLE0604, PLE0605), a module docstring in every file (D100) and no
+# blind catch without a stated reason (BLE001).
+select = ["E", "F", "I", "B", "UP", "SIM", "N", "ERA001", "PLE0604", "PLE0605", "D100", "BLE001"]
+
+# A ratchet, as in Analysis Engine: these modules pass strict checking today, and a module joins the
+# list once it passes too. Never remove one or weaken strictness to make the check pass.
+[tool.mypy]
+python_version = "3.11"
+strict = true
+follow_imports = "silent"
+ignore_missing_imports = true
+files = [
+    "src/jev_navigator/__init__.py",
+    "src/jev_navigator/adapters/__init__.py",
+    "src/jev_navigator/directives/__init__.py",
+    "src/jev_navigator/directives/comment_context.py",
+    "src/jev_navigator/directives/find_all.py",
+    "src/jev_navigator/directives/shown.py",
+    "src/jev_navigator/directives/similar.py",
+    "src/jev_navigator/directives/statistics.py",
+    "src/jev_navigator/environment.py",
+    "src/jev_navigator/index/__init__.py",
+    "src/jev_navigator/index/bindings.py",
+    "src/jev_navigator/index/languages.py",
+    "src/jev_navigator/judgments/__init__.py",
+    "src/jev_navigator/judgments/thresholds.py",
+    "src/jev_navigator/progress.py",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

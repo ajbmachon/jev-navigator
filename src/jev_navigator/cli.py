@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 
-from .adapters.typesafe import TypeSafeJevClient
+from .adapters.typesafe import TypeSafeJevClient, provider_errors
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
 from .cli_trace import create_trace_evidence_pack
@@ -39,6 +39,16 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
+# The failures a command reports in one line: bad input, files, git, a missing extra and the
+# library's own refusals. Anything else is a bug and keeps its traceback, the only copy of its cause.
+EXPECTED_ERRORS: tuple[type[Exception], ...] = (
+    OSError,
+    ValueError,
+    LookupError,
+    RuntimeError,
+    ImportError,
+    subprocess.SubprocessError,
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -104,7 +114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     break
                 resume_from = output
                 output = output.parent / _default_output(repository).name
-    except Exception as error:
+    except (*EXPECTED_ERRORS, *provider_errors()) as error:
         print(f"jvn {args.command}: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
@@ -218,7 +228,7 @@ def _run_statistics(args: argparse.Namespace) -> int:
         outcome = "cancelled"
         print("jvn stats: cancelled", file=sys.stderr)
         return 130
-    except Exception as error:
+    except EXPECTED_ERRORS as error:
         print(f"jvn stats: {error}", file=sys.stderr)
         return 1
     finally:

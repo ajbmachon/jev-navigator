@@ -1,3 +1,5 @@
+"""The TypeSafe SDK adapter at its real request boundary: batching, resume, retries, masking and cancel."""
+
 from __future__ import annotations
 
 import asyncio
@@ -452,7 +454,7 @@ def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.Monkey
                 {"code": "return wanted"},
                 {"match": {"type": "noul", "instructions": "Does code return wanted?"}},
             )
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - the test asserts on what the request thread raised
             failure.append(error)
         finally:
             finished.set()
