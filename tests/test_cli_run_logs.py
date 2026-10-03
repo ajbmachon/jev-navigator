@@ -73,12 +73,6 @@ def files_holding_code(folder: Path) -> list[str]:
     return sorted(path.name for path in folder.iterdir() if holds_code(path))
 
 
-def files_outside_the_answer_store_holding_code(folder: Path) -> list[str]:
-    """Until claude/perf-judge's store change is merged, a key mention still reaches answers.jsonl;
-    once it is, these tests use files_holding_code and this helper goes."""
-    return [name for name in files_holding_code(folder) if name != "answers.jsonl"]
-
-
 def find_pack(repository: Path, output: Path, workflow: str, max_calls: int, **options) -> dict:
     return create_evidence_pack(
         repository,
@@ -208,14 +202,23 @@ def test_a_capped_run_and_its_resume_send_exactly_the_requests_of_an_uninterrupt
     repository = marked_repository(tmp_path / "repository")
     whole_client, first_client, resumed_client = limit_client(), limit_client(), limit_client()
     options = {"fact_cache_dir": tmp_path / "fact-cache"}
+    interrupted = {**options, "answer_store": tmp_path / "interrupted-answers.sqlite"}
     start = ("app/entry.py:5",)
     whole_budget = SearchBudget(beam_width=1, max_calls=5)
     capped_budget = SearchBudget(beam_width=1, max_calls=1)
     create_evidence_pack(
-        repository, ("app/",), TARGET, start, tmp_path / "whole", whole_budget, whole_client, **options
+        repository,
+        ("app/",),
+        TARGET,
+        start,
+        tmp_path / "whole",
+        whole_budget,
+        whole_client,
+        answer_store=tmp_path / "whole-answers.sqlite",
+        **options,
     )
     create_evidence_pack(
-        repository, ("app/",), TARGET, start, tmp_path / "first", capped_budget, first_client, **options
+        repository, ("app/",), TARGET, start, tmp_path / "first", capped_budget, first_client, **interrupted
     )
 
     # Act
@@ -228,7 +231,7 @@ def test_a_capped_run_and_its_resume_send_exactly_the_requests_of_an_uninterrupt
         whole_budget,
         resumed_client,
         resume_from=tmp_path / "first",
-        **options,
+        **interrupted,
     )
 
     # Assert
@@ -379,7 +382,7 @@ def test_a_default_run_folder_never_stores_a_mentioned_key(
     # Assert
     mention = KEY_MENTION_SCOPES[scope][2]
     assert f"mentions a key ({mention})" in neighbour_relations(manifest)
-    assert files_outside_the_answer_store_holding_code(tmp_path / "pack") == []
+    assert files_holding_code(tmp_path / "pack") == []
 
 
 @pytest.mark.parametrize("scope", sorted(KEY_MENTION_SCOPES))
@@ -424,7 +427,7 @@ def test_a_budget_stop_after_opening_a_key_mention_keeps_the_key_out_of_resume_s
     ]
     assert manifest["search"]["outcome"] == "budget"
     assert opened_by_mention
-    assert files_outside_the_answer_store_holding_code(output) == []
+    assert files_holding_code(output) == []
 
 
 def strings_starting_with(value: object, prefix: str) -> set[str]:
