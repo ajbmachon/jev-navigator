@@ -5,8 +5,8 @@ parses, plus markup when docs are asked for. Tests, generated code, vendored cod
 out unless asked for:
 
 - tests: ``is_test_file``, a test folder or a test file name;
-- generated: a true ``linguist-generated`` attribute, or ``@generated`` or ``DO NOT EDIT`` in a
-  file's first lines;
+- generated: a true ``linguist-generated`` attribute, or a comment line holding ``@generated`` or
+  ``do not edit``, in any case, among a file's first lines;
 - vendored: a true ``linguist-vendored`` attribute, or a ``vendor``, ``third_party`` or
   ``node_modules`` folder;
 - docs: a ``docs`` folder, or a markup file.
@@ -32,10 +32,10 @@ from pathlib import Path, PurePosixPath
 from . import tools
 from .languages import LANGUAGE_BY_SUFFIX, language_of
 
-DEFAULT_MAX_FILES = 200
 HEADER_LINES = 10
 HEADER_BYTES = 4096
-GENERATED_MARKERS = (b"@generated", b"DO NOT EDIT")
+GENERATED_MARKERS = (b"@generated", b"do not edit")
+COMMENT_STARTS = (b"#", b"//", b"/*", b"*", b"<!--")
 VENDORED_FOLDERS = frozenset({"vendor", "third_party", "node_modules"})
 DOCS_FOLDER = "docs"
 MARKUP_SUFFIXES = frozenset({".md", ".mdx", ".markdown", ".rst", ".adoc", ".asciidoc"})
@@ -57,20 +57,21 @@ class InvalidScopeError(ValueError):
         self.problem = problem
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Scope:
-    """The caller's scope: the request's ``scope`` object."""
+    """The request's ``scope`` object, built from the canonical request, whose schema owns the cap
+    and the switches' values; an empty filter or a missing ``changed_since`` means not filtered."""
 
     repo: Path
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     languages: tuple[str, ...] = ()
-    with_tests: bool = False
-    with_generated: bool = False
-    with_vendored: bool = False
-    with_docs: bool = False
+    with_tests: bool
+    with_generated: bool
+    with_vendored: bool
+    with_docs: bool
     changed_since: str | None = None
-    max_files: int = DEFAULT_MAX_FILES
+    max_files: int
 
 
 @dataclass(frozen=True)
@@ -97,7 +98,7 @@ class ScopeRefusal:
 
 def resolve_scope(scope: Scope) -> ResolvedScope | ScopeRefusal:
     root = _checked_root(scope)
-    _check_fields(scope)
+    _check_languages(scope)
     changed_since_commit = _resolved_ref(root, scope.changed_since)
     files = [path for path in tools.listed_files(root) if _kept_by_path(scope, path)]
     if changed_since_commit is not None:
@@ -142,9 +143,7 @@ def _checked_root(scope: Scope) -> Path:
     return root
 
 
-def _check_fields(scope: Scope) -> None:
-    if scope.max_files < 1:
-        raise InvalidScopeError("/scope/max_files", "must be at least 1")
+def _check_languages(scope: Scope) -> None:
     unknown = sorted(set(scope.languages) - KNOWN_LANGUAGES)
     if unknown:
         raise InvalidScopeError("/scope/languages", f"unknown {unknown}; known: {sorted(KNOWN_LANGUAGES)}")
@@ -253,8 +252,12 @@ def _attribute_value(value: str) -> bool | None:
 def _has_generated_header(root: Path, path: str) -> bool:
     with (root / path).open("rb") as file:
         head = file.read(HEADER_BYTES)
-    lines = head.split(b"\n")[:HEADER_LINES]
-    return any(marker in line for line in lines for marker in GENERATED_MARKERS)
+    return any(_marks_generated(line) for line in head.split(b"\n")[:HEADER_LINES])
+
+
+def _marks_generated(line: bytes) -> bool:
+    comment = line.strip().lower()
+    return comment.startswith(COMMENT_STARTS) and any(marker in comment for marker in GENERATED_MARKERS)
 
 
 def _matches(entry: str, path: str) -> bool:
