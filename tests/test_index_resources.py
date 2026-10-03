@@ -364,3 +364,41 @@ def test_a_declaration_on_a_first_line_after_a_byte_order_mark_keeps_its_name(tm
     # Assert
     assert [span.name for span in facts["settings.py"].structure.declarations] == ["LIMIT", "OTHER"]
     assert [span.name for span in facts["flags.ts"].structure.declarations] == ["enabled"]
+
+
+def test_binding_many_calls_to_one_name_checks_each_definition_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: three definitions of save, and forty files that import and call it
+    callers = {
+        f"app/caller_{n}.py": f"from app.store import save\n\n\ndef run_{n}(row):\n    return save(row)\n"
+        for n in range(40)
+    }
+    commit_files(
+        tmp_path,
+        {
+            "app/store.py": "def save(row):\n    return row\n",
+            "app/backup.py": "def save(row):\n    return None\n",
+            "app/model.py": "class Model:\n    def save(self):\n        return self\n",
+            **callers,
+        },
+    )
+    index = CodeIndex.from_git(tmp_path)
+    checked: Counter[str] = Counter()
+    real_can_name = CodeIndex._can_name
+
+    def counted_can_name(self, role, span):
+        checked[span.file] += 1
+        return real_can_name(self, role, span)
+
+    monkeypatch.setattr(CodeIndex, "_can_name", counted_can_name)
+
+    # Act
+    sites = index.find_callers("save")
+
+    # Assert
+    assert len(sites) == 40
+    assert {(site.binding.status, site.binding.target.file) for site in sites} == {
+        ("resolved", "app/store.py")
+    }
+    assert checked == {"app/store.py": 1, "app/backup.py": 1, "app/model.py": 1}

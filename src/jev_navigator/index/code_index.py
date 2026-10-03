@@ -115,6 +115,7 @@ class CodeIndex:
         self._top_level_in = cache(self._top_level_spans)
         self._names_imported = cache(self._read_imported_names)
         self._binding = cache(self._compute_binding)
+        self._nameable = cache(self._nameable_definitions)
         self._unread_names = cache(self._read_unread_names)
 
     @classmethod
@@ -382,17 +383,23 @@ class CodeIndex:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
-        definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
+        definitions, top_level = self._nameable(name, role)
         facts = CallFacts(
             file,
             name,
             receiver,
             definitions,
-            tuple(span for span in definitions if span in self._top_level_in(span.file)),
+            top_level,
             self._imported_from(file, name),
             self._files_hiding(name),
         )
         return binding_from_facts(facts)
+
+    def _nameable_definitions(self, name: str, role: str | None) -> tuple[tuple[Span, ...], tuple[Span, ...]]:
+        """The definitions of ``name`` a use in ``role`` can name, and those of them at top level.
+        Neither depends on where the use sits, so every use of a name shares them."""
+        definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
+        return definitions, tuple(span for span in definitions if span in self._top_level_in(span.file))
 
     def _files_hiding(self, name: str) -> frozenset[str]:
         """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed
