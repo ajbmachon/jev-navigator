@@ -1,0 +1,513 @@
+"""Units: what a search judges and what a result names, and the one resolver for a caller's anchors.
+
+A unit is one function, one method, or one file's top-level code: its lines outside every function
+and method, class bodies included, kept as runs of lines in order. A record carries the unit's
+identity, kind, qualified symbol and the hash of its own text. Only a unit larger than the request
+box is cut, into pieces of up to 60 lines with no overlap; a piece never spans two runs. The unit
+stays one unit, scored by its best piece. A piece still over the box is too large to judge: it is
+named with its range and size and never judged.
+
+Records hold locations and hashes, never code; ``read_unit_text`` and ``read_piece_text`` read the
+code through the index when a request needs it.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass, replace
+from enum import StrEnum
+from typing import TextIO
+
+from .bindings import BindingStatus
+from .code_index import CodeIndex
+from .imports import non_code_lines
+from .languages import language_of
+from .scope import is_test_file
+from .spans import Span, holder_of
+
+PIECE_LINES = 60
+TOP_LEVEL_SYMBOL = "<top level>"
+UNSUPPORTED_LANGUAGE = "language not supported"
+
+LineRange = tuple[int, int]
+
+
+class UnitKind(StrEnum):
+    FUNCTION = "function"
+    METHOD = "method"
+    TOP_LEVEL = "top_level"
+
+
+class Origin(StrEnum):
+    """How a unit entered a search when no edge brought it in."""
+
+    SCOPE = "scope"
+    ANCHOR = "anchor"
+
+
+class EdgeKind(StrEnum):
+    CALLS = "calls"
+    CALLED_BY = "called_by"
+    REFERENCES = "references"
+    LITERAL_HIT = "literal_hit"
+
+
+class EstablishedBy(StrEnum):
+    """What established an edge: code, or a model's ``hypothesis``, which never becomes proof."""
+
+    PARSER = "parser"
+    IMPORT = "import"
+    KEY = "key"
+    LITERAL = "literal"
+    HYPOTHESIS = "hypothesis"
+
+
+@dataclass(frozen=True)
+class Edge:
+    """A connection between two units, named by unit id."""
+
+    source: str
+    target: str
+    kind: EdgeKind
+    established_by: EstablishedBy
+    binding: BindingStatus
+
+    def to_json(self) -> dict:
+        return {
+            "from": self.source,
+            "to": self.target,
+            "kind": str(self.kind),
+            "established_by": str(self.established_by),
+            "binding": str(self.binding),
+        }
+
+    @classmethod
+    def from_json(cls, raw: Mapping) -> Edge:
+        return cls(
+            raw["from"],
+            raw["to"],
+            EdgeKind(raw["kind"]),
+            EstablishedBy(raw["established_by"]),
+            BindingStatus(raw["binding"]),
+        )
+
+
+@dataclass(frozen=True)
+class Piece:
+    """Lines ``start`` to ``end`` of a unit too large for the box, numbered from 0 in line order.
+    ``chars`` is its size as a request spells it; a piece over the box is too large to judge."""
+
+    index: int
+    start: int
+    end: int
+    content_sha256: str
+    chars: int
+    too_large_to_judge: bool
+
+
+@dataclass(frozen=True)
+class Unit:
+    """``ranges`` holds one range for a function and every run of lines for top-level code.
+    ``nested_in`` names the function unit whose text already holds this one's, if any."""
+
+    id: str
+    path: str
+    ranges: tuple[LineRange, ...]
+    kind: UnitKind
+    symbol: str
+    language: str
+    test: bool
+    revision: str
+    content_sha256: str
+    nested_in: str | None = None
+    pieces: tuple[Piece, ...] = ()
+    reached_by: Origin | Edge = Origin.SCOPE
+
+    @property
+    def start(self) -> int:
+        return self.ranges[0][0]
+
+    @property
+    def end(self) -> int:
+        return self.ranges[-1][1]
+
+    @property
+    def judged_pieces(self) -> tuple[Piece, ...]:
+        return tuple(piece for piece in self.pieces if not piece.too_large_to_judge)
+
+    @property
+    def too_large_pieces(self) -> tuple[Piece, ...]:
+        return tuple(piece for piece in self.pieces if piece.too_large_to_judge)
+
+    def piece_id(self, piece: Piece) -> str:
+        return f"{self.id}#p{piece.index}"
+
+    def to_json(self) -> dict:
+        reached_by = self.reached_by.to_json() if isinstance(self.reached_by, Edge) else str(self.reached_by)
+        return {
+            "id": self.id,
+            "path": self.path,
+            "start": self.start,
+            "end": self.end,
+            "ranges": [list(line_range) for line_range in self.ranges],
+            "kind": str(self.kind),
+            "symbol": self.symbol,
+            "language": self.language,
+            "test": self.test,
+            "revision": self.revision,
+            "content_sha256": self.content_sha256,
+            "nested_in": self.nested_in,
+            "pieces": [asdict(piece) for piece in self.pieces],
+            "reached_by": reached_by,
+        }
+
+    @classmethod
+    def from_json(cls, raw: Mapping) -> Unit:
+        reached_by = raw["reached_by"]
+        return cls(
+            raw["id"],
+            raw["path"],
+            tuple((start, end) for start, end in raw["ranges"]),
+            UnitKind(raw["kind"]),
+            raw["symbol"],
+            raw["language"],
+            raw["test"],
+            raw["revision"],
+            raw["content_sha256"],
+            raw["nested_in"],
+            tuple(Piece(**piece) for piece in raw["pieces"]),
+            Origin(reached_by) if isinstance(reached_by, str) else Edge.from_json(reached_by),
+        )
+
+
+@dataclass(frozen=True)
+class UnitListing:
+    """The units of a set of files, and the files that gave none, each with the reason."""
+
+    units: tuple[Unit, ...]
+    unlisted: Mapping[str, str]
+
+
+def list_units(index: CodeIndex, files: Sequence[str], *, box_chars: int) -> UnitListing:
+    """Every function and method of ``files`` and each file's top-level code, in file order and then
+    by position, parsing every source file in one batched scan. A file whose top-level code is only
+    imports, comments and blank lines lists no top-level unit."""
+    files = tuple(dict.fromkeys(files))
+    source_files = tuple(file for file in files if language_of(file))
+    index.functions_in_files(source_files)
+    units = tuple(unit for file in source_files for unit in _SourceFile(index, file, box_chars).listed())
+    unlisted = {file: UNSUPPORTED_LANGUAGE for file in files if not language_of(file)}
+    unlisted |= {file: reason for file, reason in index.unavailable_files.items() if file in files}
+    return UnitListing(units, unlisted)
+
+
+def read_unit_text(index: CodeIndex, unit: Unit) -> str:
+    """The unit's own text: its lines, or for top-level code its runs of lines joined in order."""
+    return "\n".join(_read(index, unit.path, start, end) for start, end in unit.ranges)
+
+
+def read_piece_text(index: CodeIndex, unit: Unit, piece: Piece) -> str:
+    return _read(index, unit.path, piece.start, piece.end)
+
+
+def unit_score(unit: Unit, scores: Mapping[str, float]) -> float | None:
+    """A unit's score for one question from ``scores`` keyed by unit or piece id: its own, or for a
+    cut unit its best judged piece's; None when nothing of it was scored."""
+    if not unit.pieces:
+        return scores.get(unit.id)
+    best = best_piece(unit, scores)
+    return None if best is None else scores[unit.piece_id(best)]
+
+
+def best_piece(unit: Unit, scores: Mapping[str, float]) -> Piece | None:
+    """The highest-scored piece of a cut unit, the earliest on a tie: the place to read."""
+    scored = [piece for piece in unit.pieces if unit.piece_id(piece) in scores]
+    return max(scored, key=lambda piece: scores[unit.piece_id(piece)], default=None)
+
+
+def write_units(units: Iterable[Unit], stream: TextIO) -> None:
+    """One JSON object per line."""
+    for unit in units:
+        stream.write(json.dumps(unit.to_json(), ensure_ascii=False) + "\n")
+
+
+def read_units(stream: TextIO) -> list[Unit]:
+    return [Unit.from_json(json.loads(line)) for line in stream if line.strip()]
+
+
+@dataclass(frozen=True)
+class LineAnchor:
+    file: str
+    line: int
+
+
+@dataclass(frozen=True)
+class RangeAnchor:
+    file: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class SymbolAnchor:
+    """A function, method, class or module-level declaration by name, optionally qualified by its
+    holders (``OrderService.place``), and optionally only in ``file``."""
+
+    symbol: str
+    file: str | None = None
+
+
+Anchor = LineAnchor | RangeAnchor | SymbolAnchor
+
+
+@dataclass(frozen=True)
+class UnresolvedAnchor:
+    anchor: Anchor
+    problem: str
+
+
+@dataclass(frozen=True)
+class AnchorResolution:
+    """Each unit once, marked as reached by an anchor, and every anchor that named no unit."""
+
+    units: tuple[Unit, ...]
+    unresolved: tuple[UnresolvedAnchor, ...]
+
+
+def resolve_anchors(index: CodeIndex, anchors: Iterable[Anchor], *, box_chars: int) -> AnchorResolution:
+    """The units ``anchors`` name. A line names the innermost unit holding it: a function, or the
+    file's top-level code outside every function, even top-level code the listing leaves out. A range
+    names each unit its non-blank lines touch, leaving out units nested in another named one. A
+    symbol names every definition it matches, each like the range of its lines. Nothing is guessed:
+    a file outside the scope, a line outside its file or an unknown symbol is reported, and a file
+    is parsed only after its anchor is known to point inside it."""
+    resolver = _AnchorResolver(index, box_chars)
+    found: dict[str, Unit] = {}
+    unresolved = []
+    for anchor in anchors:
+        units, problem = resolver.resolve(anchor)
+        if problem:
+            unresolved.append(UnresolvedAnchor(anchor, problem))
+        for unit in units:
+            found.setdefault(unit.id, replace(unit, reached_by=Origin.ANCHOR))
+    return AnchorResolution(tuple(found.values()), tuple(unresolved))
+
+
+class _SourceFile:
+    """The units of one source file, built from the index's functions and the file's lines."""
+
+    def __init__(self, index: CodeIndex, file: str, box_chars: int) -> None:
+        self._index = index
+        self._file = file
+        self._box_chars = box_chars
+        self._lines = index.lines(file)
+        self._symbols = index.symbols_in(file)
+        self._all_functions = frozenset(index.functions_in(file))
+        functions = _one_per_range(index.functions_in(file))
+        self.functions = tuple(self._function_unit(span, functions) for span in functions)
+        self.top_level = self._top_level_unit(functions)
+
+    def listed(self) -> tuple[Unit, ...]:
+        top_level = () if self.top_level is None or self._only_imports_and_comments() else (self.top_level,)
+        return (*self.functions, *top_level)
+
+    def unit_at(self, line: int) -> Unit | None:
+        holding = [unit for unit in self.functions if unit.start <= line <= unit.end]
+        return min(holding, key=lambda unit: unit.end - unit.start, default=self.top_level)
+
+    def qualified(self, span: Span) -> str:
+        """``span``'s name after every holder's: ``OrderService.place``, ``registerRoutes.<anonymous:4>``."""
+        names = []
+        current: Span | None = span
+        while current is not None:
+            names.append(current.name if _is_named(current) else f"<anonymous:{current.start}>")
+            current = holder_of(self._symbols, current)
+        return ".".join(reversed(names))
+
+    def _function_unit(self, span: Span, functions: Sequence[Span]) -> Unit:
+        holder = holder_of(self._symbols, span)
+        is_method = holder is not None and holder not in self._all_functions
+        outer = holder_of(functions, span)
+        kind = UnitKind.METHOD if is_method else UnitKind.FUNCTION
+        nested_in = None if outer is None else outer.key
+        return self._unit(span.key, ((span.start, span.end),), kind, self.qualified(span), nested_in)
+
+    def _top_level_unit(self, functions: Sequence[Span]) -> Unit | None:
+        inside = {line for span in functions for line in range(span.start, span.end + 1)}
+        outside = (line for line in range(1, len(self._lines) + 1) if line not in inside)
+        ranges = tuple(trimmed for run in _runs(outside) if (trimmed := self._without_blank_edges(run)))
+        if not ranges:
+            return None
+        return self._unit(f"{self._file}:top", ranges, UnitKind.TOP_LEVEL, TOP_LEVEL_SYMBOL)
+
+    def _only_imports_and_comments(self) -> bool:
+        non_code = non_code_lines("\n".join(self._lines), self._file)
+        return all(line in non_code for start, end in self.top_level.ranges for line in range(start, end + 1))
+
+    def _without_blank_edges(self, run: LineRange) -> LineRange | None:
+        start, end = run
+        while start <= end and not self._lines[start - 1].strip():
+            start += 1
+        while end >= start and not self._lines[end - 1].strip():
+            end -= 1
+        return (start, end) if start <= end else None
+
+    def _unit(
+        self,
+        unit_id: str,
+        ranges: tuple[LineRange, ...],
+        kind: UnitKind,
+        symbol: str,
+        nested_in: str | None = None,
+    ) -> Unit:
+        slices = [self._index.read_slice(Span(self._file, start, end)) for start, end in ranges]
+        text = "\n".join(code.text for code in slices)
+        pieces = self._pieces(ranges) if _request_chars(text) > self._box_chars else ()
+        return Unit(
+            unit_id,
+            self._file,
+            ranges,
+            kind,
+            symbol,
+            language_of(self._file) or "",
+            is_test_file(self._file),
+            slices[0].commit,
+            _sha256(text),
+            nested_in,
+            pieces,
+        )
+
+    def _pieces(self, ranges: Sequence[LineRange]) -> tuple[Piece, ...]:
+        cuts = [
+            (first, min(first + PIECE_LINES - 1, end))
+            for start, end in ranges
+            for first in range(start, end + 1, PIECE_LINES)
+        ]
+        return tuple(self._piece(number, start, end) for number, (start, end) in enumerate(cuts))
+
+    def _piece(self, number: int, start: int, end: int) -> Piece:
+        text = _read(self._index, self._file, start, end)
+        chars = _request_chars(text)
+        return Piece(number, start, end, _sha256(text), chars, chars > self._box_chars)
+
+
+class _AnchorResolver:
+    def __init__(self, index: CodeIndex, box_chars: int) -> None:
+        self._index = index
+        self._box_chars = box_chars
+        self._sources: dict[str, _SourceFile] = {}
+
+    def resolve(self, anchor: Anchor) -> tuple[tuple[Unit, ...], str]:
+        if isinstance(anchor, SymbolAnchor):
+            return self._symbol(anchor)
+        start, end = (
+            (anchor.line, anchor.line) if isinstance(anchor, LineAnchor) else (anchor.start, anchor.end)
+        )
+        problem = self._lines_problem(anchor.file, start, end)
+        if problem:
+            return (), problem
+        units = self._units_touching(anchor.file, start, end)
+        if not units:
+            return (), f"line {start} of {anchor.file} is blank and outside every function"
+        return units, ""
+
+    def _symbol(self, anchor: SymbolAnchor) -> tuple[tuple[Unit, ...], str]:
+        if anchor.file is not None and (problem := self._file_problem(anchor.file)):
+            return (), problem
+        definitions = self._definitions(anchor)
+        if not definitions:
+            where = anchor.file or "scope"
+            return (), f"no function, class or declaration named {anchor.symbol} in {where}"
+        units = (
+            unit for span in definitions for unit in self._units_touching(span.file, span.start, span.end)
+        )
+        return tuple(dict.fromkeys(units)), ""
+
+    def _definitions(self, anchor: SymbolAnchor) -> list[Span]:
+        name = anchor.symbol.rsplit(".", 1)[-1]
+        if anchor.file is None:
+            spans: Iterable[Span] = self._index.find_definition(name)
+        else:
+            file = anchor.file
+            spans = (*self._index.symbols_in(file), *self._index.declarations_in(file))
+        named = [span for span in spans if span.name == name]
+        return [span for span in named if _names(self._source(span.file).qualified(span), anchor.symbol)]
+
+    def _units_touching(self, file: str, start: int, end: int) -> tuple[Unit, ...]:
+        source = self._source(file)
+        lines = self._index.lines(file)
+        touched_lines = [line for line in range(start, end + 1) if lines[line - 1].strip()] or [start]
+        touched = dict.fromkeys(unit for line in touched_lines if (unit := source.unit_at(line)) is not None)
+        return tuple(unit for unit in touched if not any(_nests(unit, other) for other in touched))
+
+    def _lines_problem(self, file: str, start: int, end: int) -> str:
+        if problem := self._file_problem(file):
+            return problem
+        if start > end:
+            return f"the range {start}-{end} ends before it starts"
+        line_count = len(self._index.lines(file))
+        outside = next((line for line in (start, end) if not 1 <= line <= line_count), None)
+        if outside is not None:
+            return f"line {outside} is outside {file}, which has {line_count} lines"
+        return ""
+
+    def _file_problem(self, file: str) -> str:
+        if file not in self._index.files:
+            return f"{file} is not in scope"
+        if not language_of(file):
+            return f"{file} is not in a language JVN parses"
+        return ""
+
+    def _source(self, file: str) -> _SourceFile:
+        if file not in self._sources:
+            self._sources[file] = _SourceFile(self._index, file, self._box_chars)
+        return self._sources[file]
+
+
+def _one_per_range(spans: Iterable[Span]) -> tuple[Span, ...]:
+    """Functions on the same lines have the same text, so they are one unit, named by a named one."""
+    by_range: dict[LineRange, list[Span]] = {}
+    for span in spans:
+        by_range.setdefault((span.start, span.end), []).append(span)
+    chosen = (min(group, key=lambda span: (not _is_named(span), span.name)) for group in by_range.values())
+    return tuple(sorted(chosen, key=lambda span: (span.start, -span.end)))
+
+
+def _runs(lines: Iterable[int]) -> list[LineRange]:
+    runs: list[list[int]] = []
+    for line in lines:
+        if runs and runs[-1][1] == line - 1:
+            runs[-1][1] = line
+        else:
+            runs.append([line, line])
+    return [(start, end) for start, end in runs]
+
+
+def _nests(inner: Unit, outer: Unit) -> bool:
+    """Whether ``inner`` is a function inside ``outer``'s function lines."""
+    if inner == outer or UnitKind.TOP_LEVEL in (inner.kind, outer.kind):
+        return False
+    return outer.start <= inner.start and inner.end <= outer.end
+
+
+def _names(qualified: str, symbol: str) -> bool:
+    return qualified == symbol or qualified.endswith(f".{symbol}")
+
+
+def _is_named(span: Span) -> bool:
+    return bool(span.name) and not span.name.startswith("<")
+
+
+def _read(index: CodeIndex, file: str, start: int, end: int) -> str:
+    return index.read_slice(Span(file, start, end)).text
+
+
+def _request_chars(text: str) -> int:
+    """The characters ``text`` takes in a request body, the measure the box is set in."""
+    return len(json.dumps(text, ensure_ascii=False))
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()

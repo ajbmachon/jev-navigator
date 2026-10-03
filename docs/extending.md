@@ -8,6 +8,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | Piece | What it gives you |
 | --- | --- |
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
+| `index.units` | the units a search judges (functions, methods, each file's top-level code), cut only when larger than the request box, and the one resolver for line, range and symbol anchors |
 | `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
@@ -266,6 +267,61 @@ all source parsed successfully. An unrequested symbol kind is omitted, not repre
 `None` when that file was not measured; only a measured empty file has zero counts.
 Same-line nesting can have no known holder because the current index records line spans rather
 than AST parent identities. The `jvn stats` CLI writes these measurements as JSON and Markdown; see [the CLI guide](cli.md#structural-measurements).
+
+## Units and anchors
+
+`index.units` lists what a search judges and resolves what a caller points at, with no model:
+
+```python
+from jev_navigator.index.units import (
+    LineAnchor, RangeAnchor, SymbolAnchor, list_units, read_unit_text, resolve_anchors, write_units,
+)
+
+BOX = 76_800  # characters the request may give the unit: Jev's box for state plus longest question
+listing = list_units(index, index.files, box_chars=BOX)
+for unit in listing.units:
+    print(unit.id, unit.kind, unit.symbol, unit.content_sha256[:12], unit.nested_in)
+print(listing.unlisted)  # files that gave no units, each with its reason
+
+anchors = [LineAnchor("app/routes.py", 21), RangeAnchor("app/orders.py", 5, 7), SymbolAnchor("OrderService.place")]
+resolved = resolve_anchors(index, anchors, box_chars=BOX)
+print([unit.id for unit in resolved.units], resolved.unresolved)
+```
+
+A unit is one function, one method, or one file's top-level code. Its id is the location
+`path:start-end`; top-level code is `path:top`. Its `symbol` names every holder:
+`OrderService.place`, `Basket.total.helper`, and for an anonymous callback its holder and the line it
+starts on, `registerRoutes.<anonymous:4>`. `nested_in` names the function unit whose text already
+holds a nested one. `content_sha256` hashes the unit's own text, so an unchanged function keeps its
+hash when other lines of its file change. The record holds locations and hashes, never code:
+`read_unit_text` and `read_piece_text` read the code through the index. `write_units` and
+`read_units` store records as one JSON object per line.
+
+Top-level code is a file's lines outside every function and method, class bodies included, kept as
+runs of lines in order (`ranges`) without the blank lines at their edges. A file whose top-level code
+is only imports, comments and blank lines lists no top-level unit. Files the parser does not read
+(Markdown, JSON and other languages) give no units and are named in `unlisted`, as is a file that
+disappeared after the inventory.
+
+A unit whose text fits `box_chars` is one item, whatever its length. Only a larger unit is cut into
+`pieces` of at most 60 lines, in order, with no overlap and never across two runs of top-level code;
+each piece has its own range, hash and size. A piece still larger than the box is
+`too_large_to_judge`: it keeps its range and size, and `judged_pieces` leaves it out. A cut unit
+stays one unit: `unit_score` gives it its best piece's score, and `best_piece` names that piece's
+lines as the place to read. Item ids for pieces are `unit.piece_id(piece)`, the unit id plus `#p<index>`.
+
+Anchors resolve by lines, through the same units. A line names the innermost unit holding it: a
+function, or the file's top-level code when it lies outside every function, even top-level code the
+listing leaves out. A range names each unit its non-blank lines touch, without the units nested in
+another one it names. A symbol, optionally qualified (`OrderService.place`) and optionally limited
+to one `file`, names every matching definition, each like the range of its lines: a class names its
+top-level code and its methods. Resolved units are marked `reached_by: anchor`. A file outside the
+scope, a line outside its file, a reversed range or an unknown symbol is reported in `unresolved`
+with its problem, and a file is parsed only after its anchor is known to point inside it.
+
+Spans are lines, so functions on the same lines are one unit named by the first named one, and a
+callback that shares a line with top-level code (`app.post("/orders", (req, res) => ...)`) takes
+that line: its unit's text holds the registration.
 
 ## Trace a workflow and retain its evidence
 

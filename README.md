@@ -192,6 +192,7 @@ private artifact store; the repository includes only a small public-format sampl
 ```python
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator import operations, comments
+from jev_navigator.index import units
 
 index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))
 old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
@@ -208,6 +209,9 @@ index.search_text("orders.max_items")  # ripgrep over the narrowed files only
 index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
+
+units.list_units(index, files, box_chars=76_800)  # functions, methods and each file's top-level code
+units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=76_800)  # line, range or symbol
 
 operations.slice_around(index, file, line)  # the enclosing function, or a window
 operations.code_described_by_comment(index, file, line)  # the whole next symbol or block

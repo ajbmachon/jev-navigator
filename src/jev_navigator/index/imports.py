@@ -25,6 +25,10 @@ _SCRIPT_FROM = re.compile(
 _SCRIPT_COMMENT_OR_STRING = re.compile(
     r""""(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`|//[^\n]*|/\*.*?\*/""", re.S
 )
+_SCRIPT_SIDE_EFFECT_IMPORT = re.compile(r"""^[ \t]*import\s*['"][^'"]+['"][ \t]*;?[ \t]*$""", re.M)
+_SCRIPT_REQUIRE_STATEMENT = re.compile(
+    r"""^[ \t]*(?:(?:const|let|var)\s+[^=\n]+=\s*)?require\(\s*['"][^'"]+['"]\s*\)[ \t]*;?[ \t]*$""", re.M
+)
 _SCRIPT_BARE = re.compile(r"""(?:\brequire\(\s*|\bimport\s*\(\s*|^[ \t]*import\s+)['"]([^'"]+)['"]""", re.M)
 _SCRIPT_SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".mjs", ".cjs", ".jsx")
 # ESM TypeScript imports a module by the name it compiles to, so `./x.js` names `x.ts` when it exists.
@@ -194,14 +198,40 @@ def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | Non
 
 
 def _without_script_comments(source: str) -> str:
-    """The source with ``//`` and ``/* */`` comments removed; string literals are kept whole, so a
-    ``//`` inside a string is not taken for a comment."""
+    """The source with ``//`` and ``/* */`` comments removed and their line breaks kept, so every line
+    keeps its number; string literals are kept whole, so a ``//`` inside a string is not taken for a
+    comment."""
     return _SCRIPT_COMMENT_OR_STRING.sub(_keep_literal, source)
 
 
 def _keep_literal(match: re.Match) -> str:
     text = match.group(0)
-    return "" if text.startswith("/") else text
+    return "\n" * text.count("\n") if text.startswith("/") else text
+
+
+def non_code_lines(source: str, path: str) -> frozenset[int]:
+    """The 1-based lines of ``source`` holding nothing but imports, comments and whitespace. An
+    import written over several lines covers every line it spans. A script's ``require`` counts as
+    an import only as a whole statement (``const x = require("x")``), never inside other code."""
+    if path.endswith(".py"):
+        code = _PYTHON_COMMENT.sub("", source)
+        imports = (_PYTHON_FROM, _PYTHON_IMPORT)
+    else:
+        code = _without_script_comments(source)
+        imports = (_SCRIPT_FROM, _SCRIPT_SIDE_EFFECT_IMPORT, _SCRIPT_REQUIRE_STATEMENT)
+    lines = code.split("\n")
+    blank = {number for number, line in enumerate(lines, 1) if not line.strip()}
+    return frozenset(blank | _lines_matched(code, imports))
+
+
+def _lines_matched(code: str, patterns: tuple[re.Pattern[str], ...]) -> set[int]:
+    covered: set[int] = set()
+    for pattern in patterns:
+        for match in pattern.finditer(code):
+            first = code.count("\n", 0, match.start()) + 1
+            last = first + match.group(0).count("\n")
+            covered.update(range(first, last + 1))
+    return covered
 
 
 def _local(part: str) -> str:
