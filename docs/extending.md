@@ -7,6 +7,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 
 | Piece | What it gives you |
 | --- | --- |
+| `resolve_scope` | the files a search covers from folders, patterns, languages and a git ref, with tests, generated, vendored code and docs left out by default; a scope over its cap is refused with counts per folder and language (README, "Choosing the files a search covers") |
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
 | `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |

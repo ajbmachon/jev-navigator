@@ -309,6 +309,40 @@ is `FactRule(name, pattern, keep=None)`; the shipped `DEFAULT_COMMENT_RULES` (TO
 commented-out code, date, ticket reference) are examples. `outside_names` is an optional filter that
 skips matches inside paths, file names or identifiers: `DATE.with_filter(outside_names)`.
 
+### Choosing the files a search covers
+
+`resolve_scope` decides which files a search covers from paths, git and the first lines of files. It
+parses nothing, and it is not yet wired into the `jvn` commands.
+
+```python
+from jev_navigator.index.scope import ResolvedScope, Scope, resolve_scope
+
+resolved = resolve_scope(Scope(repo_root, include=("app/",), exclude=("**/legacy/**",), languages=("python",)))
+if isinstance(resolved, ResolvedScope):
+    resolved.files  # the files in scope; resolved.filters names every filter applied
+else:
+    resolved.counts_by_folder, resolved.counts_by_language  # a ScopeRefusal: over max_files (200)
+```
+
+- Only files JVN parses (Python, TypeScript, TSX, JavaScript) enter a scope, plus markup files with
+  `with_docs`.
+- Left out unless asked for: tests (`with_tests`), generated code (`with_generated`: a true
+  `linguist-generated` attribute, or `@generated` or `DO NOT EDIT` in the first 10 lines), vendored
+  code (`with_vendored`: a true `linguist-vendored` attribute, or a `vendor`, `third_party` or
+  `node_modules` folder) and docs (`with_docs`: a `docs` folder or a markup file). A false linguist
+  attribute keeps a file the path or header rule would leave out.
+- `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are
+  globs over the whole path: `**` crosses folders, and a glob without `/` matches the file name at any
+  depth unless a leading `/` anchors it at the root.
+- `changed_since` keeps the files that differ from a git ref in the working tree, untracked files
+  included; `filters["changed_since_commit"]` records the commit the ref named.
+- More files than `max_files` (200 by default) returns a `ScopeRefusal` instead of files: the count,
+  the cap, the filters, and counts per language and per folder one level below the folder the files
+  share. Each folder label (`src/`, or `/src/*` for files directly in `src`), used as an `include` entry
+  with the same other filters, keeps exactly the files it counts. Raise the cap with `max_files`.
+- An unusable field raises `InvalidScopeError` naming it (`/scope/languages`, `/scope/changed_since`,
+  `/scope/max_files`, `/scope/repo`).
+
 ### Static trace graphs
 
 `operations.trace_graph(index, roots)` follows both callers and callees, including non-call
