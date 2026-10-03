@@ -67,6 +67,17 @@ def test_a_file_over_the_memory_bound_is_never_parsed_and_is_reported(
     assert index.parser_scans_pending == ()
 
 
+def test_a_refused_file_is_never_counted_as_parsed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _AstGrepRecorder(monkeypatch)
+    index = CodeIndex.from_git(_repository(tmp_path, 668_777), fact_cache_dir=tmp_path / "facts")
+
+    index.functions_in_files(index.files)
+
+    assert BUNDLE in index.unavailable_files
+    assert BUNDLE not in index.parsed_files
+    assert "src/small.py" in index.parsed_files
+
+
 def test_a_file_under_the_bound_is_parsed_even_when_a_trigger_flags_it(tmp_path: Path) -> None:
     repository = _repository(tmp_path, 20_000)
     index = CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "facts")

@@ -237,8 +237,9 @@ class CodeIndex:
 
     @property
     def parsed_files(self) -> frozenset[str]:
-        """Files navigation has parsed so far; reading it never starts a scan."""
-        return frozenset(self._facts)
+        """Files navigation has parsed so far, never one it refused to parse; reading it never starts a
+        scan."""
+        return frozenset(self._facts.keys() - self._unavailable.keys())
 
     @property
     def parser_scans_completed(self) -> tuple[str, ...]:
