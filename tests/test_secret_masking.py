@@ -1,3 +1,5 @@
+"""Secret masking scans repeated request text once without retaining other requests."""
+
 from collections import Counter
 
 from jev_navigator.judgments.secrets import SecretMasker, mask_by_content

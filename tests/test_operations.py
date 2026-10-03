@@ -1,3 +1,5 @@
+"""The code operations: slices, callers of a file, and caller and callee traces hop by hop."""
+
 from __future__ import annotations
 
 from pathlib import Path

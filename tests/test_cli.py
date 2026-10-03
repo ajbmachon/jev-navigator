@@ -1,3 +1,5 @@
+"""The `jvn` evidence packs end to end: the real index and search behind the CLI, scripted judgments."""
+
 from __future__ import annotations
 
 import inspect

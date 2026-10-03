@@ -1,3 +1,5 @@
+"""Judge and its answers: thresholds, batching, caps, the answer store and the Jev client contract."""
+
 from __future__ import annotations
 
 import json

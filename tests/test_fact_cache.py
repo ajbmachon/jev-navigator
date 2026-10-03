@@ -1,3 +1,5 @@
+"""The parsed-facts cache: reuse across indexes, invalidation by content, parser and rules, safe misses."""
+
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path

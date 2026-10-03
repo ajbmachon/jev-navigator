@@ -1,3 +1,5 @@
+"""The code index over a real repository: functions, definitions, callers, bindings and scope limits."""
+
 from __future__ import annotations
 
 import hashlib
