@@ -308,6 +308,7 @@ def _filters(scope: Scope, changed_since_commit: str | None) -> dict[str, object
         "include": list(scope.include),
         "exclude": list(scope.exclude),
         "languages": list(scope.languages),
+        "supported_languages": sorted(KNOWN_LANGUAGES),
         "with_tests": scope.with_tests,
         "with_generated": scope.with_generated,
         "with_vendored": scope.with_vendored,

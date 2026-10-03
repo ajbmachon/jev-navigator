@@ -9,6 +9,7 @@ import pytest
 from git_repos import commit_all, git, write_files
 
 from jev_navigator.index.scope import (
+    KNOWN_LANGUAGES,
     InvalidScopeError,
     ResolvedScope,
     Scope,
@@ -95,16 +96,28 @@ def test_each_flag_brings_back_only_its_own_kind(mixed_repo: Path, flag: str, br
     assert set(files) == {"app/orders.py", "web/routes.ts"} | brought_back
 
 
-def test_only_files_jvn_parses_enter_the_scope(tmp_path: Path) -> None:
+def test_unsupported_files_never_enter_a_scope_and_the_result_names_the_filter(tmp_path: Path) -> None:
     repo = _repository(
         tmp_path / "repo",
-        {"app/orders.py": SOURCE, "package.json": "{}\n", "logo.svg": "<svg/>\n", "Makefile": "all:\n"},
+        {
+            "app/orders.py": SOURCE,
+            "app/tasks.rb": "def run\n  1\nend\n",
+            "poetry.lock": "[[package]]\n",
+            "package.json": "{}\n",
+            "logo.svg": "<svg/>\n",
+            "Makefile": "all:\n",
+        },
     )
 
-    assert _files(_scope(repo)) == ("app/orders.py",)
+    resolved = resolve_scope(_scope(repo, max_files=1))
+
+    assert isinstance(resolved, ResolvedScope)
+    assert resolved.files == ("app/orders.py",)
+    assert resolved.filters["supported_languages"] == sorted(KNOWN_LANGUAGES)
 
 
-def test_a_do_not_edit_header_marks_a_file_generated_but_a_late_mention_does_not(tmp_path: Path) -> None:
+def test_a_do_not_edit_header_marks_a_file_generated(tmp_path: Path) -> None:
+    """A late mention, past the first lines, does not."""
     late_mention = "".join(f"x{line} = {line}\n" for line in range(20)) + "# DO NOT EDIT the table above\n"
     repo = _repository(
         tmp_path / "repo",
@@ -210,6 +223,7 @@ def test_the_resolved_scope_names_every_filter_it_applied(mixed_repo: Path) -> N
         "include": ["app"],
         "exclude": [],
         "languages": ["python"],
+        "supported_languages": ["javascript", "python", "tsx", "typescript"],
         "with_tests": False,
         "with_generated": False,
         "with_vendored": False,

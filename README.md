@@ -336,8 +336,8 @@ else:
     resolved.counts_by_folder, resolved.counts_by_language  # a ScopeRefusal: over max_files
 ```
 
-- Only files JVN parses (Python, TypeScript, TSX, JavaScript) enter a scope, plus markup files with
-  `with_docs`.
+- Only files JVN parses (Python, TypeScript, TSX, JavaScript) enter a scope and count toward the cap,
+  plus markup files with `with_docs`; `filters["supported_languages"]` names them.
 - Left out unless asked for: tests (`with_tests`), generated code (`with_generated`: a true
   `linguist-generated` attribute, or a comment line holding `@generated` or `do not edit`, in any case,
   in the first 10 lines), vendored code (`with_vendored`: a true `linguist-vendored` attribute, or a
