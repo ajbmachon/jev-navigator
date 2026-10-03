@@ -47,6 +47,7 @@ SAME_BEHAVIOUR_USE = (
 
 FIND_V2_MATCH_REVISION = "v3"
 FIND_V2_ROLES_REVISION = "v3"
+FIND_V2_BEST_FEW_REVISION = "v1"
 FIND_V2_SCOPE = "src/jev_navigator/judgments/"
 FIND_V2_UNITS_PER_REQUEST = 16
 FIND_V2_REQUEST = {
@@ -73,6 +74,14 @@ FIND_V2_USES = {
     "hands_off": f"{ROLE_USE} Each hand-off is either followed in the group or named as a gap.",
     "selects_or_configures": ROLE_USE,
     "consumes": ROLE_USE,
+}
+BEST_FEW_USES = {
+    **FIND_V2_USES,
+    "match": (
+        "Asked again of each of the best few in their shared request, beside the role questions. Code keeps"
+        " this score next to the unit's score from its 16-unit pass; the evaluation decides which of the two"
+        " the Confirmed rule reads."
+    ),
 }
 
 
@@ -122,7 +131,8 @@ def write_same_behaviour_candidate(index: CodeIndex) -> None:
 
 def write_find_v2_candidates(index: CodeIndex) -> None:
     """Round 0's match request for the batch of 16 that holds the target, with and without a
-    condition, and the role request for three best-few units."""
+    condition, the role request for three best-few units, and their shared request that asks the
+    match question again beside the roles."""
     batch = round_zero_batch(index)
     with_conditions = {**FIND_V2_REQUEST, "conditions": FIND_V2_CONDITIONS}
     best_few = sorted((definition(index, symbol) for symbol in FIND_V2_BEST_FEW), key=lambda span: span.key)
@@ -132,6 +142,15 @@ def write_find_v2_candidates(index: CodeIndex) -> None:
         index, [MATCH], batch, with_conditions, "find_v2_match_conditions", FIND_V2_MATCH_REVISION
     )
     write_find_v2_candidate(index, roles, best_few, FIND_V2_REQUEST, "find_v2_roles", FIND_V2_ROLES_REVISION)
+    write_find_v2_candidate(
+        index,
+        [MATCH, *roles],
+        best_few,
+        FIND_V2_REQUEST,
+        "find_v2_best_few",
+        FIND_V2_BEST_FEW_REVISION,
+        BEST_FEW_USES,
+    )
 
 
 def round_zero_batch(index: CodeIndex) -> list[Span]:
@@ -150,12 +169,13 @@ def write_find_v2_candidate(
     request: Mapping,
     name: str,
     revision: str,
+    uses_by_template: Mapping[str, str] = FIND_V2_USES,
 ) -> None:
     capture = CapturingJevClient()
     items = [unit_entry(index, span) for span in spans]
     Judge(capture).check_every(list(checks), items, target_state(request))
     [(state, questions)] = capture.requests
-    uses = {question_id: FIND_V2_USES[question_id.split("@")[0]] for question_id in questions}
+    uses = {question_id: uses_by_template[question_id.split("@")[0]] for question_id in questions}
     write_candidate(state, questions, uses, name, revision, case="secret-refusal", group="find-v2")
 
 

@@ -47,7 +47,7 @@ travel in state. `find_code` does not use these templates yet.
 - `MATCH` is asked of every unit in a round, without criteria, as jgrep asks it. It points at its
   whole unit, so Jev reads the file and lines with the code, and at the description in `target`.
 - `BEHAVIOR_ROLE_QUESTIONS` are four independent yes or no questions for the best few, asked in one
-  request: `performs`, `hands_off`, `selects_or_configures` and `consumes`. A unit can hold several
+  request together with `MATCH` again: `performs`, `hands_off`, `selects_or_configures` and `consumes`. A unit can hold several
   roles. These names are the behaviour role list that a request's `want` and a result's labels use.
 
 Pass them to `Judge.check_every` with the unit entries and the shared state. Each template's id
