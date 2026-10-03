@@ -114,6 +114,11 @@ def request_body(state: Mapping, questions: Mapping) -> bytes:
     return json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode()
 
 
+def serialized_chars(value: object) -> int:
+    """The size of a value as the request body spells it, the one measure of every size box."""
+    return len(json.dumps(value, ensure_ascii=False, default=str))
+
+
 def content_hash(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 

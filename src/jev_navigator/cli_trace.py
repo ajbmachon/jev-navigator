@@ -165,7 +165,8 @@ def _manifest(
             "requested_model": getattr(judge.client, "model", "unknown"),
             "served_model": judge.served_model,
             "calls": judge.calls,
-            "input_tokens": judge.input_tokens,
+            "input_tokens": judge.input_total.reported,
+            "responses_without_usage": judge.input_total.not_reported,
         },
         "trace": {
             "outcome": _outcome(result),

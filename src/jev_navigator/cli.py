@@ -26,6 +26,7 @@ from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find
 from .directives.places import Place, place_for_line
 from .index.code_index import CodeIndex
 from .index.languages import language_of
+from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import JsonlAnswerStore
@@ -378,7 +379,7 @@ def create_evidence_pack(
             result,
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
-            input_tokens=judge.input_tokens,
+            input_total=judge.input_total,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
@@ -858,7 +859,7 @@ def _manifest(
     *,
     requested_model: str,
     served_model: str | None,
-    input_tokens: int,
+    input_total: TokenTotal,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -890,7 +891,8 @@ def _manifest(
         "provider": {
             "requested_model": requested_model,
             "served_model": served_model,
-            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_tokens,
+            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
+            "responses_without_usage": _plus_known(_carried_unreported(previous), input_total.not_reported),
         },
         "search": {
             "outcome": result.outcome,
@@ -1000,6 +1002,19 @@ def _find_all_report(manifest: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _carried_unreported(previous: dict | None) -> int | None:
+    """The unreported-response count of an earlier receipt, ``None`` when it predates the field."""
+    return 0 if previous is None else previous["provider"].get("responses_without_usage")
+
+
+def _unreported_text(count: int | None) -> str:
+    return "not known (earlier receipt)" if count is None else str(count)
+
+
+def _plus_known(carried: int | None, added: int) -> int | None:
+    return None if carried is None else carried + added
+
+
 def _navigator_provenance() -> dict:
     package_root = Path(__file__).resolve().parent
     source_files = sorted(package_root.rglob("*.py"))
@@ -1087,6 +1102,7 @@ def _report(manifest: dict) -> str:
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
         f"`{manifest['provider']['served_model']}`",
+        f"- Responses without usage: {_unreported_text(manifest['provider']['responses_without_usage'])}",
         f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
         "(indexing and entry selection excluded)",
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "

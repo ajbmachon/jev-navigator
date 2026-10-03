@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 
+from .judgments.answers import TokenTotal, reported_input_tokens, reported_output_tokens
 from .judgments.journal import JournalRequest, JsonlJournal, RawResponse
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -23,8 +24,8 @@ class TerminalProgress:
         self.requests = 0
         self.responses = 0
         self.failures = 0
-        self.input_tokens = 0
-        self.output_tokens = 0
+        self.input_total = TokenTotal()
+        self.output_total = TokenTotal()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._tty = sys.stderr.isatty()
@@ -69,17 +70,18 @@ class TerminalProgress:
             )
 
     def response(self, request_id: str, response: RawResponse) -> None:
-        usage = _usage(response)
+        input_tokens, output_tokens = _usage(response)
         with self._lock:
             self.responses += 1
-            self.input_tokens += usage[0]
-            self.output_tokens += usage[1]
+            self.input_total.add(input_tokens)
+            self.output_total.add(output_tokens)
             number = self.responses
+            totals = f"{_summary(self.input_total)} in/{_summary(self.output_total)} out"
         model = _model(response)
         self._event(
             f"response {number} received"
-            f"{f' from {model}' if model else ''}; usage +{usage[0]} in/+{usage[1]} out; "
-            f"total {self.input_tokens} in/{self.output_tokens} out; {self.elapsed():.1f}s elapsed"
+            f"{f' from {model}' if model else ''}; usage {_added(input_tokens)} in/"
+            f"{_added(output_tokens)} out; total {totals}; {self.elapsed():.1f}s elapsed"
         )
 
     def failure(self, request_id: str, error: str) -> None:
@@ -94,7 +96,7 @@ class TerminalProgress:
         self._clear_spinner()
         self._event(
             f"{outcome}; {self.requests} requests, {self.responses} responses, "
-            f"{self.input_tokens} input tokens, {self.output_tokens} output tokens, "
+            f"{_summary(self.input_total)} input tokens, {_summary(self.output_total)} output tokens, "
             f"{self.elapsed():.1f}s elapsed"
         )
 
@@ -108,7 +110,7 @@ class TerminalProgress:
                 line = (
                     f"{_SPINNER[position % len(_SPINNER)]} {self.phase_name} · {self.elapsed():.1f}s · "
                     f"{self.requests} requests/{self.responses} responses · "
-                    f"{self.input_tokens} in/{self.output_tokens} out"
+                    f"{_summary(self.input_total)} in/{_summary(self.output_total)} out"
                 )
             sys.stderr.write(f"\r{line[:160]:<160}")
             sys.stderr.flush()
@@ -147,15 +149,24 @@ class ProgressJournal(JsonlJournal):
         self._append({"kind": "terminal", "outcome": outcome})
 
 
-def _usage(response: RawResponse) -> tuple[int, int]:
+def _usage(response: RawResponse) -> tuple[int | None, int | None]:
     try:
         raw = response.json()
     except Exception:  # noqa: BLE001 - progress never replaces the durable parser failure
-        return 0, 0
-    usage = raw.get("usage", {}) if isinstance(raw, dict) else {}
-    if not isinstance(usage, dict):
-        return 0, 0
-    return _integer(usage.get("input_tokens")), _integer(usage.get("output_tokens"))
+        return None, None
+    if not isinstance(raw, dict):
+        return None, None
+    return reported_input_tokens(raw), reported_output_tokens(raw)
+
+
+def _added(tokens: int | None) -> str:
+    return "not reported" if tokens is None else f"+{tokens}"
+
+
+def _summary(total: TokenTotal) -> str:
+    if total.not_reported == 0:
+        return str(total.reported)
+    return f"{total.reported} ({total.not_reported} not reported)"
 
 
 def _model(response: RawResponse) -> str:
@@ -165,7 +176,3 @@ def _model(response: RawResponse) -> str:
         return ""
     model = raw.get("model", "") if isinstance(raw, dict) else ""
     return str(model) if model else ""
-
-
-def _integer(value: object) -> int:
-    return value if isinstance(value, int) and value >= 0 else 0

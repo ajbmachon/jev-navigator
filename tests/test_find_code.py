@@ -897,6 +897,47 @@ def test_interrupt_while_popping_a_beam_restores_it_for_resume(
     assert resumed.found[0].place_key == target.key
 
 
+def test_interrupt_while_submitting_a_round_cancels_the_requests_already_sent(
+    sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    from concurrent.futures import ThreadPoolExecutor
+
+    from jev_navigator.directives import find_code as find_code_module
+
+    class InterruptedOnSecondSubmit(ThreadPoolExecutor):
+        submitted = 0
+
+        def submit(self, *args, **kwargs):
+            type(self).submitted += 1
+            if type(self).submitted == 2:
+                raise KeyboardInterrupt
+            return super().submit(*args, **kwargs)
+
+    monkeypatch.setattr(find_code_module, "ThreadPoolExecutor", InterruptedOnSecondSubmit)
+    places = [
+        function_place(sample_index, sample_index.find_definition(name)[0])
+        for name in ("check_limits", "validate_order")
+    ]
+
+    # Act
+    cancelled = find_code(
+        sample_index,
+        Judge(ScriptedJevClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=2),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    accounted = {entry.place_key for entry in cancelled.not_inspected}
+    accounted |= {visit.place_key for visit in (*cancelled.found, *cancelled.searched, *cancelled.unsure)}
+    assert accounted == {place.key for place in places}
+
+
 def test_interrupt_while_recording_a_round_choice_restores_the_popped_place(
     sample_index: CodeIndex,
 ) -> None:

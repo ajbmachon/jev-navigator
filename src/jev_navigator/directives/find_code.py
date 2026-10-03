@@ -21,13 +21,12 @@ import os
 import signal
 import threading
 from collections.abc import Mapping, Sequence
-from concurrent.futures import CancelledError, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
 
 from ..history import (
-    DEFAULT_QUESTION_RESERVE,
     DEFAULT_STOP_SECTIONS,
     FetchedSpan,
     History,
@@ -40,7 +39,7 @@ from ..history import (
 from ..index.code_index import CodeIndex
 from ..index.spans import CodeSlice
 from ..judgments.answers import JevResponse, NoulAnswer
-from ..judgments.client import JEV_STATE_TOKEN_LIMIT, InputBudgetExceededError
+from ..judgments.client import JEV_INPUT_BOX_CHARS, QUESTION_RESERVE_CHARS, InputBudgetExceededError
 from ..judgments.judge import (
     CODE_FIELD,
     CallCapReachedError,
@@ -458,8 +457,10 @@ def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[l
     """Ask one beam concurrently. A caller interrupt stops future rounds after the already-sent
     requests settle; successful responses still count and interrupted places return to the frontier."""
     with ThreadPoolExecutor(max_workers=len(opened)) as pool:
-        futures = [pool.submit(_ask_within_cap, judge, search, opening) for opening in opened]
+        futures: list[Future] = []
         try:
+            for opening in opened:
+                futures.append(pool.submit(_ask_within_cap, judge, search, opening))
             return [future.result() for future in futures], False
         except KeyboardInterrupt:
             with _defer_keyboard_interrupts(re_raise=False):
@@ -467,15 +468,16 @@ def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[l
                 for future in futures:
                     future.cancel()
                 wait(futures)
-                responses = []
-                for future in futures:
-                    try:
-                        responses.append(future.result())
-                    except (CancelledError, KeyboardInterrupt):
-                        responses.append(_Unanswered.CANCELLED)
-                    except Exception:
-                        responses.append(_Unanswered.CANCELLED)
-            return responses, True
+                responses = [_settled_response(future) for future in futures]
+            unsubmitted = len(opened) - len(futures)
+            return [*responses, *[_Unanswered.CANCELLED] * unsubmitted], True
+
+
+def _settled_response(future: Future):
+    try:
+        return future.result()
+    except (Exception, KeyboardInterrupt):
+        return _Unanswered.CANCELLED
 
 
 def _merge_round(search: _Search, opened: list[_Opening], responses: list) -> None:
@@ -534,12 +536,12 @@ class StopRule:
 
     check: Check
     shared: Mapping = field(default_factory=dict)
-    budget_tokens: int = JEV_STATE_TOKEN_LIMIT - DEFAULT_QUESTION_RESERVE
+    budget_chars: int = JEV_INPUT_BOX_CHARS - QUESTION_RESERVE_CHARS
     sections: tuple[str, ...] = DEFAULT_STOP_SECTIONS
     context: Mapping[str, object] = field(default_factory=dict)
 
     def new_history(self, subject: Mapping) -> History:
-        return History(budget_tokens=self.budget_tokens, sections={SUBJECT: subject, **self.context})
+        return History(budget_chars=self.budget_chars, sections={SUBJECT: subject, **self.context})
 
 
 def _apply_stop_rule(judge: Judge, search: _Search) -> None:
@@ -870,7 +872,7 @@ def _combine_opening_answers(
         },
         **(priority.answers if priority is not None else {}),
     }
-    combined = JevResponse(answers, judge.served_model or found.model, judge.input_tokens)
+    combined = JevResponse(answers, judge.served_model or found.model, judge.input_total.complete_total())
     return _priority_diagnostic(combined, unavailable)
 
 

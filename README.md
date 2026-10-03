@@ -404,8 +404,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
   request_id`, `record_response(request_id, response)` and `record_failure(request_id, error,
   response)`). The judge records the masked request before dispatch and the raw response before
   parsing, as a `RawResponse(body, status, content_type, decoded)`: the body bytes as received, the HTTP
-  status and the content type. Transport errors and responses that fail to parse are recorded as
-  failures. Clients that offer `send` and `parse` return that `RawResponse`; the TypeSafe adapter
+  status, the content type and `input_tokens`, the count the provider reported or the text
+  `not reported`; a missing count is never written as 0. Transport errors and responses that fail to
+  parse are recorded as failures. Clients that offer `send` and `parse` return that `RawResponse`; the TypeSafe adapter
   captures the exact bytes from its HTTP transport. A client that only parses is journaled with its
   decoded JSON and `exact=False`. `request_sha256` never includes the model; cache reuse checks the
   served model separately. A request holds code, and the library cannot know whose code it is, so
@@ -517,13 +518,16 @@ selects named sections and `history.state_for(names)` builds exactly that state.
 The default is `fetched`, so a history check never leans on the search's own verdicts; the
 `history` section carries no verdicts either. A check that is meant to read them selects `decisions`
 explicitly. An unknown name raises `UnknownSectionError`. Each section has its own `SectionLimit(max_entries, max_chars)`
-(newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the token budget.
+(newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the character budget.
 Text limits also apply inside nested lists and mappings. Rendering a limited view preserves the
 complete code and judgments in the append-only record.
-The budget is capped at Jev's 32k-token limit for state plus the longest question, the binding limit
-(the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026; a whole request
-may reach the documented 64k). The judge applies the same limit before sending and splits a batch
-that would exceed it. When the selected sections still do not fit, the
+The budget is a character box, capped at Jev's documented 32,000 tokens for state plus the longest
+question times 2.4 characters per token (the Engine's `REQUEST_CHARS_PER_TOKEN`), 76,800 characters
+(the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). A whole request
+may reach the documented 64k tokens, 153,600 characters. The batching owner (`check_each`,
+`check_every`) and the `find_code` opening questions measure the same boxes before sending and split
+what would exceed them; a direct `Judge.ask` sends what it is given and relies on the provider's
+refusal. When the selected sections still do not fit, the
 pluggable `evict` policy trims them; the default `drop_oldest_code` replaces the oldest code bodies with
 `[evicted]` and records each eviction in `history.evictions`. A check that reads no code never evicts.
 Pass `recorder=` (for example a `JsonlJournal`) to record every appended step; the recorder gets each

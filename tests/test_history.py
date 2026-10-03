@@ -22,7 +22,7 @@ from jev_navigator.history import (
     judge_sections,
 )
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.judgments.client import JEV_STATE_TOKEN_LIMIT
+from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
@@ -126,7 +126,7 @@ def test_section_limits_apply_before_any_code_is_evicted() -> None:
 
 def test_the_oldest_code_is_evicted_first_and_every_eviction_is_recorded() -> None:
     # Arrange
-    history = History(budget_tokens=500)
+    history = History(budget_chars=1_000)
     for number in range(3):
         history.append(step(number, "y" * 300))
 
@@ -143,7 +143,7 @@ def test_the_oldest_code_is_evicted_first_and_every_eviction_is_recorded() -> No
 
 def test_a_check_that_reads_no_code_never_evicts_code() -> None:
     # Arrange
-    history = History(budget_tokens=300)
+    history = History(budget_chars=1_000)
     for number in range(3):
         history.append(step(number, "y" * 300))
 
@@ -156,12 +156,12 @@ def test_a_check_that_reads_no_code_never_evicts_code() -> None:
 
 def test_the_budget_is_capped_at_jevs_state_limit_and_overflow_raises() -> None:
     # Arrange
-    capped = History(budget_tokens=10**6)
-    tiny = History(budget_tokens=5)
+    capped = History(budget_chars=10**6)
+    tiny = History(budget_chars=5)
     tiny.append(step(1))
 
     # Act and Assert
-    assert capped.budget_tokens == JEV_STATE_TOKEN_LIMIT
+    assert capped.budget_chars == JEV_INPUT_BOX_CHARS
     with pytest.raises(HistoryTooLargeError):
         tiny.state_for(["fetched"])
 
@@ -304,7 +304,7 @@ def test_the_ceiling_curve_reports_probability_against_history_size() -> None:
     # Assert
     assert [point.steps for point in points] == [1, 2, 3, 4, 5]
     assert [round(point.probability, 2) for point in points] == [0.2, 0.4, 0.6, 0.8, 0.95]
-    assert points[0].tokens < points[-1].tokens
+    assert points[0].chars < points[-1].chars
 
 
 def test_each_search_step_records_judgments_candidates_and_why_the_next_place_was_chosen(

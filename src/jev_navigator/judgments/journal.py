@@ -1,7 +1,8 @@
 """A durable record of every attempt, kept apart from the parsed-answer store.
 
 The judge records the exact (masked) request before dispatch and the raw response before parsing:
-the body bytes as received, the HTTP status and the content type, with the decoded form optional. A
+the body bytes as received, the HTTP status, the content type and the input tokens the provider
+reported (or ``not reported``), with the decoded form optional. A
 transport error or a response that fails to parse is recorded as a failure. Hosts inject their
 own journal (their runtime's, an evaluation journal); ``JsonlJournal`` is a simple local one.
 
@@ -23,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from .answers import reported_input_tokens
 from .questions import content_hash
 
 
@@ -163,7 +165,21 @@ def _response_fields(response: RawResponse) -> dict:
         "status": response.status,
         "content_type": response.content_type,
         "exact": response.exact,
+        "input_tokens": _reported_input_tokens(response.body),
     }
+
+
+NOT_REPORTED = "not reported"
+
+
+def _reported_input_tokens(body: bytes) -> int | str:
+    """The provider's ``usage.input_tokens``, or ``NOT_REPORTED`` when the body has none."""
+    try:
+        raw = json.loads(body)
+    except ValueError:
+        return NOT_REPORTED
+    reported = reported_input_tokens(raw) if isinstance(raw, Mapping) else None
+    return NOT_REPORTED if reported is None else reported
 
 
 def _request_with_text(request: JournalRequest) -> dict:

@@ -208,6 +208,29 @@ def test_pack_persists_reviewable_json_and_markdown_evidence(tmp_path: Path) -> 
     assert "not proof of a correct handoff" in report
 
 
+def test_pack_counts_responses_that_reported_no_usage_instead_of_adding_zero_tokens(tmp_path: Path) -> None:
+    repository = _workflow_repository(tmp_path)
+    client = _evidence_client()
+    client.input_tokens_per_call = None
+
+    manifest = _pack(repository, tmp_path / "pack", client)
+
+    assert manifest["provider"]["calls"] > 0
+    assert manifest["provider"]["responses_without_usage"] == manifest["provider"]["calls"]
+    assert manifest["provider"]["input_tokens"] == 0
+
+
+def test_pack_sums_the_input_tokens_the_provider_reported(tmp_path: Path) -> None:
+    repository = _workflow_repository(tmp_path)
+    client = _evidence_client()
+    client.input_tokens_per_call = 37
+
+    manifest = _pack(repository, tmp_path / "pack", client)
+
+    assert manifest["provider"]["responses_without_usage"] == 0
+    assert manifest["provider"]["input_tokens"] == 37 * manifest["provider"]["calls"]
+
+
 def test_damaged_workflow_persists_the_specific_gap(tmp_path: Path) -> None:
     repository = _workflow_repository(tmp_path, registration=False)
     output = tmp_path / "pack"

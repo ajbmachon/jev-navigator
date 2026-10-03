@@ -32,7 +32,7 @@ class AnswerRecord:
     question_ids: tuple[str, ...]
     answers: Mapping[str, dict]
     model: str
-    input_tokens: int
+    input_tokens: int | None
     thresholds: Mapping[str, float]
     item_keys: Mapping[str, str] = field(default_factory=dict)
     sources: Mapping[str, Mapping] = field(default_factory=dict)

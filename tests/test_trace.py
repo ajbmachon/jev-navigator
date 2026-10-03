@@ -13,7 +13,8 @@ from jev_navigator.directives.trace import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
-from jev_navigator.judgments.judge import MAX_REQUEST_BYTES, Judge
+from jev_navigator.judgments.client import MAX_REQUEST_CHARS
+from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
@@ -367,7 +368,7 @@ def test_a_hub_item_keeps_every_link_fact_without_the_repeated_identity_boilerpl
     characters of per-link identity boilerplate; no input budget could carry it."""
     index = _hub_index(tmp_path, callers=150, line_chars=200)
     root = index.find_definition("hub")[0]
-    client = BudgetedClient(MAX_REQUEST_BYTES)
+    client = BudgetedClient(MAX_REQUEST_CHARS)
 
     result = trace_workflow(index, Judge(client), "How does a request become a result?", [root])
 
@@ -401,7 +402,7 @@ def test_class_trace_assigns_method_evidence_to_its_lexical_owner(tmp_path: Path
     (tmp_path / "hub.py").write_text("class Hub:\n" + "\n".join(methods))
     index = CodeIndex.from_directory(tmp_path)
     hub = index.find_definition("Hub")[0]
-    client = BudgetedClient(MAX_REQUEST_BYTES)
+    client = BudgetedClient(MAX_REQUEST_CHARS)
 
     result = trace_workflow(index, Judge(client), "Which methods use the targets?", [hub])
 

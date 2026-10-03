@@ -193,6 +193,32 @@ def test_the_typesafe_adapter_journals_the_exact_bytes_it_received(
     assert answer.noul("adds_one").probability == 0.9
 
 
+def _recorded_response(tmp_path: Path, body: bytes) -> dict:
+    journal = JsonlJournal(tmp_path / "usage.jsonl")
+    journal.record_response("r1", RawResponse(body, 200, "application/json"))
+    return json.loads((tmp_path / "usage.jsonl").read_text().splitlines()[0])
+
+
+def test_a_response_records_the_input_tokens_the_provider_reported(tmp_path: Path) -> None:
+    body = b'{"model": "m", "usage": {"input_tokens": 12, "output_tokens": 1}, "answers": {}}'
+
+    assert _recorded_response(tmp_path, body)["input_tokens"] == 12
+
+
+def test_a_reported_zero_is_recorded_as_zero(tmp_path: Path) -> None:
+    body = b'{"model": "m", "usage": {"input_tokens": 0}, "answers": {}}'
+
+    assert _recorded_response(tmp_path, body)["input_tokens"] == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b'{"model": "m", "answers": {}}', b'{"usage": {}}', b'{"usage": null}', b"not json", b'["list"]'],
+)
+def test_a_response_without_reported_input_tokens_says_not_reported(tmp_path: Path, body: bytes) -> None:
+    assert _recorded_response(tmp_path, body)["input_tokens"] == "not reported"
+
+
 def test_jsonl_journal_keeps_no_request_text_unless_asked(tmp_path: Path) -> None:
     # Arrange
     default = JsonlJournal(tmp_path / "default.jsonl")

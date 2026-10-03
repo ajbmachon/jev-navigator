@@ -137,27 +137,40 @@ class BudgetedClient:
     """A Jev client that refuses any request over a measured input budget, the way the real
     endpoint answered request 5 of the saved trace run: HTTP 400 ``max_tokens_exceeded``.
 
+    ``budget`` bounds the whole body in UTF-8 bytes. ``input_box`` bounds the state plus the longest
+    single question, the way the provider measures its documented input limit, and counts serialized
+    characters.
+
     It records the requests it accepted, so a test can prove no request over the budget was ever
     sent, and how many times the provider had to refuse one.
     """
 
     model = "jev-scripted"
 
-    def __init__(self, budget: int, default_noul: float = 0.9) -> None:
+    def __init__(self, budget: int, default_noul: float = 0.9, input_box: int | None = None) -> None:
         self.budget = budget
+        self.input_box = input_box
         self.default_noul = default_noul
         self.requests: list[tuple[Mapping, Mapping]] = []
         self.refusals = 0
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
         body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
-        if body > self.budget:
+        box = self._state_and_longest_question(state, questions)
+        if body > self.budget or (self.input_box is not None and box > self.input_box):
             self.refusals += 1
             raise InputBudgetExceededError(
                 "TypeSafeBadRequestError: 400 "
                 '{"detail":{"error_type":"max_tokens_exceeded"}} '
-                f"(input of {body} bytes over the {self.budget}-byte budget)"
+                f"(input of {body} bytes, {box} characters of state and question)"
             )
         self.requests.append((state, questions))
         answers = {question_id: NoulAnswer(self.default_noul) for question_id in questions}
         return JevResponse(answers, self.model, 100)
+
+    @staticmethod
+    def _state_and_longest_question(state: Mapping, questions: Mapping) -> int:
+        longest = max(
+            (len(json.dumps(question, ensure_ascii=False)) for question in questions.values()), default=0
+        )
+        return len(json.dumps(state, ensure_ascii=False)) + longest
