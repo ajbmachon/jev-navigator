@@ -16,6 +16,7 @@ from git_repos import commit_files
 from jev_navigator.cli import (
     SCHEMA_VERSION,
     _load_typesafe_environment,
+    _outcome_summary,
     _scope_warning,
     create_evidence_pack,
     main,
@@ -58,6 +59,32 @@ def test_an_empty_find_reports_how_much_of_the_scope_it_examined(tmp_path: Path)
         "Outcome: **scope_incomplete, not found: 1 of 3 code files examined, 2 never reached**"
         in (output / "report.md").read_text()
     )
+
+
+@pytest.mark.parametrize(
+    ("search", "summary"),
+    [
+        (
+            {"outcome": "nothing_left", "files_examined": 4, "code_files": 4},
+            "nothing_left, not found in this scope: all 4 code files examined",
+        ),
+        (
+            {
+                "outcome": "scope_incomplete",
+                "files_examined": 4,
+                "code_files": 6,
+                "unparsed_files": ["a.js"],
+                "unavailable_files": {"b.py": "disappeared after inventory"},
+            },
+            "scope_incomplete, not found: 4 of 6 code files examined, 2 never reached, "
+            "1 parsed only partly, 1 gone from disk",
+        ),
+        ({"outcome": "budget", "files_examined": 1, "code_files": 6}, "budget"),
+        ({"outcome": "scope_incomplete", "coverage": "partial"}, "scope_incomplete"),
+    ],
+)
+def test_the_outcome_summary_says_how_much_of_the_scope_an_empty_find_examined(search, summary) -> None:
+    assert _outcome_summary(search) == summary
 
 
 def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -> None:

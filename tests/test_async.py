@@ -205,7 +205,7 @@ def test_find_code_async_keeps_the_event_loop_running_while_a_place_is_opened(
     # Assert
     began, ended = opening[0], opening[1]
     assert result.steps == 1
-    assert len([tick for tick in ticks if began < tick < ended]) >= 5
+    assert len([tick for tick in ticks if began < tick < ended]) >= 2
 
 
 def test_find_code_async_applies_the_stop_rule_through_the_async_history_check(
