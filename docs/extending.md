@@ -55,7 +55,10 @@ travel in state. `find_code` does not use these templates yet.
 Pass them to `Judge.check_every` with the unit entries and the shared state. Each template's id
 carries a hash of its wording, so a reworded template is a new question. Before a template is used
 for paid calls, `question-templates/build_candidates.py` writes Meta Builder review files for it
-from this repository's own code.
+from this repository's own code. The committed review files are the reviewed wording:
+`tests/test_review_files.py` renders the current templates over each file's own state and fails when
+the questions, the intended uses or `target` differ, so a wording change is written as a new
+revision and reviewed again.
 
 ## Worked example: which route handlers write an audit entry?
 

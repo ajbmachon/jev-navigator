@@ -8,6 +8,7 @@ new revision.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from jev_navigator.directives.find_code import SearchBudget, find_code
@@ -43,7 +44,6 @@ SEARCH_USES = {
     ),
 }
 
-SAME_BEHAVIOUR_REVISION = "v4"
 SAME_BEHAVIOUR_SUBJECT = "mask_by_content"
 SAME_BEHAVIOUR_CANDIDATES = ("mask_request", "mask_everywhere", "safe_options")
 SAME_BEHAVIOUR_USE = (
@@ -51,9 +51,6 @@ SAME_BEHAVIOUR_USE = (
     " the duplication candidates."
 )
 
-FIND_V2_MATCH_REVISION = "v3"
-FIND_V2_ROLES_REVISION = "v3"
-FIND_V2_BEST_FEW_REVISION = "v1"
 FIND_V2_SCOPE = "src/jev_navigator/judgments/"
 FIND_V2_UNITS_PER_REQUEST = 16
 FIND_V2_REQUEST = {
@@ -91,6 +88,91 @@ BEST_FEW_USES = {
 }
 
 
+@dataclass(frozen=True)
+class ReviewSet:
+    """A review file built from Check templates: the questions it asks of each unit, what code does
+    with each answer, and where the file lives. ``request`` is the Find request whose ``target`` the
+    file's shared state holds, when it has one."""
+
+    name: str
+    revision: str
+    checks: tuple[Check, ...]
+    uses_by_template: Mapping[str, str]
+    case: str
+    group: str
+    request: Mapping | None = None
+
+    @property
+    def path(self) -> Path:
+        return HERE / self.name / self.revision / "candidate.json"
+
+    def render(self, items: Sequence[Mapping], shared: Mapping) -> tuple[Mapping, Mapping, dict[str, str]]:
+        """The state and questions the real judge sends for ``items`` and ``shared``, and each
+        question's intended use."""
+        capture = CapturingJevClient()
+        Judge(capture).check_every(list(self.checks), list(items), shared)
+        [(state, questions)] = capture.requests
+        uses = {question_id: self.uses_by_template[question_id.split("@")[0]] for question_id in questions}
+        return state, questions, uses
+
+    def write(self, items: Sequence[Mapping], shared: Mapping) -> None:
+        state, questions, uses = self.render(items, shared)
+        write_candidate(state, questions, uses, self.name, self.revision, case=self.case, group=self.group)
+
+
+SAME_BEHAVIOUR_SET = ReviewSet(
+    "same_behaviour",
+    "v4",
+    (SAME_BEHAVIOUR,),
+    {SAME_BEHAVIOUR.name: SAME_BEHAVIOUR_USE},
+    case="secrets-module",
+    group="same_behaviour",
+)
+FIND_V2_MATCH_SET = ReviewSet(
+    "find_v2_match",
+    "v3",
+    (MATCH,),
+    FIND_V2_USES,
+    case="secret-refusal",
+    group="find-v2",
+    request=FIND_V2_REQUEST,
+)
+FIND_V2_MATCH_CONDITIONS_SET = ReviewSet(
+    "find_v2_match_conditions",
+    "v3",
+    (MATCH,),
+    FIND_V2_USES,
+    case="secret-refusal",
+    group="find-v2",
+    request={**FIND_V2_REQUEST, "conditions": FIND_V2_CONDITIONS},
+)
+FIND_V2_ROLES_SET = ReviewSet(
+    "find_v2_roles",
+    "v3",
+    tuple(BEHAVIOR_ROLE_QUESTIONS.values()),
+    FIND_V2_USES,
+    case="secret-refusal",
+    group="find-v2",
+    request=FIND_V2_REQUEST,
+)
+FIND_V2_BEST_FEW_SET = ReviewSet(
+    "find_v2_best_few",
+    "v1",
+    BEST_FEW_QUESTIONS,
+    BEST_FEW_USES,
+    case="secret-refusal",
+    group="find-v2",
+    request=FIND_V2_REQUEST,
+)
+CHECK_REVIEW_SETS = (
+    SAME_BEHAVIOUR_SET,
+    FIND_V2_MATCH_SET,
+    FIND_V2_MATCH_CONDITIONS_SET,
+    FIND_V2_ROLES_SET,
+    FIND_V2_BEST_FEW_SET,
+)
+
+
 def main() -> None:
     index = CodeIndex.from_git(HERE.parent, prefixes=("src/",))
     write_search_candidate(index)
@@ -118,21 +200,9 @@ def write_search_candidate(index: CodeIndex) -> None:
 
 
 def write_same_behaviour_candidate(index: CodeIndex) -> None:
-    capture = CapturingJevClient()
     subject = {"subject": {"code": index.read_slice(definition(index, SAME_BEHAVIOUR_SUBJECT)).text}}
     items = [unit_entry(index, definition(index, symbol)) for symbol in SAME_BEHAVIOUR_CANDIDATES]
-    Judge(capture).check_each(SAME_BEHAVIOUR, items, subject)
-    state, questions = capture.requests[0]
-    uses = {question_id: SAME_BEHAVIOUR_USE for question_id in questions}
-    write_candidate(
-        state,
-        questions,
-        uses,
-        "same_behaviour",
-        SAME_BEHAVIOUR_REVISION,
-        case="secrets-module",
-        group="same_behaviour",
-    )
+    SAME_BEHAVIOUR_SET.write(items, subject)
 
 
 def write_find_v2_candidates(index: CodeIndex) -> None:
@@ -140,23 +210,15 @@ def write_find_v2_candidates(index: CodeIndex) -> None:
     condition, the role request for three best-few units, and their shared request that asks the
     match question again beside the roles."""
     batch = round_zero_batch(index)
-    with_conditions = {**FIND_V2_REQUEST, "conditions": FIND_V2_CONDITIONS}
     best_few = sorted((definition(index, symbol) for symbol in FIND_V2_BEST_FEW), key=lambda span: span.key)
-    roles = list(BEHAVIOR_ROLE_QUESTIONS.values())
-    write_find_v2_candidate(index, [MATCH], batch, FIND_V2_REQUEST, "find_v2_match", FIND_V2_MATCH_REVISION)
-    write_find_v2_candidate(
-        index, [MATCH], batch, with_conditions, "find_v2_match_conditions", FIND_V2_MATCH_REVISION
+    sets_and_units = (
+        (FIND_V2_MATCH_SET, batch),
+        (FIND_V2_MATCH_CONDITIONS_SET, batch),
+        (FIND_V2_ROLES_SET, best_few),
+        (FIND_V2_BEST_FEW_SET, best_few),
     )
-    write_find_v2_candidate(index, roles, best_few, FIND_V2_REQUEST, "find_v2_roles", FIND_V2_ROLES_REVISION)
-    write_find_v2_candidate(
-        index,
-        BEST_FEW_QUESTIONS,
-        best_few,
-        FIND_V2_REQUEST,
-        "find_v2_best_few",
-        FIND_V2_BEST_FEW_REVISION,
-        BEST_FEW_USES,
-    )
+    for review_set, spans in sets_and_units:
+        review_set.write([unit_entry(index, span) for span in spans], target_state(review_set.request))
 
 
 def round_zero_batch(index: CodeIndex) -> list[Span]:
@@ -166,23 +228,6 @@ def round_zero_batch(index: CodeIndex) -> list[Span]:
     size = FIND_V2_UNITS_PER_REQUEST
     batches = [units[start : start + size] for start in range(0, len(units), size)]
     return next(batch for batch in batches if any(span.name == FIND_V2_TARGET for span in batch))
-
-
-def write_find_v2_candidate(
-    index: CodeIndex,
-    checks: Sequence[Check],
-    spans: Sequence[Span],
-    request: Mapping,
-    name: str,
-    revision: str,
-    uses_by_template: Mapping[str, str] = FIND_V2_USES,
-) -> None:
-    capture = CapturingJevClient()
-    items = [unit_entry(index, span) for span in spans]
-    Judge(capture).check_every(list(checks), items, target_state(request))
-    [(state, questions)] = capture.requests
-    uses = {question_id: uses_by_template[question_id.split("@")[0]] for question_id in questions}
-    write_candidate(state, questions, uses, name, revision, case="secret-refusal", group="find-v2")
 
 
 def write_candidate(
