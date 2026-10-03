@@ -11,7 +11,7 @@ from .directives.find_code import FindResult, NotInspected, Outcome, QueueTier, 
 from .directives.places import Place, place_relationship
 from .index.bindings import Binding
 from .index.code_index import CodeIndex
-from .index.spans import CodeSlice, Span
+from .index.spans import Span
 from .judgments.judge import CheckResult
 from .judgments.thresholds import NoulVerdict
 
@@ -94,15 +94,15 @@ def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
     record = state["result"]
     result = FindResult(
         outcome=Outcome(record.get("outcome", Outcome.BUDGET)),
-        found=tuple(_read_visit(item) for item in record.get("found", [])),
-        searched=tuple(_read_visit(item) for item in record["searched"]),
-        unsure=tuple(_read_visit(item) for item in record["unsure"]),
+        found=tuple(_read_visit(item, index) for item in record.get("found", [])),
+        searched=tuple(_read_visit(item, index) for item in record["searched"]),
+        unsure=tuple(_read_visit(item, index) for item in record["unsure"]),
         not_inspected=tuple(_read_frontier(item, index) for item in record["not_inspected"]),
         steps=record["steps"],
         calls=record["calls"],
         visited=frozenset(record["visited"]),
         judged_code=frozenset(record["judged_code"]),
-        starts=tuple(_read_visit(item) for item in record["starts"]),
+        starts=tuple(_read_visit(item, index) for item in record["starts"]),
     )
     completed = None
     if state["stage"] == "enumeration":
@@ -128,26 +128,21 @@ def _result_record(result: FindResult) -> dict:
 
 
 def _visit_record(visit: Visit) -> dict:
+    """A location, never code text: Resume re-reads the code from the unchanged scope."""
     return {
         "place_key": visit.place_key,
-        "code": {
-            "span": asdict(visit.code.span),
-            "text": visit.code.text,
-            "origin": visit.code.origin,
-            "commit": visit.code.commit,
-            "file_sha256": visit.code.file_sha256,
-        },
+        "code": {"span": asdict(visit.code.span), "origin": visit.code.origin},
         "path": list(visit.path),
         "probability": visit.probability,
         "verdict": visit.verdict,
     }
 
 
-def _read_visit(record: dict) -> Visit:
+def _read_visit(record: dict, index: CodeIndex) -> Visit:
     code = record["code"]
     return Visit(
         record["place_key"],
-        CodeSlice(Span(**code["span"]), code["text"], code["origin"], code["commit"], code["file_sha256"]),
+        index.read_slice(Span(**code["span"]), origin=code["origin"]),
         tuple(record["path"]),
         record["probability"],
         NoulVerdict(record["verdict"]),

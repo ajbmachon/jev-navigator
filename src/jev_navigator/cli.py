@@ -35,6 +35,10 @@ from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
+KEEP_REQUESTS_HELP = (
+    "Keep the code and full request text in the run folder (default: code locations and request "
+    "hashes only); for your own or open-source code"
+)
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
 POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
@@ -86,6 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_calls=budget.max_calls,
                 verbose=args.verbose,
                 answer_store=answer_store,
+                keep_requests=args.keep_requests,
             )
         else:
             resume_from = Path(args.resume).expanduser() if getattr(args, "resume", None) else None
@@ -101,6 +106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     thresholds=Thresholds.from_env(),
                     verbose=args.verbose,
                     answer_store=answer_store,
+                    keep_requests=args.keep_requests,
                     workflow=args.command,
                     resume_from=resume_from,
                 )
@@ -244,8 +250,10 @@ def create_evidence_pack(
     answer_store: Path | None = None,
     workflow: str = "find",
     resume_from: Path | None = None,
+    keep_requests: bool = False,
 ) -> dict:
-    """Run the real index/search owners and persist their reviewable evidence."""
+    """Run the real index/search owners and persist their reviewable evidence. By default the pack
+    keeps code locations and request hashes; ``keep_requests`` also keeps the code and request text."""
     if workflow not in ("find", "findall"):
         raise ValueError(f"unknown search workflow: {workflow}")
     repository = repository.resolve()
@@ -262,7 +270,7 @@ def create_evidence_pack(
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
-    journal = ProgressJournal(journal_path, progress)
+    journal = ProgressJournal(journal_path, progress, keep_request_text=keep_requests)
     progress.start()
     outcome = "failed"
     try:
@@ -408,7 +416,8 @@ def create_evidence_pack(
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
             manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
-
+        if not keep_requests:
+            _drop_code(manifest)
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
@@ -521,6 +530,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     trace.add_argument("--verbose", action="store_true", help="Print expanded masked model requests")
     _add_answer_store_argument(trace)
+    trace.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
     stats = commands.add_parser(
         "stats",
         help="count and rank parsed functions/classes without model calls",
@@ -659,6 +669,7 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         action="store_true",
         help="show expanded masked requests on stderr (default: concise live progress)",
     )
+    find.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -963,6 +974,21 @@ def _manifest(
     }
 
 
+def _drop_code(manifest: dict) -> None:
+    """Leave each judged place as its location: the code it held stays in the repository."""
+    for decision in (manifest.get("entry_selection") or {}).get("decisions", []):
+        for option in decision.get("options", []):
+            option.pop("description", None)
+    for name in ("search", "seed_search"):
+        search = manifest.get(name) or {}
+        for group in ("found", "starts", "searched", "unsure"):
+            for place in search.get(group, []):
+                place.pop("code", None)
+        for step in search.get("history", []):
+            for fetched in step.get("fetched", []):
+                fetched.pop("code", None)
+
+
 def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previous: dict | None) -> dict:
     old_search = previous["search"] if previous else {}
 
@@ -1026,7 +1052,8 @@ def _find_all_report(manifest: dict) -> str:
     lines += ["", "## Matching bodies", ""]
     for value in search["found"]:
         source = value["source"]
-        lines += [f"### {source['file']}:{source['lines'][0]}", "", "```", value["code"], "```", ""]
+        lines += [f"### {source['file']}:{source['lines'][0]}-{source['lines'][1]}", ""]
+        lines += _code_block(value, "")
     return "\n".join(lines) + "\n"
 
 
@@ -1131,6 +1158,11 @@ _FRONTIER_REASONS = {
 }
 
 
+def _code_block(place: dict, language: str) -> list[str]:
+    """The place's code, when the pack kept it (``--keep-requests``); otherwise only its location."""
+    return [f"```{language}", place["code"], "```", ""] if "code" in place else []
+
+
 def _report(manifest: dict) -> str:
     source = manifest["source"]
     search = manifest["search"]
@@ -1182,10 +1214,7 @@ def _report(manifest: dict) -> str:
             "",
             f"Raw P(contains target): **{visit['probability']:.3f}**. Reached by `{source['reached_by']}`.",
             "",
-            f"```{language}",
-            visit["code"],
-            "```",
-            "",
+            *_code_block(visit, language),
         ]
     lines += [
         "## Candidates not independently opened",

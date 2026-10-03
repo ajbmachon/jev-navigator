@@ -177,11 +177,10 @@ An explicitly selected output directory must be new or empty. Each evidence pack
 
 - `manifest.json`: schema version, navigator build fingerprint and source revision, inspected
   repository revision, explicit budget and thresholds, requested and served model, elapsed time,
-  versioned code spans, raw probabilities, full search history, uninspected frontier, and unparsed
-  files.
-- `report.md`: a readable outcome, source table, found code, and coverage caveat.
-- `journal.jsonl`: every masked request as sent (state, questions and body bytes, so it holds
-  code) and the exact provider responses, as the run progresses.
+  versioned code locations (`path:start-end` with file hashes), raw probabilities, full search
+  history, uninspected frontier, and unparsed files.
+- `report.md`: a readable outcome, source table, found locations, and coverage caveat.
+- `journal.jsonl`: request hashes and exact provider responses as the run progresses.
 - `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
   written to the machine's shared answer store (`$XDG_CACHE_HOME/jev-navigator/answers.sqlite`,
   `~/.cache` when the variable is unset, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
@@ -189,9 +188,12 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
   `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
+- `resume.json` (budget-stopped or cancelled runs): the frontier as locations; Resume re-reads the
+  code from the unchanged repository.
 
-The manifest and report contain inspected source code. Keep packs for private repositories in a
-private artifact store; the repository includes only a small public-format sample under
+By default a pack holds no source code, only locations and hashes. `--keep-requests` (JSON
+`"keep_requests": true`) also keeps the code in the manifest and report and the exact request text in
+the journal; use it only for your own or open-source code. The repository includes only a small public-format sample under
 [`examples/evidence-pack`](examples/evidence-pack).
 
 ## Layer 1: index, operations and comments (no model)

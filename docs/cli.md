@@ -66,6 +66,7 @@ unlimited unless you set a limit.
 | `--max-slice-chars N` | `12000`. Character allowance for an opened code slice, ending on a line boundary. This does not bound the entire request, its candidate previews or its questions. | `jvn find "the order limit" --max-slice-chars 24000` |
 | `--max-line-chars N` | `240`. Clip long lines in opened source, previews and signatures shown to the model. Source files are not edited. | `jvn find "the order limit" --max-line-chars 480` |
 | `--verbose` | Off. Print expanded masked requests on stderr as they are sent. Concise phase/request/elapsed progress is already on by default. | `jvn find "the order limit" --verbose` |
+| `--keep-requests` | Off. Keep the code in `manifest.json` and `report.md` and the exact request text in `journal.jsonl`. Without it the run folder holds code locations and request hashes only; Resume works either way. Use it only for your own or open-source code. | `jvn find "the order limit" --keep-requests` |
 | `-h`, `--help` | Print help and exit without searching. | `jvn find --help` |
 
 Limits and context sizes affect how much evidence the search can inspect. Read `search.outcome`,
@@ -193,8 +194,10 @@ run at the same commit replays from it after one live request that learns the se
 what it replays into its own `answers.jsonl`. Find All and Trace items carry the commit and file
 hashes, so a run on a new commit asks again.
 Budget-stopped and cancelled packs also contain `resume.json`.
-The manifest retains the full record even if a pipeline selects only a few output fields. Journal
-records preserve request/response evidence; inspect their exact-capture flags when auditing bytes.
+The manifest retains the full record even if a pipeline selects only a few output fields. By default
+no file holds source code: places appear as `path:start-end` with file hashes, and journal requests
+as hashes. With `--keep-requests` the manifest and report also carry the code and the journal the
+exact request body; inspect the journal's exact-capture flags when auditing bytes.
 
 ## Agent workflow
 
@@ -251,7 +254,8 @@ jvn schema trace
 
 `--start PATH:LINE` is required and repeatable; paths are relative to `--repo` (current directory by
 default). Use `find` first when the entry point is unknown. `--prefix` narrows scope, `--out` chooses
-a new output directory, and `--verbose` displays masked requests. Without `--out`, packs go under
+a new output directory, `--verbose` displays masked requests, and `--keep-requests` keeps code and
+request text in the pack as for `find`. Without `--out`, packs go under
 `./jvn-results/` in the invocation directory.
 
 Static relationships drive traversal. Jev receives batched, independent questions about input

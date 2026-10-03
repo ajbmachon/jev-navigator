@@ -128,8 +128,8 @@ class TerminalProgress:
 
 
 class ProgressJournal(JsonlJournal):
-    def __init__(self, path: Path, progress: TerminalProgress) -> None:
-        super().__init__(path, keep_request_text=True)
+    def __init__(self, path: Path, progress: TerminalProgress, *, keep_request_text: bool = False) -> None:
+        super().__init__(path, keep_request_text=keep_request_text)
         self.progress = progress
 
     def record_request(self, request: JournalRequest) -> str:

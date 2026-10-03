@@ -50,7 +50,6 @@
           "commit": "1111111111111111111111111111111111111111",
           "reached_by": "called by handle"
         },
-        "code": "def admit(items):\n    return len(items) <= 3",
         "probability": 0.96,
         "verdict": "yes",
         "path": ["app/orders.py:3-4", "app/policy.py:1-2"]

@@ -44,6 +44,7 @@ def create_trace_evidence_pack(
     served_model: str | None = None,
     answers_from: Path | None = None,
     answer_store: Path | None = None,
+    keep_requests: bool = False,
 ) -> dict:
     """Trace the workflow around ``starts`` and write the reviewable evidence pack to ``output``.
 
@@ -56,7 +57,8 @@ def create_trace_evidence_pack(
     seeds this pack's answer store from a prior pack's, so identical questions about identical code
     replay without a new request. ``answer_store`` is the shared store file behind the pack
     (default ``shared_store_path()``). ``question`` is
-    the workflow question every obligation is asked about.
+    the workflow question every obligation is asked about. By default the pack keeps code locations
+    and request hashes; ``keep_requests`` also keeps the code and request text.
 
     Returns the manifest that is persisted as ``manifest.json`` next to ``report.md``,
     ``answers.jsonl`` (the shared answer store) and ``journal.jsonl`` (the shared request journal
@@ -83,7 +85,7 @@ def create_trace_evidence_pack(
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
-    journal = ProgressJournal(journal_path, progress)
+    journal = ProgressJournal(journal_path, progress, keep_request_text=keep_requests)
     progress.start()
     outcome = "failed"
     try:
@@ -111,6 +113,8 @@ def create_trace_evidence_pack(
             repository, question, tuple(starts), prefixes, thresholds, depth, index, judge, result
         )
         progress.phase("writing evidence pack")
+        if not keep_requests:
+            _drop_code(manifest)
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n")
         (output / "report.md").write_text(_report(manifest))
         return manifest
@@ -204,6 +208,13 @@ def _obligation_json(obligation: TraceObligation) -> dict:
         "unresolved": [_result_json(item) for item in obligation.unresolved],
         "checked": len(obligation.checked),
     }
+
+
+def _drop_code(manifest: dict) -> None:
+    """Leave each judged span as its location: the code it held stays in the repository."""
+    for obligation in manifest["trace"]["obligations"]:
+        for result in (*obligation["evidence"], *obligation["unresolved"]):
+            result.pop("code", None)
 
 
 def _result_json(result: CheckResult) -> dict:
