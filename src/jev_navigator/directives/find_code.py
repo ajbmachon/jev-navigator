@@ -473,7 +473,7 @@ def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[l
                         responses.append(future.result())
                     except (CancelledError, KeyboardInterrupt):
                         responses.append(_Unanswered.CANCELLED)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - known silent failure: an error during cancellation is recorded as cancelled; perf-find-builder replaces this
                         responses.append(_Unanswered.CANCELLED)
             return responses, True
 

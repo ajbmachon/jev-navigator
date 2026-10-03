@@ -27,8 +27,9 @@ target-version = "py311"
 
 [tool.ruff.lint]
 # Engine's strict clean-code set where JVN already meets it: no commented-out code (ERA001), a
-# literal __all__ of names (PLE0604, PLE0605) and a module docstring in every file (D100).
-select = ["E", "F", "I", "B", "UP", "SIM", "N", "ERA001", "PLE0604", "PLE0605", "D100"]
+# literal __all__ of names (PLE0604, PLE0605), a module docstring in every file (D100) and no
+# blind catch without a stated reason (BLE001).
+select = ["E", "F", "I", "B", "UP", "SIM", "N", "ERA001", "PLE0604", "PLE0605", "D100", "BLE001"]
 
 # A ratchet, as in Analysis Engine: these modules pass strict checking today, and a module joins the
 # list once it passes too. Never remove one or weaken strictness to make the check pass.
