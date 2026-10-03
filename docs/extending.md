@@ -10,6 +10,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
 | `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
+| `judgments.templates` | the Find v2 questions: the match question every unit gets and the four role questions for the best few; not yet used by `find_code` |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
 | `find_all` | seed-first function search: expand the static component, batch containment judgments, then examine disconnected functions |
@@ -31,6 +32,27 @@ Code holds the goal, the loop and the stopping. Jev gets concrete state and one 
 4. Never ask whether something is false, wrong or contradicts something; ask for the concrete
    property instead, and let code combine the answers.
 5. Handle every outcome: yes, no, unsure, and low confidence.
+
+## Find v2 question templates
+
+`judgments/templates.py` holds the fixed wording the Find v2 rounds will ask; the changing facts
+travel in state. `find_code` does not use these templates yet.
+
+- `target_state(request)` builds the one shared field, `target`: the request's `behavior`, and its
+  `conditions` as data when the request names any. Nothing else from the request reaches Jev; `want`
+  only orders the returned group.
+- `unit_entry(index, span)` is one unit as Jev sees it: `file`, `lines` and `code`. The location is
+  what `rebuild_request` re-reads the code from.
+- `MATCH` is asked of every unit in a round. It names its own unit and reads the description in
+  `target`.
+- `BEHAVIOR_ROLE_QUESTIONS` are four independent yes or no questions for the best few, asked in one
+  request: `performs`, `hands_off`, `selects_or_configures` and `consumes`. A unit can hold several
+  roles. These names are the behaviour role list that a request's `want` and a result's labels use.
+
+Pass them to `Judge.check_every` with the unit entries and the shared state. Each template's id
+carries a hash of its wording, so a reworded template is a new question. Before a template is used
+for paid calls, `question-templates/build_find_v2_candidates.py` writes Meta Builder review files
+for it from this repository's own code.
 
 ## Worked example: which route handlers write an audit entry?
 

@@ -1,0 +1,241 @@
+{
+  "case_id": "find_v2_roles:secret-refusal",
+  "group_id": "jev-navigator-find-v2",
+  "revision_id": "v1",
+  "request": {
+    "model": "jev-latest",
+    "state": {
+      "target": {
+        "behavior": "the check that refuses to send a request that still contains a secret"
+      },
+      "items": [
+        {
+          "file": "src/jev_navigator/judgments/judge.py",
+          "lines": [
+            465,
+            473
+          ],
+          "code": "    def _prepare(self, state: Mapping, questions: Mapping) -> _Prepared:\n        hidden: frozenset[str] = frozenset()\n        if self.masker:\n            state, questions, hidden = mask_request(state, questions, self.masker)\n        refuse_if_secret(state, questions, self.scanner, hidden)\n        request_hash = request_sha256(state, questions)\n        stored = self.store.by_request(request_hash) if self.store else None\n        accepted = stored.response() if stored is not None and self._accepts(stored.model) else None\n        return _Prepared(state, questions, request_hash, request_body(state, questions), accepted)"
+        },
+        {
+          "file": "src/jev_navigator/judgments/secrets.py",
+          "lines": [
+            137,
+            149
+          ],
+          "code": "def refuse_if_secret(\n    state: Mapping, questions: Mapping, scanner: Scanner | None, masked: frozenset[str] = frozenset()\n) -> None:\n    \"\"\"Refuses when a value masked elsewhere is still in the request (it can only sit in a key), or\n    when the scanner finds a secret.\"\"\"\n    texts = _strings(state) + _strings(questions)\n    if any(value in text for text in texts for value in masked):\n        raise SecretInRequestError(\"a masked value is still in the request, in a key; nothing was sent\")\n    if scanner is None:\n        return\n    for text in texts:\n        if scanner.findings(text):\n            raise SecretInRequestError(\"the final scan found a secret in the request; nothing was sent\")"
+        },
+        {
+          "file": "src/jev_navigator/judgments/secrets.py",
+          "lines": [
+            99,
+            102
+          ],
+          "code": "def mask_request(state: Mapping, questions: Mapping, masker: Masker) -> tuple[Mapping, Mapping, frozenset]:\n    \"\"\"The masked state and questions, and every value that was hidden in either.\"\"\"\n    values = masked_values([state, questions], masker)\n    return mask_everywhere(state, masker, values), mask_everywhere(questions, masker, values), values"
+        }
+      ]
+    },
+    "questions": {
+      "performs@3e4aaec0#0": {
+        "type": "noul",
+        "instructions": "Do lines in `items[0].code` themselves carry out the behaviour described in `target`?",
+        "criteria": {
+          "true": {
+            "what": "Lines in `items[0].code` do the described work, all of it or a part of it.",
+            "examples": [
+              "For the check that limits how many items an order may hold: the code compares the number of items with the limit."
+            ]
+          },
+          "false": {
+            "what": "The described work happens only in code that `items[0].code` calls, registers or receives, or `items[0].code` does something else.",
+            "not_for": "A unit that does part of the work itself and passes the rest on."
+          }
+        }
+      },
+      "hands_off@c70874b2#0": {
+        "type": "noul",
+        "instructions": "Does `items[0].code` pass the behaviour described in `target` on to other code that carries it out?",
+        "criteria": {
+          "true": {
+            "what": "`items[0].code` calls, registers, schedules or dispatches to the code that does the described work.",
+            "examples": [
+              "For the check that limits how many items an order may hold: an order handler that calls the limit check before saving."
+            ]
+          },
+          "false": {
+            "what": "`items[0].code` does not call, register or dispatch to the code that does the described work.",
+            "not_for": "Code that only receives the outcome after the work is done."
+          }
+        }
+      },
+      "selects_or_configures@f16c72d7#0": {
+        "type": "noul",
+        "instructions": "Does `items[0].code` choose or set what the behaviour described in `target` uses?",
+        "criteria": {
+          "true": {
+            "what": "`items[0].code` decides which implementation, handler or setting value the described behaviour uses, or writes a setting that behaviour reads.",
+            "examples": [
+              "For the check that limits how many items an order may hold: code that reads the item limit from configuration, or registers which check runs."
+            ]
+          },
+          "false": {
+            "what": "`items[0].code` neither chooses nor sets anything the described behaviour uses."
+          }
+        }
+      },
+      "consumes@4472b3f9#0": {
+        "type": "noul",
+        "instructions": "Does `items[0].code` use what the behaviour described in `target` produces?",
+        "criteria": {
+          "true": {
+            "what": "`items[0].code` receives, reads or acts on the outcome of the described behaviour.",
+            "examples": [
+              "For the check that limits how many items an order may hold: code that returns an error response when the check rejects the order."
+            ]
+          },
+          "false": {
+            "what": "`items[0].code` does not use the outcome of the described behaviour."
+          }
+        }
+      },
+      "performs@3e4aaec0#1": {
+        "type": "noul",
+        "instructions": "Do lines in `items[1].code` themselves carry out the behaviour described in `target`?",
+        "criteria": {
+          "true": {
+            "what": "Lines in `items[1].code` do the described work, all of it or a part of it.",
+            "examples": [
+              "For the check that limits how many items an order may hold: the code compares the number of items with the limit."
+            ]
+          },
+          "false": {
+            "what": "The described work happens only in code that `items[1].code` calls, registers or receives, or `items[1].code` does something else.",
+            "not_for": "A unit that does part of the work itself and passes the rest on."
+          }
+        }
+      },
+      "hands_off@c70874b2#1": {
+        "type": "noul",
+        "instructions": "Does `items[1].code` pass the behaviour described in `target` on to other code that carries it out?",
+        "criteria": {
+          "true": {
+            "what": "`items[1].code` calls, registers, schedules or dispatches to the code that does the described work.",
+            "examples": [
+              "For the check that limits how many items an order may hold: an order handler that calls the limit check before saving."
+            ]
+          },
+          "false": {
+            "what": "`items[1].code` does not call, register or dispatch to the code that does the described work.",
+            "not_for": "Code that only receives the outcome after the work is done."
+          }
+        }
+      },
+      "selects_or_configures@f16c72d7#1": {
+        "type": "noul",
+        "instructions": "Does `items[1].code` choose or set what the behaviour described in `target` uses?",
+        "criteria": {
+          "true": {
+            "what": "`items[1].code` decides which implementation, handler or setting value the described behaviour uses, or writes a setting that behaviour reads.",
+            "examples": [
+              "For the check that limits how many items an order may hold: code that reads the item limit from configuration, or registers which check runs."
+            ]
+          },
+          "false": {
+            "what": "`items[1].code` neither chooses nor sets anything the described behaviour uses."
+          }
+        }
+      },
+      "consumes@4472b3f9#1": {
+        "type": "noul",
+        "instructions": "Does `items[1].code` use what the behaviour described in `target` produces?",
+        "criteria": {
+          "true": {
+            "what": "`items[1].code` receives, reads or acts on the outcome of the described behaviour.",
+            "examples": [
+              "For the check that limits how many items an order may hold: code that returns an error response when the check rejects the order."
+            ]
+          },
+          "false": {
+            "what": "`items[1].code` does not use the outcome of the described behaviour."
+          }
+        }
+      },
+      "performs@3e4aaec0#2": {
+        "type": "noul",
+        "instructions": "Do lines in `items[2].code` themselves carry out the behaviour described in `target`?",
+        "criteria": {
+          "true": {
+            "what": "Lines in `items[2].code` do the described work, all of it or a part of it.",
+            "examples": [
+              "For the check that limits how many items an order may hold: the code compares the number of items with the limit."
+            ]
+          },
+          "false": {
+            "what": "The described work happens only in code that `items[2].code` calls, registers or receives, or `items[2].code` does something else.",
+            "not_for": "A unit that does part of the work itself and passes the rest on."
+          }
+        }
+      },
+      "hands_off@c70874b2#2": {
+        "type": "noul",
+        "instructions": "Does `items[2].code` pass the behaviour described in `target` on to other code that carries it out?",
+        "criteria": {
+          "true": {
+            "what": "`items[2].code` calls, registers, schedules or dispatches to the code that does the described work.",
+            "examples": [
+              "For the check that limits how many items an order may hold: an order handler that calls the limit check before saving."
+            ]
+          },
+          "false": {
+            "what": "`items[2].code` does not call, register or dispatch to the code that does the described work.",
+            "not_for": "Code that only receives the outcome after the work is done."
+          }
+        }
+      },
+      "selects_or_configures@f16c72d7#2": {
+        "type": "noul",
+        "instructions": "Does `items[2].code` choose or set what the behaviour described in `target` uses?",
+        "criteria": {
+          "true": {
+            "what": "`items[2].code` decides which implementation, handler or setting value the described behaviour uses, or writes a setting that behaviour reads.",
+            "examples": [
+              "For the check that limits how many items an order may hold: code that reads the item limit from configuration, or registers which check runs."
+            ]
+          },
+          "false": {
+            "what": "`items[2].code` neither chooses nor sets anything the described behaviour uses."
+          }
+        }
+      },
+      "consumes@4472b3f9#2": {
+        "type": "noul",
+        "instructions": "Does `items[2].code` use what the behaviour described in `target` produces?",
+        "criteria": {
+          "true": {
+            "what": "`items[2].code` receives, reads or acts on the outcome of the described behaviour.",
+            "examples": [
+              "For the check that limits how many items an order may hold: code that returns an error response when the check rejects the order."
+            ]
+          },
+          "false": {
+            "what": "`items[2].code` does not use the outcome of the described behaviour."
+          }
+        }
+      }
+    }
+  },
+  "intended_uses": {
+    "performs@3e4aaec0#0": "Labels the unit's role in the returned group. Role answers never change which units are expanded. A group needs at least one unit at or above the yes threshold here; a second place is reported only when it holds such a unit.",
+    "hands_off@c70874b2#0": "Labels the unit's role in the returned group. Role answers never change which units are expanded. Each hand-off is either followed in the group or named as a gap.",
+    "selects_or_configures@f16c72d7#0": "Labels the unit's role in the returned group. Role answers never change which units are expanded.",
+    "consumes@4472b3f9#0": "Labels the unit's role in the returned group. Role answers never change which units are expanded.",
+    "performs@3e4aaec0#1": "Labels the unit's role in the returned group. Role answers never change which units are expanded. A group needs at least one unit at or above the yes threshold here; a second place is reported only when it holds such a unit.",
+    "hands_off@c70874b2#1": "Labels the unit's role in the returned group. Role answers never change which units are expanded. Each hand-off is either followed in the group or named as a gap.",
+    "selects_or_configures@f16c72d7#1": "Labels the unit's role in the returned group. Role answers never change which units are expanded.",
+    "consumes@4472b3f9#1": "Labels the unit's role in the returned group. Role answers never change which units are expanded.",
+    "performs@3e4aaec0#2": "Labels the unit's role in the returned group. Role answers never change which units are expanded. A group needs at least one unit at or above the yes threshold here; a second place is reported only when it holds such a unit.",
+    "hands_off@c70874b2#2": "Labels the unit's role in the returned group. Role answers never change which units are expanded. Each hand-off is either followed in the group or named as a gap.",
+    "selects_or_configures@f16c72d7#2": "Labels the unit's role in the returned group. Role answers never change which units are expanded.",
+    "consumes@4472b3f9#2": "Labels the unit's role in the returned group. Role answers never change which units are expanded."
+  }
+}
