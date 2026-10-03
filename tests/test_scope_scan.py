@@ -371,6 +371,35 @@ def test_a_symbol_is_named_by_the_syntax_tree_and_a_callback_stays_anonymous(tmp
     assert index.unparsed_files == set()
 
 
+def test_a_declaration_that_starts_mid_line_is_named_from_its_own_column(tmp_path: Path) -> None:
+    """A declaration after other code on its line is named from where it starts, not from the line's
+    first word: `if (ready) { start(); } const late = 1;` declares `late`, never `if`."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/late.ts": (
+                "if (ready) { start(); } const late = () => 1;\n"
+                'start("ü"); export type Id = string;\n'
+                "start(); export const LIMIT = 3;\n"
+            ),
+            "app/settings.py": "DEBUG = False; TIMEOUT = 30\n",
+        },
+    )
+
+    # Act
+    declared = {
+        file: [(span.start, span.name) for span in index.declarations_in(file)]
+        for file in ("src/late.ts", "app/settings.py")
+    }
+
+    # Assert
+    assert declared == {
+        "src/late.ts": [(1, "late"), (2, "Id"), (3, "LIMIT")],
+        "app/settings.py": [(1, "DEBUG"), (1, "TIMEOUT")],
+    }
+
+
 def test_a_callback_on_exactly_a_named_functions_lines_is_that_function(tmp_path: Path) -> None:
     """A callback spanning exactly a named function's lines is the same place at line granularity,
     so it stays part of that function: the function stays top level, a same-file call to it stays

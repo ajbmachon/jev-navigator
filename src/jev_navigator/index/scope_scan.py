@@ -116,7 +116,6 @@ def scan_facts(
             matches.extend(tools.ast_grep_rules(rules, group, root, config=config))
     structure = _structure_from_matches(
         files,
-        lines_of,
         unparsed,
         (match for match in matches if match["ruleId"] in {"function", "class", "declaration", _ERROR_RULE}),
     )
@@ -158,7 +157,7 @@ def _unparsed_lines_from_matches(matches) -> dict[str, tuple[tuple[int, int], ..
     return merged
 
 
-def _structure_from_matches(files, lines_of, unparsed, matches):
+def _structure_from_matches(files, unparsed, matches):
     functions: dict[str, set[Span]] = {file: set() for file in files}
     classes: dict[str, set[Span]] = {file: set() for file in files}
     declarations: dict[str, set[Span]] = {file: set() for file in files}
@@ -170,7 +169,8 @@ def _structure_from_matches(files, lines_of, unparsed, matches):
             unparsed.add("facts", [file])
             continue
         if match["ruleId"] == "declaration":
-            declarations[file].add(Span(file, start, end, declared_name(lines_of(file)[start - 1])))
+            # Named from its own text: a declaration may start after other code on its line.
+            declarations[file].add(Span(file, start, end, declared_name(match["text"])))
         else:
             target = functions if match["ruleId"] == "function" else classes
             # The syntax tree names the symbol, never a physical line: a method on a one-line class

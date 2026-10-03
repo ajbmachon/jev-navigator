@@ -182,9 +182,10 @@ def has_flow_pragma(lines: Sequence[str]) -> bool:
     return False
 
 
-def declared_name(first_line: str) -> str:
-    """The name a module-level assignment, constant, type, interface or enum declares."""
-    match = _DECLARED_NAME.search(first_line)
+def declared_name(declaration: str) -> str:
+    """The name a module-level assignment, constant, type, interface or enum declares, read from
+    the start of its source text."""
+    match = _DECLARED_NAME.search(declaration)
     return match.group(1) if match else "<anonymous>"
 
 
