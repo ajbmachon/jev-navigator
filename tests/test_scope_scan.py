@@ -236,7 +236,7 @@ def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp
     def lines_of(path: str) -> list[str]:
         return (tmp_path / path).read_text().splitlines()
 
-    empty = FileFacts(FileStructure((), (), ()), (), ())
+    empty = FileFacts(FileStructure((), (), (), ()), (), ())
 
     unsupported = scan_facts(["notes.md"], tmp_path, lines_of, Unparsed())
     mixed = scan_facts(["module.py", "notes.md"], tmp_path, lines_of, Unparsed())
@@ -433,6 +433,70 @@ def test_a_function_given_as_a_default_value_is_named_by_the_name_it_defaults(tm
     assert {file: caller.name for file, caller in attempt_callers.items()} == {
         "src/upload.ts": "retry",
         "src/upload.js": "retry",
+    }
+
+
+def test_symbols_sharing_a_line_are_top_level_only_when_nothing_holds_them(tmp_path: Path) -> None:
+    """Symbols on one line each hold the other's first line, so lines cannot say which is top level;
+    the syntax tree can. `retry` and the one-line class `Box` stay provable from their file, while
+    `retry`'s default, an object literal's method and a function inside a callback stay candidates."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/jobs.ts": (
+                "export function retry(again = () => 1) { return again(); }\n"
+                "class Box { v() { return 1; } }\n"
+                "const pair = { a() { return 1; }, b() { return 2; } };\n"
+                'describe("jobs", () => { function helper() { return 1; } });\n'
+                "export function run() {\n  retry();\n  new Box();\n  a();\n  helper();\n}\n"
+            )
+        },
+    )
+
+    # Act
+    statuses = {
+        name: index.find_callers(name)[0].binding.status.value
+        for name in ("retry", "Box", "again", "a", "helper")
+    }
+
+    # Assert
+    assert statuses == {
+        "retry": "resolved",
+        "Box": "resolved",
+        "again": "candidate",
+        "a": "candidate",
+        "helper": "candidate",
+    }
+
+
+def test_an_object_literals_functions_are_its_properties_not_names_in_scope(tmp_path: Path) -> None:
+    """`const api = { fetch() {} }` defines `api.fetch`, never a name `fetch`: neither a bare call in
+    its file nor `import { fetch }` from another file proves it."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/api.ts": (
+                "export const api = {\n  fetch() { return 1; },\n  stop: () => 2,\n};\n"
+                "export function local() {\n  return fetch() + stop();\n}\n"
+            ),
+            "src/use.ts": "import { fetch } from './api';\nexport function go() {\n  return fetch();\n}\n",
+        },
+    )
+
+    # Act
+    statuses = {
+        (site.file, name): site.binding.status.value
+        for name in ("fetch", "stop")
+        for site in index.find_callers(name)
+    }
+
+    # Assert
+    assert statuses == {
+        ("src/api.ts", "fetch"): "candidate",
+        ("src/api.ts", "stop"): "candidate",
+        ("src/use.ts", "fetch"): "candidate",
     }
 
 

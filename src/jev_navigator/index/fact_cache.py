@@ -13,7 +13,7 @@ from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v15-default-values-named"
+FACT_RULE_VERSION = "combined-facts-v16-syntactic-top-level"
 
 
 class FactCache:
@@ -68,6 +68,7 @@ def _encode(facts: FileFacts) -> dict:
             "functions": [asdict(span) for span in facts.structure.functions],
             "symbols": [asdict(span) for span in facts.structure.symbols],
             "declarations": [asdict(span) for span in facts.structure.declarations],
+            "top_level_symbols": [asdict(span) for span in facts.structure.top_level_symbols],
         },
         "calls": [asdict(call) for call in facts.calls],
         "references": [asdict(reference) for reference in facts.references],
@@ -84,6 +85,7 @@ def _decode(file: str, raw: dict) -> FileFacts:
             tuple(_span(file, span) for span in structure["functions"]),
             tuple(_span(file, span) for span in structure["symbols"]),
             tuple(_span(file, span) for span in structure["declarations"]),
+            tuple(_span(file, span) for span in structure["top_level_symbols"]),
         ),
         tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
         tuple(

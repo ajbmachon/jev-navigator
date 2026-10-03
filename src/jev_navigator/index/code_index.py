@@ -45,7 +45,7 @@ _WORD = re.compile(r"[\w$]+")
 ScanObserver = Callable[[str, str, int], None]
 
 
-_NO_STRUCTURE = FileStructure((), (), ())
+_NO_STRUCTURE = FileStructure((), (), (), ())
 
 
 class RevisionMismatchError(ValueError):
@@ -519,20 +519,16 @@ class CodeIndex:
         return {}
 
     def _top_level_spans(self, file: str) -> frozenset[Span]:
-        """Symbols and declarations of ``file`` that no class or other function contains. A function
-        starting on a declaration's first line is the value it declares, not its container."""
-        symbols = self.symbols_in(file)
-        top_symbols = (
-            span
-            for span in symbols
-            if not any(other != span and other.contains(span.start) for other in symbols)
-        )
+        """Symbols and declarations of ``file`` that no class or other function contains: the scan
+        decides it for symbols from the syntax tree. A function starting on a declaration's first
+        line is the value it declares, not its container."""
+        structure = self._file_structure(file)
         top_declarations = (
             span
-            for span in self.declarations_in(file)
-            if not any(other.start < span.start <= other.end for other in symbols)
+            for span in structure.declarations
+            if not any(other.start < span.start <= other.end for other in structure.symbols)
         )
-        return frozenset((*top_symbols, *top_declarations))
+        return frozenset((*structure.top_level_symbols, *top_declarations))
 
     def _imported_from(self, file: str, name: str) -> tuple[ImportFact, ...]:
         specifier = self._names_imported(file).get(name)

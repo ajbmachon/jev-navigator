@@ -11,7 +11,7 @@ names they may hide.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,6 +26,7 @@ from .languages import (
     FUNCTION_KINDS,
     NAME_HOLDERS,
     NAME_WRAPPERS,
+    OBJECT_KINDS,
     declared_name,
     export_rules,
     grammar_of,
@@ -57,9 +58,13 @@ class Unparsed:
 
 @dataclass(frozen=True)
 class FileStructure:
+    """``top_level_symbols`` are the symbols no other function or class holds in the syntax tree.
+    Symbols sharing a line each hold the other's first line, so lines alone cannot tell."""
+
     functions: tuple[Span, ...]
     symbols: tuple[Span, ...]
     declarations: tuple[Span, ...]
+    top_level_symbols: tuple[Span, ...]
 
 
 @dataclass(frozen=True)
@@ -117,13 +122,11 @@ def scan_facts(
     structure = _structure_from_matches(
         files,
         unparsed,
-        (match for match in matches if match["ruleId"] in {"function", "class", "declaration", _ERROR_RULE}),
+        (match for match in matches if match["ruleId"] in _STRUCTURE_RULE_IDS),
     )
     calls = _calls_from_matches(match for match in matches if match["ruleId"] == "call")
     references = _references_from_matches(
-        match
-        for match in matches
-        if match["ruleId"] not in {"function", "class", "declaration", _ERROR_RULE, "call", *_EXPORT_RULE_IDS}
+        match for match in matches if match["ruleId"] not in {*_STRUCTURE_RULE_IDS, "call", *_EXPORT_RULE_IDS}
     )
     surface = _export_names_from_matches(match for match in matches if match["ruleId"] in _EXPORT_RULE_IDS)
     unread = _unparsed_lines_from_matches(match for match in matches if match["ruleId"] == _ERROR_RULE)
@@ -161,7 +164,8 @@ def _structure_from_matches(files, unparsed, matches):
     functions: dict[str, set[Span]] = {file: set() for file in files}
     classes: dict[str, set[Span]] = {file: set() for file in files}
     declarations: dict[str, set[Span]] = {file: set() for file in files}
-    positions: dict[Span, int] = {}
+    ranges: dict[str, list[tuple[int, int, Span]]] = {file: [] for file in files}
+    object_members: dict[str, set[tuple[int, int]]] = {file: set() for file in files}
     for match in matches:
         file, start, end = match["file"], _line_of(match), match["range"]["end"]["line"] + 1
         if match["ruleId"] == _ERROR_RULE:
@@ -169,7 +173,10 @@ def _structure_from_matches(files, unparsed, matches):
             # symbols it did keep are still matched below.
             unparsed.add("facts", [file])
             continue
-        if match["ruleId"] == "declaration":
+        offsets = match["range"]["byteOffset"]
+        if match["ruleId"] == _OBJECT_MEMBER_RULE:
+            object_members[file].add((offsets["start"], offsets["end"]))
+        elif match["ruleId"] == "declaration":
             # Named from its own text: a declaration may start after other code on its line.
             declarations[file].add(Span(file, start, end, declared_name(match["text"])))
         else:
@@ -179,8 +186,8 @@ def _structure_from_matches(files, unparsed, matches):
             # the class's span.
             span = Span(file, start, end, symbol_name(_captured_name(match)))
             target[file].add(span)
-            offset = match["range"]["byteOffset"]["start"]
-            positions[span] = min(positions.get(span, offset), offset)
+            ranges[file].append((offsets["start"], offsets["end"], span))
+    positions = _source_positions(range_ for found in ranges.values() for range_ in found)
     for file in files:
         functions[file] -= _same_lines_as_a_named_symbol(functions[file] | classes[file])
     return {
@@ -188,15 +195,39 @@ def _structure_from_matches(files, unparsed, matches):
             _ordered(functions[file], positions),
             _ordered(functions[file] | classes[file], positions),
             tuple(sorted(declarations[file])),
+            _ordered(
+                (functions[file] | classes[file]) - _held(ranges[file], object_members[file]), positions
+            ),
         )
         for file in files
     }
 
 
+def _source_positions(ranges: Iterable[tuple[int, int, Span]]) -> dict[Span, int]:
+    positions: dict[Span, int] = {}
+    for start, _, span in ranges:
+        positions[span] = min(positions.get(span, start), start)
+    return positions
+
+
+def _held(ranges: list[tuple[int, int, Span]], object_members: set[tuple[int, int]]) -> set[Span]:
+    """The spans whose syntax node is an object literal's member or lies inside another function or
+    class node, counting the callbacks ``_same_lines_as_a_named_symbol`` drops: a function inside a
+    one-line callback is the callback's. Nodes nest or are disjoint, so a node is inside another
+    exactly when one starting no later reaches at least as far."""
+    held = {span for start, end, span in ranges if (start, end) in object_members}
+    furthest = -1
+    for _start, end, span in sorted(ranges, key=lambda range_: (range_[0], -range_[1])):
+        if end <= furthest:
+            held.add(span)
+        furthest = max(furthest, end)
+    return held
+
+
 def _same_lines_as_a_named_symbol(symbols: set[Span]) -> set[Span]:
     """Anonymous functions spanning exactly a named symbol's lines: ``xs.map((x) => x.id)`` on the
     one line of ``ids``. A place is lines, so such a callback is that symbol; kept apart, it would
-    contain the symbol's first line and stop it being top level."""
+    be a second place on the same lines."""
     named = {(span.start, span.end) for span in symbols if span.name != "<anonymous>"}
     return {span for span in symbols if span.name == "<anonymous>" and (span.start, span.end) in named}
 
@@ -257,6 +288,8 @@ def _captured_name(match: dict) -> str:
 
 
 _ERROR_RULE = "parse_error"
+_OBJECT_MEMBER_RULE = "object_member"
+_STRUCTURE_RULE_IDS = frozenset({"function", "class", "declaration", _OBJECT_MEMBER_RULE, _ERROR_RULE})
 _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
 _EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
@@ -281,7 +314,19 @@ def _structure_rules(languages: Sequence[str]) -> str:
             f"id: declaration\nlanguage: {grammar_of(language)}\nrule:\n{DECLARATION_RULES[language]}"
         )
         documents.append(f"id: {_ERROR_RULE}\nlanguage: {grammar_of(language)}\nrule:\n  kind: ERROR")
+        if OBJECT_KINDS[language]:
+            documents.append(_object_member_rule(language))
     return "\n---\n".join(documents)
+
+
+def _object_member_rule(language: str) -> str:
+    """Every function and class anywhere inside an object literal (see ``OBJECT_KINDS``)."""
+    symbols = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language]))
+    objects = _kinds(OBJECT_KINDS[language])
+    return (
+        f"id: {_OBJECT_MEMBER_RULE}\nlanguage: {grammar_of(language)}\nrule:\n"
+        f"  any: {symbols}\n  inside:\n    stopBy: end\n    any: {objects}"
+    )
 
 
 def _call_rules(languages: Sequence[str]) -> str:
