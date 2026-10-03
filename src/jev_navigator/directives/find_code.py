@@ -210,10 +210,10 @@ class FindResult:
     absent: one "no" about one place can be wrong. When nothing is found, rank the opened places by
     their probability; the best one is the likeliest place. ``starts`` holds the start places with
     their verdicts: a start is never a find, because the caller already had it. ``unparsed_files``
-    lists scope files the index could not parse. Of ``code_files`` scope code files, Jev judged code in
-    ``files_judged``; ``files_read`` counts those plus the files the search only parsed to list
-    neighbours. While any file was never read or could not be parsed, the outcome is never
-    ``nothing_left``."""
+    lists scope files the index could not parse. Of ``code_files`` scope code files, Jev judged code
+    (the opened places, not whole files) in ``files_judged``; ``files_read`` counts those plus the
+    files the search only parsed to list neighbours. While any file was never read or could not be
+    parsed, the outcome is never ``nothing_left``."""
 
     outcome: Outcome
     found: tuple[Visit, ...]
