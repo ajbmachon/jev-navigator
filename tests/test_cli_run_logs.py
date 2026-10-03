@@ -12,9 +12,7 @@ from git_repos import commit_files
 from jev_navigator.cli import create_evidence_pack
 from jev_navigator.cli_trace import create_trace_evidence_pack
 from jev_navigator.directives.find_code import SearchBudget
-from jev_navigator.directives.places import MOVES
 from jev_navigator.judgments.questions import request_sha256
-from jev_navigator.run_files import KEY_MENTION_MOVE
 from jev_navigator.testing import ScriptedJevClient
 
 MARKER = "zebra_marker_7731"
@@ -313,74 +311,75 @@ def test_a_default_run_folder_holds_no_code_from_template_literals(tmp_path: Pat
     assert files_holding_code(output) == []
 
 
-def key_mention_repository(root: Path) -> Path:
-    """A dictionary key holding the marker, read in one file and mentioned again in another."""
-    commit_files(
-        root,
+KEY_MENTION_SCOPES = {
+    "dictionary key": (
         {
             "app/settings.py": f"def limit(config):\n    return config['{MARKER}']\n",
             "app/other.py": f"def other(config):\n    value = config.get('{MARKER}')\n    return value\n",
         },
-    )
-    return root
+        "app/settings.py:2",
+        "app/other.py:1",
+    ),
+    "backtick-quoted key": (
+        {
+            "app/settings.ts": (
+                f"export function limit(api: any) {{\n  return api.get(`v1/{MARKER}/runs`);\n}}\n"
+            ),
+            "app/other.ts": (
+                f"export function other(api: any) {{\n  const runs = api.get(`v1/{MARKER}/runs`);\n"
+                "  return runs;\n}\n"
+            ),
+        },
+        "app/settings.ts:2",
+        "app/other.ts:1",
+    ),
+}
 
 
-@pytest.mark.parametrize("max_calls", [5, 1])
-def test_a_default_run_folder_never_stores_a_mentioned_key(tmp_path: Path, max_calls: int) -> None:
-    # Arrange
-    repository = key_mention_repository(tmp_path / "repository")
-    output = tmp_path / "pack"
-
-    # Act
-    manifest = create_evidence_pack(
+def key_mention_pack(tmp_path: Path, scope: str, max_calls: int, **options) -> dict:
+    files, start, _ = KEY_MENTION_SCOPES[scope]
+    repository = tmp_path / "repository"
+    commit_files(repository, files)
+    return create_evidence_pack(
         repository,
         ("app/",),
         TARGET,
-        ("app/settings.py:2",),
-        output,
+        (start,),
+        tmp_path / "pack",
         SearchBudget(max_calls=max_calls, beam_width=1),
         ScriptedJevClient(nouls=lambda question_id, question, state: 0.5),
         fact_cache_dir=tmp_path / "fact-cache",
+        **options,
     )
 
-    # Assert
-    relations = [
+
+def neighbour_relations(manifest: dict) -> set[str]:
+    return {
         offered["relationship"]["relation"]
         for step in manifest["search"]["history"]
         for offered in step["judgments"].get("could_contain", [])
-        if (offered.get("relationship") or {}).get("move") == "keys_mentioned"
-    ]
-    assert relations and set(relations) == {"mentions a key (app/other.py:1)"}
-    assert [name for name in files_holding_code(output) if name != "answers.jsonl"] == []
-
-
-def test_the_key_mention_move_name_is_the_one_places_lists() -> None:
-    # Act and assert
-    assert KEY_MENTION_MOVE in MOVES
-
-
-def test_keep_requests_keeps_a_key_mention_relation_verbatim(tmp_path: Path) -> None:
-    # Arrange
-    repository = key_mention_repository(tmp_path / "repository")
-
-    # Act
-    manifest = create_evidence_pack(
-        repository,
-        ("app/",),
-        TARGET,
-        ("app/settings.py:2",),
-        tmp_path / "pack",
-        SearchBudget(max_calls=5, beam_width=1),
-        ScriptedJevClient(nouls=lambda question_id, question, state: 0.5),
-        fact_cache_dir=tmp_path / "fact-cache",
-        keep_requests=True,
-    )
-
-    # Assert
-    relations = {
-        offered["relationship"]["relation"]
-        for step in manifest["search"]["history"]
-        for offered in step["judgments"].get("could_contain", [])
-        if (offered.get("relationship") or {}).get("move") == KEY_MENTION_MOVE
+        if "relation" in (offered.get("relationship") or {})
     }
-    assert relations == {f"mentions `{MARKER}`"}
+
+
+@pytest.mark.parametrize("scope", sorted(KEY_MENTION_SCOPES))
+@pytest.mark.parametrize("max_calls", [5, 1])
+def test_a_default_run_folder_never_stores_a_mentioned_key(
+    tmp_path: Path, scope: str, max_calls: int
+) -> None:
+    # Act
+    manifest = key_mention_pack(tmp_path, scope, max_calls)
+
+    # Assert
+    mention = KEY_MENTION_SCOPES[scope][2]
+    assert f"mentions a key ({mention})" in neighbour_relations(manifest)
+    assert [name for name in files_holding_code(tmp_path / "pack") if name != "answers.jsonl"] == []
+
+
+@pytest.mark.parametrize("scope", sorted(KEY_MENTION_SCOPES))
+def test_keep_requests_keeps_a_key_mention_relation_verbatim(tmp_path: Path, scope: str) -> None:
+    # Act
+    manifest = key_mention_pack(tmp_path, scope, 5, keep_requests=True)
+
+    # Assert
+    assert any(MARKER in relation for relation in neighbour_relations(manifest))

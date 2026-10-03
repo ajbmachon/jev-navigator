@@ -13,8 +13,9 @@ from .index.bindings import Binding
 from .index.code_index import CodeIndex
 from .index.spans import Span
 from .judgments.judge import CheckResult
+from .judgments.relations import without_quoted_code
 from .judgments.thresholds import NoulVerdict
-from .run_files import place_label, shown_relation, shown_relationship
+from .run_files import place_label, relationship_shown
 
 STATE_VERSION = 1
 
@@ -134,12 +135,11 @@ def _visit_record(visit: Visit) -> dict:
         "place_key": visit.place_key,
         "code": {
             "span": asdict(visit.code.span),
-            "origin": shown_relation(visit.move, visit.code.origin, visit.place_key),
+            "origin": without_quoted_code(visit.code.origin, visit.code.span.file, visit.code.span.start),
         },
         "path": list(visit.path),
         "probability": visit.probability,
         "verdict": visit.verdict,
-        "move": visit.move,
     }
 
 
@@ -151,7 +151,6 @@ def _read_visit(record: dict, index: CodeIndex) -> Visit:
         tuple(record["path"]),
         record["probability"],
         NoulVerdict(record["verdict"]),
-        record.get("move"),
     )
 
 
@@ -163,13 +162,13 @@ def _frontier_record(entry: NotInspected, index: CodeIndex) -> dict:
         "signature": place_label(index, entry.place_key),
         "kind": entry.place.kind,
         "span": asdict(code.span),
-        "origin": shown_relation(entry.place.move, code.origin, entry.place_key),
+        "origin": without_quoted_code(code.origin, code.span.file, code.span.start),
         "reason": entry.reason,
         "priority": entry.priority,
         "depth": entry.depth,
         "path": list(entry.path),
         "tier": entry.tier.value,
-        "relationship": shown_relationship(place_relationship(entry.place), entry.place_key),
+        "relationship": relationship_shown(place_relationship(entry.place), entry.place_key),
     }
 
 

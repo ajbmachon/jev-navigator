@@ -12,7 +12,7 @@ from time import monotonic
 
 from .judgments.answers import TokenTotal, reported_input_tokens, reported_output_tokens
 from .judgments.journal import JournalRequest, JsonlJournal, RawResponse
-from .run_files import place_location, step_without_key_mentions
+from .run_files import place_location, step_shown
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -130,30 +130,20 @@ class TerminalProgress:
 
 
 class ProgressJournal(JsonlJournal):
-    """Without ``keep_request_text`` a history step's neighbours are shown by ``place_label`` (the CLI
-    sets one that adds the symbol name once the index exists) and key mentions by location; the
-    journal remembers which move listed each neighbour so an opened key mention is shown the same way.
-    ``remember_moves`` adds the moves of a resumed frontier."""
+    """Without ``keep_request_text`` a history step shows each neighbour by ``place_label`` (the CLI
+    sets one that adds the symbol name once the index exists) and every relation as a run file keeps
+    it."""
 
     def __init__(self, path: Path, progress: TerminalProgress, *, keep_request_text: bool = False) -> None:
         super().__init__(path, keep_request_text=keep_request_text)
         self.progress = progress
         self.place_label: Callable[[str], str] = place_location
-        self._moves: dict[str, str | None] = {}
-
-    def remember_moves(self, moves: Mapping[str, str | None]) -> None:
-        self._moves.update(moves)
 
     def record_step(self, step: Mapping) -> None:
-        self._remember_offered(step)
         super().record_step(step if self.keep_request_text else self._shown(step))
 
-    def _remember_offered(self, step: Mapping) -> None:
-        for offered in step.get("judgments", {}).get("could_contain", []):
-            self._moves[offered["place"]] = (offered.get("relationship") or {}).get("move")
-
     def _shown(self, step: Mapping) -> dict:
-        shown = step_without_key_mentions(step, self._moves)
+        shown = step_shown(step)
         judgments = shown["judgments"]
         if "could_contain" in judgments:
             judgments["could_contain"] = [

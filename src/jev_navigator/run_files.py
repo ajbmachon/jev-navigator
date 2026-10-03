@@ -5,9 +5,8 @@ or ``path:line~radius``) and the enclosing symbol the index knows, never from a 
 quoted code line may itself contain backticks. Requests never carry a stored signature: each opening
 lists its neighbours afresh, so a resumed frontier keeps only this label.
 
-A relation listed by ``KEY_MENTION_MOVE`` quotes a string literal from the code; run files show it as
-``mentions a key (path:line)``, chosen by the move name, never by reading the relation text. Every
-other relation names only symbols and stays readable.
+Relations and ``reached_by`` texts go through ``judgments.relations.without_quoted_code``, the one
+owner of how a key mention is shown without its literal.
 """
 
 from __future__ import annotations
@@ -16,11 +15,10 @@ import re
 from collections.abc import Mapping
 
 from .index.code_index import CodeIndex
-
-KEY_MENTION_MOVE = "keys_mentioned"
-_FRONTIER_LISTS = ("could_contain", "not_inspected", "not_opened")
+from .judgments.relations import without_quoted_code
 
 _LINE_RANGE = re.compile(r"[-~]")
+_NEIGHBOUR_LISTS = ("could_contain", "not_inspected", "not_opened")
 
 
 def place_location(place_key: str) -> str:
@@ -37,35 +35,33 @@ def place_label(index: CodeIndex, place_key: str) -> str:
     return f"{location} {symbol.name}" if symbol is not None and symbol.name else location
 
 
-def shown_relation(move: str | None, relation: str, place_key: str) -> str:
-    """The relation a run file may store for a place the move listed."""
-    return f"mentions a key ({place_location(place_key)})" if move == KEY_MENTION_MOVE else relation
+def relationship_shown(relationship: Mapping | None, place_key: str) -> Mapping | None:
+    """A place's relationship with its relation as a run file keeps it."""
+    if not relationship or "relation" not in relationship:
+        return relationship
+    file, _, line = place_location(place_key).rpartition(":")
+    return {**relationship, "relation": without_quoted_code(relationship["relation"], file, int(line))}
 
 
-def step_without_key_mentions(step: Mapping, moves: Mapping[str, str | None]) -> dict:
-    """A history step whose key-mention relations, in neighbour lists and in the opened place's
-    ``reached_by``, are shown by location; ``moves`` names the move that listed each opened place."""
+def source_shown(source: Mapping) -> dict:
+    """A code source with its ``reached_by`` as a run file keeps it."""
+    if "reached_by" not in source:
+        return dict(source)
+    reached_by = without_quoted_code(source["reached_by"], source["file"], source["lines"][0])
+    return {**source, "reached_by": reached_by}
+
+
+def step_shown(step: Mapping) -> dict:
+    """A history step with every neighbour relation and fetched ``reached_by`` as a run file keeps it."""
     judgments = {
-        name: [_entry_without_key_mention(entry) for entry in value] if name in _FRONTIER_LISTS else value
+        name: [_entry_shown(entry) for entry in value] if name in _NEIGHBOUR_LISTS else value
         for name, value in step.get("judgments", {}).items()
     }
-    place = (step.get("arguments") or {}).get("place")
-    fetched = [
-        {**source, "reached_by": shown_relation(moves.get(place), source.get("reached_by", ""), place)}
-        if place is not None and "reached_by" in source
-        else source
-        for source in step.get("fetched", [])
-    ]
+    fetched = [source_shown(source) for source in step.get("fetched", [])]
     return {**step, "judgments": judgments, "fetched": fetched}
 
 
-def shown_relationship(relationship: Mapping | None, place_key: str) -> Mapping | None:
-    """A place's relationship with a key-mention relation shown by location."""
-    if not relationship or relationship.get("move") != KEY_MENTION_MOVE or "relation" not in relationship:
-        return relationship
-    return {**relationship, "relation": shown_relation(KEY_MENTION_MOVE, relationship["relation"], place_key)}
-
-
-def _entry_without_key_mention(entry: Mapping) -> Mapping:
-    shown = shown_relationship(entry.get("relationship"), entry["place"])
-    return entry if shown is entry.get("relationship") else {**entry, "relationship": shown}
+def _entry_shown(entry: Mapping) -> Mapping:
+    if not entry.get("relationship"):
+        return entry
+    return {**entry, "relationship": relationship_shown(entry["relationship"], entry["place"])}

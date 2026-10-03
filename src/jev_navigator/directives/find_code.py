@@ -166,14 +166,13 @@ class SearchBudget:
 class Visit:
     """An opened place: the code the request showed of it (cut at ``SearchBudget.max_slice_chars``
     on a line boundary, so ``code.span`` ends at the last shown line), the path from a start place,
-    the found verdict, and the move that listed it (None for a start or an entry candidate)."""
+    and the found verdict."""
 
     place_key: str
     code: CodeSlice
     path: tuple[str, ...]
     probability: float
     verdict: NoulVerdict
-    move: str | None = None
 
 
 class QueueTier(IntEnum):
@@ -944,7 +943,6 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
         item.path,
         found_probability,
         search.thresholds.noul_verdict(found_probability),
-        item.place.move,
     )
     _file_visit(search, visit, item.tier)
     picked = _picked_slot(search, response)

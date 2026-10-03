@@ -34,7 +34,7 @@ from .judgments.store import SHARED_STORE_VARIABLE, default_shared_store, run_an
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import place_label, shown_relation, step_without_key_mentions
+from .run_files import place_label, source_shown, step_shown
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
@@ -296,8 +296,6 @@ def create_evidence_pack(
                 raise ValueError("repository revision changed since the evidence pack")
             checkpoint = load_resume(resume_from.resolve() / "resume.json", index)
         resume = checkpoint.result
-        if resume is not None:
-            journal.remember_moves({entry.place_key: entry.place.move for entry in resume.not_inspected})
         resuming_enumeration = checkpoint.completed is not None
         if resuming_enumeration and checkpoint.check_id != CONTAINS_IMPLEMENTATION.question_id:
             raise ValueError("Find All question changed since the evidence pack; start a new search")
@@ -996,19 +994,17 @@ def _drop_entry_code(entry_selection: dict, index: CodeIndex) -> None:
 
 def _drop_search_code(search: dict, index: CodeIndex) -> None:
     visits = [visit for group in ("found", "starts", "searched", "unsure") for visit in search.get(group, [])]
-    moves = {visit["place"]: visit.get("move") for visit in visits if "place" in visit}
     for visit in visits:
         visit.pop("code", None)
-        source = visit.get("source") or {}
-        if "place" in visit and "reached_by" in source:
-            source["reached_by"] = shown_relation(visit.get("move"), source["reached_by"], visit["place"])
+        if "source" in visit:
+            visit["source"] = source_shown(visit["source"])
     for entry in search.get("not_inspected", []):
         entry["signature"] = place_label(index, entry["place"])
-    search["history"] = [_step_without_code(step, moves, index) for step in search.get("history", [])]
+    search["history"] = [_step_without_code(step, index) for step in search.get("history", [])]
 
 
-def _step_without_code(step: dict, moves: dict, index: CodeIndex) -> dict:
-    shown = step_without_key_mentions(step, moves)
+def _step_without_code(step: dict, index: CodeIndex) -> dict:
+    shown = step_shown(step)
     for fetched in shown["fetched"]:
         fetched.pop("code", None)
     for offered in shown["judgments"].get("could_contain", []):
@@ -1139,7 +1135,6 @@ def _visit(visit: Visit) -> dict:
         "probability": visit.probability,
         "verdict": visit.verdict,
         "path": list(visit.path),
-        "move": visit.move,
     }
 
 
