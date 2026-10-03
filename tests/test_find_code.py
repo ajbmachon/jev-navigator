@@ -379,11 +379,12 @@ def test_find_packets_and_history_keep_parsed_relationship_bindings(tmp_path: Pa
     assert {candidate["verdict"] for candidate in history_candidates} == {"no"}
 
     caller_client = ScriptedJevClient(nouls=lambda _question_id, _question, _state: 0.1)
+    target_check = next(span for span in index.find_definition("check") if span.file == "app/target.py")
     caller_result = find_code(
         index,
         Judge(caller_client),
         "the check function",
-        [function_place(index, index.find_definition("check")[0])],
+        [function_place(index, target_check)],
         moves={"callers": MOVES["callers"]},
         budget=SearchBudget(max_steps=1),
     )

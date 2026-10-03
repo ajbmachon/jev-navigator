@@ -37,6 +37,12 @@ class Binding:
         return self.status == BindingStatus.RESOLVED
 
 
+def binding_can_target(binding: Binding | None, definition: Span) -> bool:
+    """Whether a call or reference with ``binding`` can reach ``definition``. Only a binding that
+    proves another definition rules it out; a name match, or no binding, may still reach it."""
+    return binding is None or binding.target is None or binding.target.key == definition.key
+
+
 class BindingResolver(Protocol):
     def resolve_call(self, file: str, line: int, name: str, receiver: str | None) -> Binding | None: ...
 

@@ -417,7 +417,9 @@ contain the code described in `target.description`?" and, per neighbour code lis
 callers in test files after the others; callees, proven production targets first and then the ones
 called from fewest places; code that
 refers to it or that it passes on without a call, as an argument, collection entry, assignment,
-decorator, export, return, method receiver, type or base class; the other functions of its file, nearest
+decorator, export, return, method receiver, type or base class, where callers and code that refers to
+it leave out a site whose binding proves another definition of the same name, as Trace does; the other
+functions of its file, nearest
 first; lines anywhere in scope (docs and config too) that mention its environment variables or its
 quoted keys (six characters or more with a dot, underscore, colon, slash or dash), the
 rarest key first, skipping a key found on more than 30 lines; co-changed files; and the lines before and

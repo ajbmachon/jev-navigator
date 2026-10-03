@@ -34,6 +34,64 @@ def neighbour_signatures(index: CodeIndex, name: str) -> dict[str, str]:
     return {place.key: place.signature for place in neighbours(index, opened)}
 
 
+TWO_LOADERS = {
+    "users.py": "def load():\n    return 1\n\n\ndef refresh():\n    load()\n    return [load]\n",
+    "orders.py": "def load():\n    return 2\n",
+    "jobs.py": "def run(loader):\n    loader.load()\n    return {'job': load}\n",
+}
+CALLERS_AND_REFERENCES = {"callers": MOVES["callers"], "referenced_by": MOVES["referenced_by"]}
+
+
+def test_a_definition_is_not_offered_the_calls_and_references_proven_to_reach_another(
+    tmp_path: Path,
+) -> None:
+    # Arrange: users.py calls and stores its own load; jobs.py names load without proving which.
+    index = committed_index(tmp_path, TWO_LOADERS)
+    orders_load = index.read_slice(Span("orders.py", 1, 2, "load"))
+
+    # Act
+    offered = neighbours(index, orders_load, moves=CALLERS_AND_REFERENCES)
+
+    # Assert
+    assert [(place.move, place.key) for place in offered] == [("callers", "jobs.py:1-3")]
+
+
+def test_a_definition_is_offered_the_calls_and_references_proven_to_reach_it(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(tmp_path, TWO_LOADERS)
+    users_load = index.read_slice(Span("users.py", 1, 2, "load"))
+
+    # Act
+    offered = neighbours(index, users_load, moves=CALLERS_AND_REFERENCES)
+
+    # Assert
+    assert [(place.move, place.key) for place in offered] == [
+        ("callers", "jobs.py:1-3"),
+        ("callers", "users.py:5-7"),
+    ]
+
+
+def test_a_window_in_a_long_definition_is_offered_the_calls_proven_to_reach_that_definition(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    attributes = "".join(f"    FIELD_{number} = {number}\n" for number in range(MAX_DEFINITION_LINES))
+    index = committed_index(
+        tmp_path,
+        {
+            "store.py": "class Store:\n" + attributes,
+            "app.py": "from store import Store\n\n\ndef build():\n    return Store()\n",
+        },
+    )
+    opened = place_for_line(index, "store.py", 65, "start").open()
+
+    # Act
+    offered = neighbours(index, opened, moves={"callers": MOVES["callers"]})
+
+    # Assert
+    assert [place.key for place in offered] == ["app.py:4-5"]
+
+
 def test_code_reached_only_through_a_reference_is_offered_both_ways(tmp_path: Path) -> None:
     # Arrange
     index = committed_index(

@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 
-from ..index.bindings import Binding
+from ..index.bindings import Binding, binding_can_target
 from ..index.code_index import CodeIndex
 from ..index.spans import CallEdge, CodeSlice, Span, TextHit
 
@@ -223,7 +223,11 @@ def _within(inner: Span, outer: Span) -> bool:
 def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     if not _is_named(opened.span):
         return []
-    sites = sorted(index.find_callers(opened.span.name), key=lambda site: _is_test_file(site.file))
+    definition = _definition_opened(index, opened.span)
+    reaching = (
+        site for site in index.find_callers(opened.span.name) if binding_can_target(site.binding, definition)
+    )
+    sites = sorted(reaching, key=lambda site: _is_test_file(site.file))
     return [
         place_for_line(index, site.file, site.line, f"calls {opened.span.name}", binding=site.binding)
         for site in sites
@@ -252,10 +256,20 @@ def _referenced_by(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     if not _is_named(opened.span):
         return []
     name = opened.span.name
+    definition = _definition_opened(index, opened.span)
     return [
         place_for_line(index, ref.file, ref.line, f"refers to {name} as {ref.role}", binding=ref.binding)
         for ref in index.find_references(name)
+        if binding_can_target(ref.binding, definition)
     ]
+
+
+def _definition_opened(index: CodeIndex, opened: Span) -> Span:
+    """The definition the opened code stands for: the opened span itself, or, for a window opened
+    under a long definition's name, the smallest definition of that name the window overlaps."""
+    named = (*index.symbols_in(opened.file), *index.declarations_in(opened.file))
+    overlapping = [span for span in named if span.name == opened.name and _overlaps(span, opened)]
+    return min(overlapping, key=Span.size, default=opened)
 
 
 def _passed_on(index: CodeIndex, opened: CodeSlice) -> list[Place]:
