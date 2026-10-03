@@ -519,6 +519,8 @@ class CodeIndex:
 
     def _facts_in(self, file: str) -> FileFacts:
         self._require_in_scope(file)
+        if (known := self._facts.get(file)) is not None:
+            return known
         self._ensure_facts((file,))
         return self._facts.get(file, FileFacts(_NO_STRUCTURE, (), ()))
 

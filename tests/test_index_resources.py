@@ -6,12 +6,12 @@ import subprocess
 import sys
 import tracemalloc
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from git_repos import commit_files
 
-from jev_navigator.index import code_index, tools
+from jev_navigator.index import code_index, languages, tools
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.scope_scan import Unparsed, scan_facts
 
@@ -402,3 +402,28 @@ def test_binding_many_calls_to_one_name_checks_each_definition_once(
         ("resolved", "app/store.py")
     }
     assert checked == {"app/store.py": 1, "app/backup.py": 1, "app/model.py": 1}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "app/orders.py",
+        "web/routes.TS",
+        "web/view.test.tsx",
+        "lib.d/notes",
+        "config/.ts",
+        "pkg/.eslintrc.js",
+        "scripts/run.",
+        "Makefile",
+        "deep/a.b/c.go",
+    ],
+)
+def test_a_files_language_follows_the_suffix_of_its_last_path_part(path: str) -> None:
+    # Arrange
+    expected = languages.LANGUAGE_BY_SUFFIX.get(PurePosixPath(path).suffix)
+
+    # Act
+    language = languages.language_of(path)
+
+    # Assert
+    assert language == expected
