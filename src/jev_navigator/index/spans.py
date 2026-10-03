@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,21 @@ class Span:
 
     def size(self) -> int:
         return self.end - self.start + 1
+
+
+def holder_of(symbols: Iterable[Span], symbol: Span) -> Span | None:
+    """The smallest of ``symbols`` whose lines contain ``symbol``'s and fill more of them: a method's
+    class, a nested function's outer function. Lines are all a span knows, so a symbol on the same
+    lines as another (a method on a one-line class) has no holder."""
+    holding = [
+        other
+        for other in symbols
+        if other != symbol
+        and other.size() > symbol.size()
+        and other.contains(symbol.start)
+        and other.contains(symbol.end)
+    ]
+    return min(holding, key=Span.size, default=None)
 
 
 @dataclass(frozen=True)
