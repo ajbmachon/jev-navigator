@@ -49,8 +49,9 @@ CLASS_KINDS = {
 
 # A function or class expression is called by the name that holds it: `const save = function
 # inner() {}` is called as `save`. So an expression is named by the declarator, class field, object
-# key or assignment it is the value of, looking through the grammar's parentheses and type casts,
-# and only then by its own name. A callback passed as an argument, `it("works", () => ...)`, is held
+# key, assignment or default value (`onError = () => {}` in a parameter list or a destructuring) it
+# is the value of, looking through the grammar's parentheses and type casts, and only then by its
+# own name. A callback passed as an argument, `it("works", () => ...)`, is held
 # by no name and stays anonymous. Each grammar lists only the node kinds it has: one unknown kind
 # makes ast-grep reject the whole scan. The tables are keyed by grammar, see ``grammar_of``.
 EXPRESSION_KINDS = frozenset({"arrow_function", "function_expression", "generator_function", "class"})
@@ -59,6 +60,9 @@ _SCRIPT_HOLDERS = (
     ("public_field_definition", "name"),
     ("pair", "key"),
     ("assignment_expression", "left"),
+    ("required_parameter", "pattern"),
+    ("assignment_pattern", "left"),
+    ("object_assignment_pattern", "left"),
 )
 NAME_HOLDERS = {
     "python": (),
@@ -69,6 +73,8 @@ NAME_HOLDERS = {
         ("field_definition", "property"),
         ("pair", "key"),
         ("assignment_expression", "left"),
+        ("assignment_pattern", "left"),
+        ("object_assignment_pattern", "left"),
     ),
 }
 _TSX_WRAPPERS = ("parenthesized_expression", "as_expression", "satisfies_expression", "non_null_expression")

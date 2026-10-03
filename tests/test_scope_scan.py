@@ -400,6 +400,42 @@ def test_a_declaration_that_starts_mid_line_is_named_from_its_own_column(tmp_pat
     }
 
 
+def test_a_function_given_as_a_default_value_is_named_by_the_name_it_defaults(tmp_path: Path) -> None:
+    """`onError = () => {}` in a parameter list is the function a call `onError()` may reach, so it
+    is named `onError`, also as a destructured default. On a one-line function it shares the
+    function's lines, and the calls on that line stay the function's own."""
+    # Arrange
+    script = (
+        "export function upload(file, onError = () => {}) {\n  return onError;\n}\n"
+        "export function save({ onDone = () => 1 } = {}, [first = () => 2] = []) {}\n"
+        "export function retry(again = () => 1) { return attempt(); }\n"
+    )
+    index = committed(tmp_path, {"src/upload.ts": script, "src/upload.js": script})
+
+    # Act
+    named = {
+        file: [(span.start, span.name) for span in index.functions_in(file)]
+        for file in ("src/upload.ts", "src/upload.js")
+    }
+    attempt_callers = {site.file: site.caller for site in index.find_callers("attempt")}
+
+    # Assert
+    expected = [
+        (1, "upload"),
+        (1, "onError"),
+        (4, "save"),
+        (4, "onDone"),
+        (4, "first"),
+        (5, "retry"),
+        (5, "again"),
+    ]
+    assert named == {"src/upload.ts": expected, "src/upload.js": expected}
+    assert {file: caller.name for file, caller in attempt_callers.items()} == {
+        "src/upload.ts": "retry",
+        "src/upload.js": "retry",
+    }
+
+
 def test_a_callback_on_exactly_a_named_functions_lines_is_that_function(tmp_path: Path) -> None:
     """A callback spanning exactly a named function's lines is the same place at line granularity,
     so it stays part of that function: the function stays top level, a same-file call to it stays

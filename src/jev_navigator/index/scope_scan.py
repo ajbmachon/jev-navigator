@@ -161,6 +161,7 @@ def _structure_from_matches(files, unparsed, matches):
     functions: dict[str, set[Span]] = {file: set() for file in files}
     classes: dict[str, set[Span]] = {file: set() for file in files}
     declarations: dict[str, set[Span]] = {file: set() for file in files}
+    positions: dict[Span, int] = {}
     for match in matches:
         file, start, end = match["file"], _line_of(match), match["range"]["end"]["line"] + 1
         if match["ruleId"] == _ERROR_RULE:
@@ -176,13 +177,16 @@ def _structure_from_matches(files, unparsed, matches):
             # The syntax tree names the symbol, never a physical line: a method on a one-line class
             # shares the line `class Box` opens, and naming it from that line would collapse it into
             # the class's span.
-            target[file].add(Span(file, start, end, symbol_name(_captured_name(match))))
+            span = Span(file, start, end, symbol_name(_captured_name(match)))
+            target[file].add(span)
+            offset = match["range"]["byteOffset"]["start"]
+            positions[span] = min(positions.get(span, offset), offset)
     for file in files:
         functions[file] -= _same_lines_as_a_named_symbol(functions[file] | classes[file])
     return {
         file: FileStructure(
-            _ordered(functions[file]),
-            _ordered(functions[file] | classes[file]),
+            _ordered(functions[file], positions),
+            _ordered(functions[file] | classes[file], positions),
             tuple(sorted(declarations[file])),
         )
         for file in files
@@ -345,10 +349,11 @@ def _languages(files: Sequence[str]) -> list[str]:
     return sorted({language for file in files if (language := language_of(file))})
 
 
-def _ordered(spans: set[Span]) -> tuple[Span, ...]:
-    """By position, outer first; symbols on the same lines by name, so the order never depends on
-    the process's string hashing."""
-    return tuple(sorted(spans, key=lambda span: (span.start, -span.end, span.name)))
+def _ordered(spans: set[Span], positions: dict[Span, int]) -> tuple[Span, ...]:
+    """By position, outer first; symbols on the same lines in source order. A line's calls belong to
+    the smallest function holding it, and among functions on the same lines the first one wins: in
+    `function retry(again = () => 1) { return attempt(); }` that is `retry`, not its default."""
+    return tuple(sorted(spans, key=lambda span: (span.start, -span.end, positions[span])))
 
 
 def _line_of(match: dict) -> int:
