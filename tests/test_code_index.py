@@ -125,6 +125,20 @@ def test_search_text_finds_string_keys_in_scope_files(sample_index: CodeIndex) -
     assert [(hit.file, hit.line) for hit in hits] == [("app/validation.py", 1), ("app/validation.py", 11)]
 
 
+@pytest.mark.parametrize("key", ["orders.max_items", "price(+)[*]?", "a|b", "^$\\d"])
+def test_search_text_matches_every_character_of_the_key_as_written(tmp_path: Path, key: str) -> None:
+    # Arrange: the second line differs from the key only where a regex would read its characters
+    lookalike = key.replace(".", "X").replace("(", "").replace(")", "").replace("|", "").replace("\\", "")
+    (tmp_path / "keys.py").write_text(f'KEY = "{key}"\nOTHER = "{lookalike}zz"\n')
+    index = CodeIndex(tmp_path, ["keys.py"])
+
+    # Act
+    hits = index.search_text(key)
+
+    # Assert
+    assert [hit.line for hit in hits] == [1]
+
+
 def test_imports_and_dependents_resolve_to_scope_files(sample_index: CodeIndex) -> None:
     # Act
     python_imports = sample_index.imports("app/orders.py")
