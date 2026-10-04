@@ -60,11 +60,20 @@ class ScoreAnswer:
 Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer
 
 
+NOT_REPORTED_TEXT = "not reported"
+"""How a missing token count (``None``) reads in text for people; data keeps ``None``/``null``."""
+
+
 @dataclass(frozen=True)
 class JevResponse:
+    """``input_tokens`` is what the provider reported for the request, ``None`` when it reported
+    nothing; a missing count is never 0. ``from_store`` marks a replay: it sent nothing and carries
+    no count. A response composed from several requests carries none either; totals count only
+    requests sent."""
+
     answers: Mapping[str, Answer]
     model: str
-    input_tokens: int = 0
+    input_tokens: int | None = None
     request_sha256: str = ""
     from_store: bool = False
     extra: Mapping[str, object] = field(default_factory=dict)
@@ -107,16 +116,50 @@ def distribution_confidence(probabilities: Mapping[str, float]) -> float:
     return (option_count * max(probabilities.values()) - 1) / (option_count - 1)
 
 
+def reported_input_tokens(raw: Mapping) -> int | None:
+    return _reported_usage_count(raw, "input_tokens")
+
+
+def reported_output_tokens(raw: Mapping) -> int | None:
+    return _reported_usage_count(raw, "output_tokens")
+
+
+def _reported_usage_count(raw: Mapping, name: str) -> int | None:
+    """A ``usage`` count when it is a non-negative integer, else ``None``: the one place a raw
+    response's token counts are read."""
+    usage = raw.get("usage")
+    reported = usage.get(name) if isinstance(usage, Mapping) else None
+    return (
+        reported if isinstance(reported, int) and not isinstance(reported, bool) and reported >= 0 else None
+    )
+
+
 def response_from_raw(raw: Mapping) -> JevResponse:
     """Parses a raw System One response: ``{"model", "usage": {"input_tokens"}, "answers": {...}}``."""
     answers = {question_id: answer_from_json(answer) for question_id, answer in raw["answers"].items()}
-    usage = raw.get("usage") or {}
-    return JevResponse(answers, str(raw["model"]), int(usage.get("input_tokens") or 0))
+    return JevResponse(answers, str(raw["model"]), reported_input_tokens(raw))
 
 
 def response_to_raw(response: JevResponse) -> dict:
+    usage = {} if response.input_tokens is None else {"input_tokens": response.input_tokens}
     return {
         "model": response.model,
-        "usage": {"input_tokens": response.input_tokens},
+        "usage": usage,
         "answers": {question_id: answer.to_json() for question_id, answer in response.answers.items()},
     }
+
+
+@dataclass
+class TokenTotal:
+    """The tokens responses reported, how many responses there were, and how many reported none."""
+
+    reported: int = 0
+    not_reported: int = 0
+    responses: int = 0
+
+    def add(self, tokens: int | None) -> None:
+        self.responses += 1
+        if tokens is None:
+            self.not_reported += 1
+        else:
+            self.reported += tokens

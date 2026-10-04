@@ -13,7 +13,8 @@ from jev_navigator.directives.trace import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
-from jev_navigator.judgments.judge import MAX_REQUEST_BYTES, Judge
+from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS, MAX_REQUEST_CHARS
+from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
@@ -251,9 +252,9 @@ def test_trace_requires_a_concrete_start_instead_of_inventing_one(tmp_path: Path
 
 
 def _bulky_workflow_index(root: Path) -> CodeIndex:
-    """The same real workflow with bodies long enough to force several Judge batches."""
+    """The same real workflow with bodies too long for two to share a Judge batch."""
     _workflow_index(root)
-    bulk = "x" * 30_000
+    bulk = "x" * (JEV_INPUT_BOX_CHARS * 3 // 5)
     for path in sorted(root.glob("*.py")):
         path.write_text(path.read_text().replace("):\n", f"):\n    bulk = '{bulk}'\n"))
     return CodeIndex.from_directory(root)
@@ -367,7 +368,7 @@ def test_a_hub_item_keeps_every_link_fact_without_the_repeated_identity_boilerpl
     characters of per-link identity boilerplate; no input budget could carry it."""
     index = _hub_index(tmp_path, callers=150, line_chars=200)
     root = index.find_definition("hub")[0]
-    client = BudgetedClient(MAX_REQUEST_BYTES)
+    client = BudgetedClient(MAX_REQUEST_CHARS)
 
     result = trace_workflow(index, Judge(client), "How does a request become a result?", [root])
 
@@ -401,7 +402,7 @@ def test_class_trace_assigns_method_evidence_to_its_lexical_owner(tmp_path: Path
     (tmp_path / "hub.py").write_text("class Hub:\n" + "\n".join(methods))
     index = CodeIndex.from_directory(tmp_path)
     hub = index.find_definition("Hub")[0]
-    client = BudgetedClient(MAX_REQUEST_BYTES)
+    client = BudgetedClient(MAX_REQUEST_CHARS)
 
     result = trace_workflow(index, Judge(client), "Which methods use the targets?", [hub])
 

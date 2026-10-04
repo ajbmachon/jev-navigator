@@ -152,6 +152,29 @@ def test_a_public_export_beside_a_template_literal_stays_proven(tmp_path: Path) 
     assert call.binding.target == Span("src/services/one.ts", 2, 2, "run")
 
 
+def test_a_function_inside_an_exported_arrow_does_not_name_the_export(tmp_path: Path) -> None:
+    """The regression: the export's own name is the surface, not the first function in its body,
+    so a call to `Page` through the barrel is proven to reach it."""
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            "src/views/page.ts": (
+                "export const Page = () => {\n  function helper() { return 1; }\n  return helper();\n};\n"
+            ),
+            "src/views/index.ts": 'export * from "./page";\n',
+            "src/app.ts": 'import { Page } from "./views";\nPage();\n',
+        },
+    )
+
+    # Act
+    call = index.find_callers("Page")[0]
+
+    # Assert
+    assert call.binding.status == "resolved"
+    assert call.binding.target == Span("src/views/page.ts", 1, 4, "Page")
+
+
 def test_a_call_imported_through_a_barrel_has_a_proven_target(tmp_path: Path) -> None:
     # Arrange
     index = indexed(
@@ -645,7 +668,7 @@ def test_package_uncertainty_propagates_through_a_relative_barrel(tmp_path: Path
     index = indexed(
         tmp_path,
         {
-            "package.json": '{"name": "@ws/ui", "exports": {"./button": "./src/button.ts"}}',
+            "package.json": '{"name": "@ws/ui", "exports": {"./button": "./dist/button.js"}}',
             "src/button.ts": "export function button() { return 1; }\n",
             "src/services/index.ts": 'export { button } from "@ws/ui/button";\n',
             "src/page.ts": (
@@ -681,3 +704,103 @@ def test_package_redirects_continue_past_four_links_and_stop_cycles(tmp_path: Pa
     edge = index.callee_edges(index.find_definition("run")[0])[0]
     assert edge.binding.status == "candidate"
     assert edge.binding.target is None
+
+
+SHARED_PACKAGE = '{"name": "@acme/shared", "exports": {"./*": "./src/*.ts"}}'
+
+
+@pytest.mark.parametrize(
+    ("files", "specifier", "status"),
+    [
+        ({"apps/web/package.json": '{"imports": {"#lib/*": "./src/lib/*.ts"}}'}, "#lib/money", "resolved"),
+        (
+            {
+                "apps/web/package.json": '{"dependencies": {"@acme/shared": "workspace:*"}}',
+                "packages/shared/package.json": SHARED_PACKAGE,
+            },
+            "@acme/shared/money",
+            "resolved",
+        ),
+        (
+            {
+                "apps/web/package.json": '{"dependencies": {"@acme/shared": "workspace:^1.2.0"}}',
+                "packages/shared/package.json": SHARED_PACKAGE,
+            },
+            "@acme/shared/money",
+            "resolved",
+        ),
+        (
+            {"apps/web/package.json": '{"name": "web", "exports": {"./lib/*": "./src/lib/*.ts"}}'},
+            "web/lib/money",
+            "resolved",
+        ),
+        (
+            {
+                "apps/web/package.json": '{"dependencies": {"@acme/shared": "^1.0.0"}}',
+                "packages/shared/package.json": SHARED_PACKAGE,
+            },
+            "@acme/shared/money",
+            "candidate",
+        ),
+        (
+            {
+                "apps/web/package.json": '{"dependencies": {"@acme/shared": "workspace:@acme/other@*"}}',
+                "packages/shared/package.json": SHARED_PACKAGE,
+            },
+            "@acme/shared/money",
+            "candidate",
+        ),
+        ({"apps/web/package.json": '{"name": "web", "exports": null}'}, "web/src/lib/money", "candidate"),
+        (
+            {
+                "apps/web/package.json": (
+                    '{"imports": {"#lib/*": {"import": "./src/lib/*.ts", "require": "./src/cjs/*.ts"}}}'
+                ),
+                "apps/web/src/cjs/money.ts": "export function cents() { return 3; }\n",
+            },
+            "#lib/money",
+            "candidate",
+        ),
+        (
+            {
+                "apps/web/package.json": '{"imports": {"#lib/*": "./src/lib/*.ts"}}',
+                "apps/web/src/package.json": "{",
+            },
+            "#lib/money",
+            "candidate",
+        ),
+    ],
+    ids=[
+        "hash-import",
+        "workspace-dependency",
+        "workspace-range",
+        "self-reference",
+        "version-range-may-be-installed",
+        "workspace-alias-links-another-package",
+        "null-exports-disable-self-reference",
+        "targets-differ-by-condition",
+        "nearer-unreadable-package-json",
+    ],
+)
+def test_a_declared_package_mapping_proves_a_call_only_when_the_package_and_file_are_certain(
+    tmp_path: Path, files: dict[str, str], specifier: str, status: str
+) -> None:
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            **files,
+            "apps/web/src/lib/money.ts": "export function cents() { return 1; }\n",
+            "packages/shared/src/money.ts": "export function cents() { return 2; }\n",
+            "apps/web/src/page.ts": (
+                f'import {{ cents }} from "{specifier}";\nexport function total() {{ return cents(); }}\n'
+            ),
+        },
+    )
+
+    # Act
+    edge = index.callee_edges(index.find_definition("total")[0])[0]
+
+    # Assert
+    assert edge.binding.status == status
+    assert (edge.binding.target is not None) == (status == "resolved")

@@ -32,7 +32,7 @@ class ScriptedJevClient:
     scores: Mapping[str, Sequence[float]] = field(default_factory=dict)
     default_noul: float = 0.5
     model: str = "jev-scripted"
-    input_tokens_per_call: int = 100
+    input_tokens_per_call: int | None = 100
     requests: list[tuple[Mapping, Mapping]] = field(default_factory=list)
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:

@@ -109,11 +109,11 @@ def test_registered_hash_selects_real_stored_answers_and_rejects_reworded_questi
         state, reg.questions, thresholds=Thresholds()
     )
     stored = JsonlAnswerStore(path)
-    record = stored.by_request(registered_request_sha256(reg, state))
+    record = stored.by_request(registered_request_sha256(reg, state), None)
     assert record is not None
     assert record.answers["keep"]["noul"] == 0.9
     changed = replace(reg, questions={"keep": {"type": "noul", "instructions": "Does it fail?"}})
-    assert stored.by_request(registered_request_sha256(changed, state)) is None
+    assert stored.by_request(registered_request_sha256(changed, state), None) is None
 
 
 def test_unspecified_library_commit_does_not_use_the_callers_repository():

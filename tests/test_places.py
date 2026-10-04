@@ -22,6 +22,7 @@ from jev_navigator.directives.places import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
+from jev_navigator.judgments.relations import key_mention
 
 
 def committed_index(root: Path, files: Mapping[str, str]) -> CodeIndex:
@@ -148,7 +149,7 @@ def test_quoted_keys_are_searched_across_the_scope_including_docs_and_config(tmp
     mentions = {
         key.split(":")[0]
         for key, signature in offered.items()
-        if "mentions `max_items_per_order`" in signature
+        if key_mention("max_items_per_order") in signature
     }
     assert mentions == {"config.yaml", "README.md"}
 
@@ -169,7 +170,7 @@ def test_a_quoted_key_matches_whole_names_only(tmp_path: Path) -> None:
 
     # Assert
     mentions = {
-        key.split(":")[0] for key, signature in offered.items() if "mentions `invoice_day`" in signature
+        key.split(":")[0] for key, signature in offered.items() if key_mention("invoice_day") in signature
     }
     assert mentions == {"config.yaml"}
 
@@ -247,6 +248,90 @@ def test_the_default_moves_cannot_be_changed_by_a_caller() -> None:
 def offered_from(index: CodeIndex, file: str, line: int, per_kind: int = 8) -> list[Place]:
     opened = place_for_line(index, file, line, "start").open()
     return neighbours(index, opened, per_kind)
+
+
+BANNER = "/*!\n * library\n * MIT Licensed\n */\n\n'use strict';\n\n"
+
+
+@pytest.mark.parametrize(
+    ("files", "opened_at", "offered", "not_offered"),
+    [
+        pytest.param(
+            {
+                "index.js": BANNER + "module.exports = require('./lib/app');\n",
+                "lib/app.js": BANNER
+                + "var proto = {};\n\nmodule.exports = function createApplication() {};\n",
+            },
+            ("index.js", 8),
+            "`var proto = {};` (start of a module imported by index.js)",
+            None,
+            id="a-required-module-opens-at-its-first-line-of-code",
+        ),
+        pytest.param(
+            {
+                "src/jwt/index.ts": "export { verify } from './jwt'\n\n"
+                "declare module '..' {\n  interface Variables {}\n}\n",
+                "src/jwt/jwt.ts": "export const verify = (token: string) => token\n"
+                "export const sign = (payload: string) => payload\n",
+            },
+            ("src/jwt/index.ts", 4),
+            "src/jwt/jwt.ts:1 `export const verify = (token: string) => token` "
+            "(imported by src/jwt/index.ts)",
+            "export const sign",
+            id="a-re-exported-name-opens-its-definition-and-only-it",
+        ),
+        pytest.param(
+            {
+                "flask/__init__.py": '"""The package."""\n\nfrom .app import Flask as Flask\n',
+                "flask/app.py": "class Flask:\n    def run(self):\n        return self\n",
+            },
+            ("flask/__init__.py", 3),
+            "flask/app.py:1 `class Flask:` (imported by flask/__init__.py)",
+            None,
+            id="a-python-import-opens-the-imported-class",
+        ),
+        pytest.param(
+            {
+                "package.json": '{"imports": {"#money": "./src/money.js"}}',
+                "src/money.js": "export function cents() {\n  return 4;\n}\n",
+                "src/money.d.ts": "export declare function cents(): number;\n",
+                "src/index.js": 'export { cents } from "#money";\n',
+            },
+            ("src/index.js", 1),
+            "candidate: repository package.json mapping for #money, a declaration file",
+            None,
+            id="a-declaration-file-beside-its-javascript-is-only-a-candidate",
+        ),
+        pytest.param(
+            {
+                "app.js": "var helper = require('./helper');\n\nfunction handle() {\n  return 1;\n}\n",
+                "helper.js": "module.exports = function helper() {};\n",
+            },
+            ("app.js", 4),
+            None,
+            "imported by",
+            id="a-function-leaves-its-files-imports-to-module-level-code",
+        ),
+    ],
+)
+def test_module_level_code_offers_what_its_file_imports(
+    tmp_path: Path,
+    files: dict[str, str],
+    opened_at: tuple[str, int],
+    offered: str | None,
+    not_offered: str | None,
+) -> None:
+    # Arrange
+    index = committed_index(tmp_path, files)
+
+    # Act
+    signatures = [place.signature for place in offered_from(index, *opened_at)]
+
+    # Assert
+    if offered is not None:
+        assert any(offered in signature for signature in signatures), signatures
+    if not_offered is not None:
+        assert not any(not_offered in signature for signature in signatures), signatures
 
 
 def test_a_line_on_a_class_opens_the_class_so_code_naming_it_is_offered(tmp_path: Path) -> None:
@@ -329,6 +414,32 @@ def test_moves_start_from_a_window_inside_a_long_class(tmp_path: Path) -> None:
     assert "refers to CreateOrder as collection" in offered["schema.py:3-3"]
 
 
+def test_uses_proven_to_reach_another_definition_of_the_name_are_not_offered(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "archive.py": "def handler(event):\n    return event\n",
+            "jobs.py": "def handler(event):\n    return None\n",
+            "wiring.py": "from jobs import handler\n\n\ndef run(event):\n    return handler(event)\n\n\n"
+            "def wire(bus):\n    bus.on(handler)\n",
+        },
+    )
+    handlers = {span.file: span for span in index.find_definition("handler")}
+    moves = {name: MOVES[name] for name in ("callers", "referenced_by")}
+
+    # Act
+    from_archive = neighbours(index, index.read_slice(handlers["archive.py"]), moves=moves)
+    from_jobs = neighbours(index, index.read_slice(handlers["jobs.py"]), moves=moves)
+
+    # Assert
+    assert from_archive == []
+    assert [place.signature.split("` ")[1] for place in from_jobs] == [
+        "(calls handler)",
+        "(refers to handler as argument)",
+    ]
+
+
 def test_callees_called_from_few_places_come_first(tmp_path: Path) -> None:
     # Arrange
     helpers = "".join(f"def helper_{number}(value):\n    return value\n\n\n" for number in range(9))
@@ -350,6 +461,34 @@ def test_callees_called_from_few_places_come_first(tmp_path: Path) -> None:
     callees = [signature.split("`")[1] for signature in offered.values() if "called by handle" in signature]
     assert callees[0] == "def save_event(event):"
     assert len(callees) == 10
+
+
+def test_a_callee_with_no_definition_is_never_counted_when_callees_are_ranked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: handle calls one defined helper and one name defined nowhere in scope
+    index = committed_index(
+        tmp_path,
+        {
+            "helpers.py": "def save_event(event):\n    return event\n",
+            "handler.py": "def handle(event):\n    undefined_logger(event)\n    return save_event(event)\n",
+        },
+    )
+    counted: list[str] = []
+    real_count = index.call_site_count
+
+    def recorded_count(name: str) -> int:
+        counted.append(name)
+        return real_count(name)
+
+    monkeypatch.setattr(index, "call_site_count", recorded_count)
+
+    # Act
+    offered = neighbour_signatures(index, "handle")
+
+    # Assert: it yields no place, so counting its call sites is wasted work
+    assert any("def save_event(event):" in signature for signature in offered.values())
+    assert "undefined_logger" not in counted
 
 
 def test_an_anonymous_handler_offers_proven_callees_before_test_only_candidates(
@@ -444,6 +583,32 @@ def test_an_anonymous_callback_offers_its_named_containing_function(tmp_path: Pa
     assert "in the same file as orders.ts:" in offered[0].signature
 
 
+def test_a_callback_inside_a_test_callback_offers_that_test_first(tmp_path: Path) -> None:
+    """Test callbacks are anonymous, so a callback nested in one has no named container: the
+    same-file move offers its nearest container, the test it belongs to, before the other tests."""
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "orders.test.ts": (
+                'it("rejects an empty cart", () => {\n'
+                "  expect(() => placeOrder([])).toThrow();\n"
+                "});\n"
+                'it("accepts one item", () => {\n'
+                "  expect(placeOrder([1])).toBe(1);\n"
+                "});\n"
+            )
+        },
+    )
+    inner = next(span for span in index.functions_in("orders.test.ts") if span.start == span.end == 2)
+
+    # Act
+    offered = neighbours(index, index.read_slice(inner), moves={"same_file": MOVES["same_file"]})
+
+    # Assert
+    assert [place.key for place in offered] == ["orders.test.ts:1-3", "orders.test.ts:4-6"]
+
+
 def test_a_constant_used_as_a_method_receiver_is_passed_on(tmp_path: Path) -> None:
     # Arrange
     index = committed_index(
@@ -458,7 +623,7 @@ def test_a_constant_used_as_a_method_receiver_is_passed_on(tmp_path: Path) -> No
     offered = neighbour_signatures(index, "redact")
 
     # Assert
-    assert "passed on by redact as receiver" in offered["redaction.py:3-3"]
+    assert offered["redaction.py:3-3"].endswith("(passed on by redact as receiver)")
 
 
 def numbered_functions(count: int) -> str:

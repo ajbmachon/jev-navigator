@@ -8,9 +8,8 @@ ERROR nodes, so incomplete coverage stays visible."""
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 
 LANGUAGE_BY_SUFFIX = {
     ".py": "python",
@@ -24,43 +23,79 @@ LANGUAGE_BY_SUFFIX = {
     ".jsx": "javascript",
 }
 
+_SCRIPT_FUNCTIONS = (
+    "function_declaration",
+    "generator_function_declaration",
+    "method_definition",
+    "arrow_function",
+    "function_expression",
+    "generator_function",
+)
+
 FUNCTION_KINDS = {
     "python": ("function_definition",),
-    "typescript": ("function_declaration", "method_definition", "arrow_function", "function_expression"),
-    "tsx": ("function_declaration", "method_definition", "arrow_function", "function_expression"),
-    "javascript": ("function_declaration", "method_definition", "arrow_function", "function_expression"),
+    "typescript": _SCRIPT_FUNCTIONS,
+    "tsx": _SCRIPT_FUNCTIONS,
+    "javascript": _SCRIPT_FUNCTIONS,
 }
 
 CLASS_KINDS = {
     "python": ("class_definition",),
-    "typescript": ("class_declaration",),
-    "tsx": ("class_declaration",),
-    "javascript": ("class_declaration",),
+    "typescript": ("class_declaration", "abstract_class_declaration", "class"),
+    "tsx": ("class_declaration", "abstract_class_declaration", "class"),
+    "javascript": ("class_declaration", "class"),
 }
 
-_SCRIPT_DECLARATIONS = """  any:
+# A function or class expression is called by the name that holds it: `const save = function
+# inner() {}` is called as `save`. So an expression is named by the declarator, class field, object
+# key or assignment it is the value of, looking through the grammar's parentheses and type casts,
+# and only then by its own name. A callback passed as an argument, `it("works", () => ...)`, is held
+# by no name and stays anonymous. Each grammar lists only the node kinds it has: one unknown kind
+# makes ast-grep reject the whole scan. The tables are keyed by grammar, see ``grammar_of``.
+EXPRESSION_KINDS = frozenset({"arrow_function", "function_expression", "generator_function", "class"})
+_SCRIPT_HOLDERS = (
+    ("variable_declarator", "name"),
+    ("public_field_definition", "name"),
+    ("pair", "key"),
+    ("assignment_expression", "left"),
+)
+NAME_HOLDERS = {
+    "python": (),
+    "typescript": _SCRIPT_HOLDERS,
+    "tsx": _SCRIPT_HOLDERS,
+    "javascript": (
+        ("variable_declarator", "name"),
+        ("field_definition", "property"),
+        ("pair", "key"),
+        ("assignment_expression", "left"),
+    ),
+}
+_TSX_WRAPPERS = ("parenthesized_expression", "as_expression", "satisfies_expression", "non_null_expression")
+NAME_WRAPPERS = {
+    "python": (),
+    "typescript": (*_TSX_WRAPPERS, "type_assertion"),
+    "tsx": _TSX_WRAPPERS,
+    "javascript": ("parenthesized_expression",),
+}
+
+# ast-grep prints every node a rule's relations match, so asking whether a declaration sits in the
+# program printed the whole file once per declaration. Under a double negation the condition holds
+# the same and only the declaration is printed.
+_MODULE_VARIABLES = (
+    "{kind: lexical_declaration, not: {not: {inside: {any: [{kind: program}, {kind: export_statement}]}}}}"
+)
+_SCRIPT_DECLARATIONS = f"""  any:
     - kind: type_alias_declaration
     - kind: interface_declaration
     - kind: enum_declaration
-    - kind: lexical_declaration
-      inside:
-        any:
-          - kind: program
-          - kind: export_statement"""
+    - {_MODULE_VARIABLES}"""
 
 DECLARATION_RULES = {
     "python": """  kind: assignment
-  inside:
-    kind: expression_statement
-    inside:
-      kind: module""",
+  not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}""",
     "typescript": _SCRIPT_DECLARATIONS,
     "tsx": _SCRIPT_DECLARATIONS,
-    "javascript": """  kind: lexical_declaration
-  inside:
-    any:
-      - kind: program
-      - kind: export_statement""",
+    "javascript": f"  any: [{_MODULE_VARIABLES}]",
 }
 
 # The installed ast-grep supports tsx but not Flow. Route marked files through tsx;
@@ -84,34 +119,38 @@ def grammar_of(language: str) -> str:
 _DECLARED_NAME = re.compile(
     r"^\s*(?:export\s+)?(?:declare\s+)?(?:(?:type|interface|enum|const|let|var)\s+)?(\w+)"
 )
-
-_NAME_PATTERNS = (
-    re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+(\w+)"),
-    re.compile(r"^\s*(?:async\s+)?def\s+(\w+)"),
-    re.compile(r"\bfunction\s*\*?\s*(\w+)"),
-    re.compile(r"\b(?:const|let|var)\s+(\w+)\s*(?::[^=]+)?=\s*(?:async\s+)?(?:function\b|\()"),
-    re.compile(r"^\s*(?:public\s+|private\s+|protected\s+|static\s+|async\s+|get\s+|set\s+)*(\w+)\s*\("),
-    re.compile(r"(\w+)\s*[:=]\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>)"),
-)
+_SCRIPT_VALUE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:const|let)\s+(?!enum\b)[A-Za-z_$]")
+_SCRIPT_TYPE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:type|interface)\s+[A-Za-z_$]")
 
 
 def language_of(path: str) -> str | None:
-    return LANGUAGE_BY_SUFFIX.get(PurePosixPath(path).suffix)
+    """The language of ``path``'s suffix, read from the string because the index asks for every
+    file many times: a name's last dot after its first character starts the suffix."""
+    name = path.rpartition("/")[2]
+    dot = name.rfind(".")
+    return LANGUAGE_BY_SUFFIX.get(name[dot:]) if dot > 0 else None
 
 
-def language_for(path: str, lines: Sequence[str] | None = None) -> str | None:
-    """The language ``path`` parses as: like ``language_of``, but a JavaScript file whose leading
-    comments carry the ``@flow`` pragma parses as ``flow`` (with the tsx grammar)."""
+def parse_language(path: str, content: bytes) -> str | None:
+    """The language a file holding ``content`` parses as: like ``language_of``, but a JavaScript file
+    whose leading comments carry the ``@flow`` pragma parses as ``flow`` (with the tsx grammar)."""
     language = language_of(path)
-    if language == "javascript" and lines is not None and has_flow_pragma(lines):
+    if language == "javascript" and has_flow_pragma(split_lines(content.decode(errors="replace"))):
         return FLOW_LANGUAGE
     return language
+
+
+def split_lines(text: str) -> tuple[str, ...]:
+    """Lines split at newlines only, as the parser counts them; ``str.splitlines`` also splits at form
+    feeds and other separators, which would shift every line number after them."""
+    lines = text.replace("\r", "").split("\n")
+    return tuple(lines[:-1] if lines and lines[-1] == "" else lines)
 
 
 _FLOW_PRAGMA = re.compile(r"@flow\b")
 
 
-def has_flow_pragma(lines: Sequence[str]) -> bool:
+def has_flow_pragma(lines: Iterable[str]) -> bool:
     """True when a leading comment of the source carries the ``@flow`` pragma. Only comments before
     the first line of code count — never ``@flow`` in a string or the body — and the scan stops at
     that first code line, however far down it sits: leading comments may be arbitrarily long. A
@@ -154,17 +193,16 @@ def declared_name(first_line: str) -> str:
     return match.group(1) if match else "<anonymous>"
 
 
-def function_name(first_line: str, line_before: str = "") -> str:
-    """The declared name on a function's first line, or on the line that assigns it."""
-    for candidate in (first_line, line_before):
-        for pattern in _NAME_PATTERNS:
-            match = pattern.search(candidate)
-            if match and match.group(1) not in _NOT_NAMES:
-                return match.group(1)
-    return "<anonymous>"
+def declares_type(first_line: str) -> bool:
+    """Whether a type can name what a module-level declaration declares: a type alias, interface or
+    enum, or a Python assignment (which may be a type alias), but not a script constant or variable."""
+    return not _SCRIPT_VALUE_DECLARATION.match(first_line)
 
 
-_NOT_NAMES = frozenset({"if", "for", "while", "switch", "catch", "return", "function", "async"})
+def declares_value(first_line: str) -> bool:
+    """Whether a value can name what a module-level declaration declares: a script constant, variable
+    or enum, or a Python assignment, but not a script type alias or interface."""
+    return not _SCRIPT_TYPE_DECLARATION.match(first_line)
 
 
 @dataclass(frozen=True)
@@ -253,15 +291,39 @@ REFERENCE_ROLES = {
 REFERENCE_ROLES[FLOW_LANGUAGE] = _TYPED_SCRIPT_ROLES
 
 
+_EXPORT = "{field: declaration, kind: export_statement}"
+_AMBIENT_EXPORT = f"{{kind: ambient_declaration, inside: {_EXPORT}}}"
+_VARIABLES = "[{kind: lexical_declaration}, {kind: variable_declaration}]"
+_EXPORTED_NAME = f"""  inside:
+    field: name
+    any:
+      - inside: {{field: declaration, kind: export_statement, not: {{has: {{regex: '^default$'}}}}}}
+      - kind: variable_declarator
+        inside: {{any: {_VARIABLES}, inside: {_EXPORT}}}"""
+_TYPED_EXPORTED_NAME = f"""{_EXPORTED_NAME}
+      - inside: {_AMBIENT_EXPORT}
+      - kind: variable_declarator
+        inside: {{any: {_VARIABLES}, inside: {_AMBIENT_EXPORT}}}"""
+# The name node of each declaration an ``export`` statement makes, one match per name, so the
+# declaration's body (a nested function, a template literal) never names the export. A default
+# export has no name of its own.
+EXPORTED_NAMES = {
+    "typescript": f"  any: [{{kind: identifier}}, {{kind: type_identifier}}]\n{_TYPED_EXPORTED_NAME}",
+    "tsx": f"  any: [{{kind: identifier}}, {{kind: type_identifier}}]\n{_TYPED_EXPORTED_NAME}",
+    "javascript": f"  kind: identifier\n{_EXPORTED_NAME}",
+}
+
+
 def export_rules(languages: Iterable[str]) -> str:
-    """ast-grep rules for the script export surface: statement nodes, and the ``{ ... }`` clause
-    specifiers that carry aliased names. Python has no such kinds, so it contributes no rules."""
+    """ast-grep rules for the script export surface: the names exported declarations make, and the
+    ``{ ... }`` clause specifiers that carry aliased names. Python has no such kinds, so it
+    contributes no rules."""
     documents = []
     for language in languages:
         if language == "python":
             continue
         grammar = grammar_of(language)
-        documents.append(f"id: export_surface\nlanguage: {grammar}\nrule:\n  kind: export_statement")
+        documents.append(f"id: export_surface\nlanguage: {grammar}\nrule:\n{EXPORTED_NAMES[grammar]}")
         documents.append(f"id: export_specifier\nlanguage: {grammar}\nrule:\n  kind: export_specifier")
     return "\n---\n".join(documents)
 

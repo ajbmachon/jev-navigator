@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from git_repos import commit_all, git
+from git_repos import commit_all, git, write_files
 
 from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError, UnsafePathError
 from jev_navigator.index.spans import Span, TextHit
@@ -364,6 +364,113 @@ def test_references_in_lists_the_names_a_function_passes_on_without_calling(
     assert "scheduler" not in {ref.name for ref in references}
 
 
+PASSED_MEMBER_PY = """\
+def handler(event):
+    return event
+
+
+class Client:
+    def send(self, bus):
+        bus.on(self.handler)
+        bus.on(handler)
+        bus.on(handler, self.handler)
+"""
+
+PASSED_MEMBER_TS = """\
+function handler(event) {
+  return event;
+}
+
+class Client {
+  send(bus) {
+    bus.on(this.handler);
+    bus.on(handler);
+    bus.on(handler, this.handler);
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "function"),
+    [
+        ("client.py", PASSED_MEMBER_PY, Span("client.py", 1, 2, "handler")),
+        ("client.ts", PASSED_MEMBER_TS, Span("client.ts", 1, 3, "handler")),
+    ],
+    ids=["python", "typescript"],
+)
+def test_a_passed_member_is_a_candidate_while_a_passed_function_is_resolved(
+    tmp_path: Path, file: str, source: str, function: Span
+) -> None:
+    """`bus.on(self.handler)` passes an attribute of `self`, not the function `handler` defined in the
+    same file: it is bound like a method call on an unknown receiver. A line passing both stands as the
+    plain name, as a plain call does for callers. Persisted facts keep the receiver too."""
+    # Arrange
+    (tmp_path / file).write_text(source)
+    cache = tmp_path / "cache"
+
+    for _ in range(2):  # Fresh parser facts, then the persisted ones.
+        # Act
+        index = CodeIndex(tmp_path, [file], fact_cache_dir=cache)
+        references = index.find_references("handler")
+
+        # Assert
+        assert [(ref.line, ref.binding.status, ref.binding.target) for ref in references] == [
+            (7, "candidate", None),
+            (8, "resolved", function),
+            (9, "resolved", function),
+        ]
+
+
+PASSED_MEMBER_CONSTANT_PY = """\
+TIMEOUT = 5
+
+
+class Client:
+    def send(self, bus):
+        bus.wait(self.TIMEOUT)
+        bus.wait(TIMEOUT)
+"""
+
+PASSED_MEMBER_CONSTANT_TS = """\
+const TIMEOUT = 5;
+
+class Client {
+  send(bus) {
+    bus.wait(this.TIMEOUT);
+    bus.wait(TIMEOUT);
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "constant", "member_line"),
+    [
+        ("client.py", PASSED_MEMBER_CONSTANT_PY, Span("client.py", 1, 1, "TIMEOUT"), 6),
+        ("client.ts", PASSED_MEMBER_CONSTANT_TS, Span("client.ts", 1, 1, "TIMEOUT"), 5),
+    ],
+    ids=["python", "typescript"],
+)
+def test_a_passed_member_is_a_candidate_while_a_passed_constant_is_resolved(
+    tmp_path: Path, file: str, source: str, constant: Span, member_line: int
+) -> None:
+    """`bus.wait(self.TIMEOUT)` passes an attribute of `self`, not the module constant `TIMEOUT`: an
+    argument can name a constant, but a member argument is bound like a method call on an unknown
+    receiver. The bare `TIMEOUT` on the next line is proven by the same-file definition."""
+    # Arrange
+    (tmp_path / file).write_text(source)
+
+    # Act
+    references = CodeIndex(tmp_path, [file]).find_references("TIMEOUT")
+
+    # Assert
+    assert [(ref.line, ref.binding.status, ref.binding.target) for ref in references] == [
+        (member_line, "candidate", None),
+        (member_line + 1, "resolved", constant),
+    ]
+
+
 USES_PY = """\
 from app.rules import ALLOWED, PATTERN, Store
 
@@ -450,6 +557,191 @@ def test_a_function_passes_on_the_names_on_its_first_line(tmp_path: Path) -> Non
 
     # Assert
     assert [(ref.name, ref.line, ref.role) for ref in references] == [("Answer", 3, "type")]
+
+
+@pytest.mark.parametrize(
+    ("files", "holder", "declaration"),
+    [
+        pytest.param(
+            {
+                "hmr.ts": "interface PropagationBoundary {\n  boundary: string\n}\n\n"
+                "export function propagateUpdate(boundaries: PropagationBoundary[]): boolean {\n"
+                "  return boundaries.length > 0\n}\n"
+            },
+            "propagateUpdate",
+            Span("hmr.ts", 1, 3, "PropagationBoundary"),
+            id="interface",
+        ),
+        pytest.param(
+            {
+                "modes.ts": 'export const Mode = { Full: "full" } as const;\n'
+                "export type Mode = (typeof Mode)[keyof typeof Mode];\n\n"
+                "export function reload(mode: Mode) {\n  return mode;\n}\n"
+            },
+            "reload",
+            Span("modes.ts", 2, 2, "Mode"),
+            id="type-alias-named-like-a-constant",
+        ),
+        pytest.param(
+            {
+                "items.py": 'from typing import TypeVar\n\nItem = TypeVar("Item")\n\n\n'
+                "def first(items: list[Item]):\n    return items[0]\n"
+            },
+            "first",
+            Span("items.py", 3, 3, "Item"),
+            id="python-type-alias",
+        ),
+    ],
+)
+def test_a_type_reference_binds_to_the_declaration_it_names(
+    tmp_path: Path, files: dict[str, str], holder: str, declaration: Span
+) -> None:
+    # Arrange
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files))
+
+    # Act
+    references = index.references_in(index.find_definition(holder)[0])
+
+    # Assert
+    assert [(ref.name, ref.role, ref.binding.status, ref.binding.target) for ref in references] == [
+        (declaration.name, "type", "resolved", declaration)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("files", "name", "expected"),
+    [
+        pytest.param(
+            {
+                "redaction.py": 'import re\n\nSECRET_PATTERN = re.compile(r"key=\\w+")\n\n\n'
+                'def redact(text):\n    return SECRET_PATTERN.sub("key=[hidden]", text)\n'
+            },
+            "SECRET_PATTERN",
+            [(7, "receiver", Span("redaction.py", 3, 3, "SECRET_PATTERN"))],
+            id="receiver",
+        ),
+        pytest.param(
+            {
+                "limits.ts": "export const MAX_ITEMS = 50;\n\n"
+                "export function clamp(items: string[]) {\n"
+                "  if (items.length > MAX_ITEMS) {\n    return items.slice(0, MAX_ITEMS);\n  }\n"
+                "  return items;\n}\n"
+            },
+            "MAX_ITEMS",
+            [
+                (4, "condition", Span("limits.ts", 1, 1, "MAX_ITEMS")),
+                (5, "argument", Span("limits.ts", 1, 1, "MAX_ITEMS")),
+            ],
+            id="condition-and-argument",
+        ),
+        pytest.param(
+            {
+                "modes.ts": 'export const Mode = { Full: "full" } as const;\n'
+                "export type Mode = (typeof Mode)[keyof typeof Mode];\n\n"
+                "export function isFull(mode: Mode) {\n  return mode === Mode.Full;\n}\n"
+            },
+            "Mode",
+            [(4, "type", Span("modes.ts", 2, 2, "Mode")), (5, "receiver", Span("modes.ts", 1, 1, "Mode"))],
+            id="value-and-type-named-alike",
+        ),
+        pytest.param(
+            {
+                "cache.py": "import functools\n\ncached = functools.lru_cache(maxsize=None)\n\n\n"
+                "@cached\ndef load(path):\n    return path\n"
+            },
+            "cached",
+            [(6, "decorator", Span("cache.py", 3, 3, "cached"))],
+            id="decorator",
+        ),
+        pytest.param(
+            {"options.ts": "interface Options {\n  strict: boolean\n}\n\nexport { Options };\n"},
+            "Options",
+            [(5, "export", Span("options.ts", 1, 3, "Options"))],
+            id="export-of-an-interface",
+        ),
+    ],
+)
+def test_a_non_call_reference_binds_to_the_declaration_it_names(
+    tmp_path: Path, files: dict[str, str], name: str, expected: list[tuple[int, str, Span]]
+) -> None:
+    # Arrange
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files))
+
+    # Act
+    references = index.find_references(name)
+
+    # Assert
+    assert [(ref.line, ref.role, ref.binding.status, ref.binding.target) for ref in references] == [
+        (line, role, "resolved", declaration) for line, role, declaration in expected
+    ]
+
+
+@pytest.mark.parametrize(
+    ("files", "name", "site", "declaration"),
+    [
+        pytest.param(
+            {
+                "dispatch.py": 'from handlers import make_handler\n\nhandle = make_handler("orders")\n\n\n'
+                "def dispatch(event):\n    return handle(event)\n"
+            },
+            "handle",
+            ("dispatch.py", 7),
+            Span("dispatch.py", 3, 3, "handle"),
+            id="same-file",
+        ),
+        pytest.param(
+            {
+                "client.ts": "export const request = createClient({ retries: 3 });\n",
+                "orders.ts": 'import { request } from "./client";\n\n'
+                'export function loadOrders() {\n  return request("/orders");\n}\n',
+            },
+            "request",
+            ("orders.ts", 4),
+            Span("client.ts", 1, 1, "request"),
+            id="imported",
+        ),
+        pytest.param(
+            {
+                "css.ts": "function createCssContext() {\n"
+                '  const Style = () => "style";\n  return { Style };\n}\n\n'
+                "export const Style = createCssContext().Style;\n",
+                "page.ts": 'import { Style } from "./css";\n\n'
+                "export function page() {\n  return Style();\n}\n",
+            },
+            "Style",
+            ("page.ts", 4),
+            Span("css.ts", 6, 6, "Style"),
+            id="imported-past-a-nested-function",
+        ),
+        pytest.param(
+            {
+                "compose.ts": "export const compose = <T>(value: T): T => {\n  return value;\n};\n",
+                "app.ts": 'import { compose } from "./compose";\n\n'
+                "export function run() {\n  return compose(1);\n}\n",
+            },
+            "compose",
+            ("app.ts", 4),
+            Span("compose.ts", 1, 3, "compose"),
+            id="imported-generic-arrow",
+        ),
+    ],
+)
+def test_a_call_binds_to_the_module_constant_it_names(
+    tmp_path: Path, files: dict[str, str], name: str, site: tuple[str, int], declaration: Span
+) -> None:
+    # Arrange
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files))
+
+    # Act
+    callers = index.find_callers(name)
+
+    # Assert
+    assert [(call.file, call.line, call.binding.status, call.binding.target) for call in callers] == [
+        (*site, "resolved", declaration)
+    ]
 
 
 def test_a_one_line_function_calls_what_its_first_line_calls(sample_index: CodeIndex) -> None:
@@ -613,3 +905,32 @@ def test_a_scope_path_that_leaves_the_root_is_refused(tmp_path: Path, scope_path
     # Act and assert
     with pytest.raises(UnsafePathError, match=scope_path.replace(".", r"\.")):
         CodeIndex(root, [scope_path])
+
+
+def test_top_level_symbols_are_the_functions_and_classes_no_other_symbol_contains(
+    sample_index: CodeIndex,
+) -> None:
+    top_level = [span.name for span in sample_index.top_level_symbols("app/orders.py")]
+
+    assert top_level == ["OrderService", "cancel"]
+    assert "place" in [span.name for span in sample_index.symbols_in("app/orders.py")]
+
+
+def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: Path) -> None:
+    (tmp_path / "notices.tsx").write_text("export function LoadFailed() {\n  return <p>Not loaded</p>;\n}\n")
+    (tmp_path / "basket.tsx").write_text(
+        'import { LoadFailed } from "./notices";\n'
+        "export function Basket() {\n"
+        "  return <div><LoadFailed /></div>;\n"
+        "}\n"
+        "export function Page() {\n"
+        "  return <ui.Frame><LoadFailed>x</LoadFailed></ui.Frame>;\n"
+        "}\n"
+    )
+    index = CodeIndex(tmp_path, ("notices.tsx", "basket.tsx"), fact_cache_dir=tmp_path / "cache")
+
+    calls = [(site.file, site.line, site.caller.name) for site in index.find_callers("LoadFailed")]
+
+    assert calls == [("basket.tsx", 3, "Basket"), ("basket.tsx", 6, "Page")]
+    assert [site.line for site in index.find_callers("Frame")] == [6]
+    assert index.find_callers("div") == ()

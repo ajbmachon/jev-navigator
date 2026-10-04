@@ -1,7 +1,9 @@
 """Rebuild a stored batched request from the repository at its commit, and prove it is the same one.
 
-The store never keeps client code. It keeps the question wording, the non-code fields of each item
-(file, lines, commit), and hashes of the code and of the shared state. ``rebuild_request`` re-reads
+Without ``keep_requests`` the store keeps no client code: the question wording, each item's ids,
+locations, hashes and names, and hashes of the code and of the shared state. A field that can
+quote code (a Trace link line, a Find signature) is withheld, so such a request no longer
+rebuilds exactly; the mismatch then names the withheld fields first. ``rebuild_request`` re-reads
 each item's code from an index at that commit, adds the shared state the caller supplies, masks it
 as the judge did (a value hidden anywhere in the request is hidden everywhere), and compares the
 request hash with the stored one; when they differ it says which part changed.
@@ -48,7 +50,7 @@ def rebuild_request(
         state, questions, _ = mask_request(state, questions, masker)
     rebuilt_hash = request_sha256(state, questions)
     matches = rebuilt_hash == record.request_sha256
-    differences = () if matches else _differences(skeleton, state)
+    differences = () if matches else (*_withheld(skeleton), *_differences(skeleton, state))
     return RebuiltRequest(state, questions, rebuilt_hash, matches, differences)
 
 
@@ -56,6 +58,11 @@ def _item(index: CodeIndex, fields: Mapping) -> dict:
     first, last = fields["lines"]
     code = index.read_slice(Span(fields["file"], first, last)).text
     return {**fields, CODE_FIELD: code}
+
+
+def _withheld(skeleton: Mapping) -> tuple[str, ...]:
+    withheld = skeleton.get("withheld_fields")
+    return (f"item fields withheld from the store: {', '.join(withheld)}",) if withheld else ()
 
 
 def _differences(skeleton: Mapping, state: Mapping) -> tuple[str, ...]:

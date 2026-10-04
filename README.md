@@ -30,7 +30,7 @@ jvn help trace
 ```
 
 Trace follows static relationships and batches atomic evidence judgments. It preserves uncertain
-bindings, partial coverage and request evidence in `./jvn-results/`. A positive judgment is evidence,
+bindings, partial coverage and request evidence in its [run folder](#where-jvn-keeps-runs-and-caches). A positive judgment is evidence,
 not proof of a complete path. Use `find` first if the starting function is unknown.
 See [trace options and outputs](docs/cli.md#workflow-trace).
 
@@ -46,10 +46,10 @@ jvn schema findall
 `find` locates an implementation; `findall` finds a seed, examines related functions, then checks
 remaining function bodies for disconnected implementations. It uses batched Jev judgments and
 defaults to 48 live model calls (twice `find`); `--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
-`./jvn-results/` directory. `functions_examined` describes coverage of function bodies, not a proof
+[run folder](#where-jvn-keeps-runs-and-caches). `functions_examined` describes coverage of function bodies, not a proof
 of semantic equivalence or completeness across arbitrary code fragments. Uncertain answers and
 unreadable or unsupported source stay visible. At a call stop, the terminal offers another allowance.
-For a later invocation or an agent pipeline, pass `--resume ./jvn-results/previous-pack` with the same
+For a later invocation or an agent pipeline, pass `--resume` with the folder the earlier run printed, and the same
 Find All query and scope. Completed judgments and the seed are retained; only unfinished work spends
 new model calls.
 
@@ -84,8 +84,9 @@ jvn find "the check that limits how many items an order may have"
 In a terminal, reaching the call budget offers another allowance without losing the saved search.
 JSON and piped commands return partial results without prompting; continue them with `--resume`.
 
-That is enough. `jvn` chooses an entry point and creates a unique evidence pack under
-`./jvn-results/`. It works with uncommitted changes and ordinary directories outside Git.
+That is enough. `jvn` chooses an entry point and creates a unique evidence pack in its
+[run folder](#where-jvn-keeps-runs-and-caches), never inside your project. It works with uncommitted
+changes and ordinary directories outside Git.
 `find` follows code relationships to locate a match; it does not promise every matching function
 or a complete end-to-end trace.
 
@@ -96,9 +97,17 @@ jvn find "where do we reject evidence quotes that are absent from the source?" -
 ```
 
 Explicit `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` process values win independently. Otherwise
-`jvn` reads those settings from `~/.config/jvn/env` with a dotenv parser; it does not execute that
-file or print the values. `TYPESAFE_BASE_URL` is the API root before `/v1/systemone`, such as
-`http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
+`jvn` reads those settings from `~/.config/jvn/env`, a file in dotenv syntax that it parses itself;
+it does not execute that file or print the values. `TYPESAFE_BASE_URL` is the API root before
+`/v1/systemone`, such as `http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
+
+When its code runs from a jev-navigator source checkout (`uv run jvn` there, or an editable
+install), `jvn` first fills what is missing from that checkout's `.env` (see `.env.example`). Any
+install into site-packages (`uv tool install`, `pipx`, a non-editable `pip install`) reads no
+`.env`, and when the directory it runs in holds one, it says on stderr that it did not read it. It
+never reads a `.env` from the directory or repository it searches. A settings file can set only
+`jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
+other name it ignores, never its value.
 
 ### JSON input for agents and pipelines
 
@@ -122,8 +131,8 @@ Or send the same request on stdin:
 printf '%s\n' '{"target":"the check that limits how many items an order may have"}' | jvn --json -
 ```
 
-`command` defaults to `find`, `repo` defaults to the current directory, and output goes to
-`./jvn-results/` unless you supply `out`. JSON mode prints one result object on stdout with
+`command` defaults to `find`, `repo` defaults to the current directory, and output goes to a new
+[run folder](#where-jvn-keeps-runs-and-caches) unless you supply `out`. JSON mode prints one result object on stdout with
 `output_directory`, `manifest`, `report`, `search` and `provider`. Progress and errors stay on stderr.
 For example, pipe the command's output to `jq '.search.found'` to read the matching source spans.
 The report and manifest paths refer to the saved evidence pack. Failed invocations return a nonzero
@@ -177,15 +186,58 @@ An explicitly selected output directory must be new or empty. Each evidence pack
 
 - `manifest.json`: schema version, navigator build fingerprint and source revision, inspected
   repository revision, explicit budget and thresholds, requested and served model, elapsed time,
-  versioned code spans, raw probabilities, full search history, uninspected frontier, and unparsed
-  files.
-- `report.md`: a readable outcome, source table, found code, and coverage caveat.
+  versioned code locations (`path:start-end` with file hashes; neighbours as `path:line name`), raw
+  probabilities, full search history, uninspected frontier, and unparsed files.
+- `report.md`: a readable outcome, source table, found locations, and coverage caveat.
 - `journal.jsonl`: request hashes and exact provider responses as the run progresses.
-- `answers.jsonl`: reusable typed answers keyed by source and request hashes.
+- `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
+  written to the machine's shared answer store (`$XDG_CACHE_HOME/jev-navigator/answers-v2.sqlite`,
+  `~/.cache` when the variable is unset or relative, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
+  same questions replays from it after the live requests that learn the served model (one for Find
+  All and Trace, one per place a Find's first round opens, up to `--beam-width`; Find All and
+  Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
+  `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
+  `--answer-store PATH` points a run at another store file; each run prints the store it uses.
+- `resume.json` (budget-stopped or cancelled runs): the frontier as locations; Resume re-reads the
+  code from the unchanged repository.
 
-The manifest and report contain inspected source code. Keep packs for private repositories in a
-private artifact store; the repository includes only a small public-format sample under
+By default the manifest, report, journal and resume state hold no source code, only locations and
+hashes; a relation that quotes a mentioned key reads `mentions a key (path:line)`. `--keep-requests` (JSON `"keep_requests": true`) also keeps the code and full neighbour
+signatures in the manifest and report and the exact request text in the journal; use it only for
+your own or open-source code. The repository includes only a small public-format sample under
 [`examples/evidence-pack`](examples/evidence-pack).
+
+### Where JVN keeps runs and caches
+
+JVN never writes into the project it searches or the directory you start it in, unless you name a
+folder with `--out`. Without `--out`, a run's evidence pack goes to its own run folder,
+`$XDG_DATA_HOME/jev-navigator/runs/<directory>-<timestamp>` (`~/.local/share` when the variable is
+unset), and the run prints that path.
+
+Caches live in `$XDG_CACHE_HOME/jev-navigator` (`~/.cache` when unset): the fact cache (`facts/`), the
+name table (`names/`) and the shared answer store (`answers-v2.sqlite`). Caches are the data JVN
+values most, but only while they represent real files, so JVN cleans up after itself:
+
+- Facts or a name table another JVN version wrote, which this version can never read, go once no
+  JVN version has used them for 3 days. Versions in use side by side keep theirs. A default answer
+  store in an older layout holds paid-for answers, so it stays until unused for 30 days.
+- A cached file's facts or names go once no run has met that exact file content for 30 days.
+- An answer in the default shared store goes once no run has reused it for 30 days, with its item
+  answers and refusals. A store you name with `--answer-store` or `JEV_NAVIGATOR_ANSWER_STORE` keeps
+  every answer and is never touched; it must lie outside the cache folder, so a run naming a store
+  inside it stops with exit status 2.
+- A run folder goes 14 days after its run started, or 30 days while it can still be resumed (it holds
+  `resume.json`). A folder you name with `--out` is never touched.
+- Above the disk budget, 5 GB unless `JEV_NAVIGATOR_DISK_BUDGET` says otherwise (`750MB`, `20GB` or
+  plain bytes), the oldest run folders go first, then other versions' facts and name tables, then the
+  least recently confirmed facts and names, and answers last, older layouts first.
+
+Every `find`, `findall`, `trace` and `stats` run applies these rules as it ends, at most once a day,
+deleting at most 2,000 files per run; a failure to clean up is a notice on stderr and never fails the
+run, and Ctrl-C during the cleanup, which starts only once the run has ended, stops it with one
+notice and exit status 130. Nothing outside these two folders is ever deleted, and links are never followed.
+`jvn cache status` shows what each store holds and what each rule would remove; `jvn cache prune`
+applies every rule now.
 
 ## Layer 1: index, operations and comments (no model)
 
@@ -252,10 +304,17 @@ bindings stay `candidate`. Package `extends` and tsconfig `references` are not f
 package.json files are found in the folders that hold scope files. `CodeIndex.at_commit` brings the
 commit's tsconfig, jsconfig and package.json files along, outside the scope.
 `CodeIndex.imports()` and `dependents()` include suggested repository package paths for navigation,
-including source paths inferred from build output. A call reached through such a package mapping is
-`candidate`, with the package mapping named as its reason; it is not a proven target. Relative imports,
-Python imports and declared script-config paths keep their resolved bindings. Package redirects follow
-acyclic chains of any length and stop when a specifier repeats.
+including source paths inferred from build output. A package.json mapping proves a call only when both
+the package and the file are certain. The package is certain for a `#` import, a package's own name
+through its `exports`, or the only package of a name the importer depends on through a `workspace:`
+range; a `#` import or a dependency counts only when the importer's package.json is the nearest one on
+disk. The file is certain when every declared target that exists names it and it is not a declaration
+file. Any other package mapping (a version range that could install a published copy, a `workspace:`
+alias, a name several packages claim, targets that differ by condition, a `.d.ts` file, a source
+inferred from build output, a `#` target naming another `#` import) makes the call `candidate`, with
+the mapping named as its reason. Relative imports, Python imports and declared
+script-config paths keep their resolved bindings. Package redirects follow acyclic chains of any length
+and stop when a specifier repeats.
 File lists come from git with NUL separators, so
 names with non-ASCII characters enter the scope as they are on disk, and lines split at newlines only,
 as the parser counts them. A line that is not valid UTF-8 is read with its invalid bytes replaced, the
@@ -264,12 +323,40 @@ out of the root (through a linked directory or `..`), raises `UnsafePathError` w
 before any tool reads it.
 
 The index extracts symbols, declarations, calls and non-call references together in one ast-grep
-pass over the files a lookup actually needs. Exact-name lookups first use ripgrep to narrow the
-candidate files; opening a known span parses its file directly. The resulting per-file facts are
-cached by source bytes, language, ast-grep version and rule version, so a new index can reuse facts
-without treating changed source or changed parser rules as current. Each call site's binding is
-computed once. There is no default file-count refusal or parser timeout, and no requested file is
-silently omitted.
+pass. The pass runs a few hundred files per ast-grep process
+and turns each match into its fact as ast-grep prints it, so memory holds the facts, never the
+parser's output, and no command line outgrows the system's argument limit. Calls are ordered by
+where they start in the file, and of two calls starting at one place (`new Foo(a).bar()` and
+`new Foo(a)`) the outer comes first, so every run returns them in the same order; symbols spanning
+the same lines are ordered by name.
+Exact-name lookups (definitions, callers, call counts and references) read the persistent name table
+in `$XDG_CACHE_HOME/jev-navigator/names`, which ties every name to the lines it sits on in each file
+content. A file's content is identified by its git blob id, taken from the Git listing for a clean
+tracked file and hashed from its bytes otherwise (also when its bytes differ from the listed blob, as
+on a checkout that converts line endings), so a new index maps its files to table rows without
+reading them, and a warm lookup starts no text search and parses no file. The first name lookup of an
+index covers its whole scope: each file the table lacks is read from the fact cache, or parsed, and
+its rows are written. A changed file gets new rows under its new content, a file deleted before the
+first lookup answers none, one deleted later is reported unavailable and proves nothing, and a change
+to the parser or to any language's rules starts a new table. `definitions_in(file)` reads one file's
+definitions from the table. The table holds names and line numbers, never code. A file counts as read
+in a Find's counts only when navigation reached it, never because the table covered it. A call's or
+argument's receiver, in the table and in the cached facts alike, is kept only when it is a plain chain
+of names such as `this.store`; any other receiver (`client("k").fetch`, `cfg["token"].get`) is
+recorded as `<expression>`, so no string literal is ever stored. Opening a known span parses its file directly. ripgrep, which
+`search_text` runs, always runs with `--no-config`, so a `RIPGREP_CONFIG_PATH` file can neither
+change what the index sees nor run a preprocessor over the searched repository. The resulting
+per-file facts are cached by source bytes, language, ast-grep version, the rule text and the source
+of the code that runs ast-grep and reads its matches, in `$XDG_CACHE_HOME/jev-navigator/facts` (`~/.cache` when the
+variable is unset or relative), so a new index can reuse facts without treating changed source or changed
+parser rules as current. A file that changes on disk after the index first read it is
+reported as unavailable when the index reads it again, and its code still reads as the text the
+index first read, the text its SHA-256 names, never in its new form. The index keeps each file's
+first read compressed for the run, about 2 MB per 1,000 files of Heedvane's web app. Each call
+site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
+per argument for the life of the index. The index keeps the lines of a bounded number of recently
+read files (`LINE_CACHE_FILES`). There is no default file-count refusal or parser timeout, and no requested file is silently
+omitted.
 
 Before that pass, `.js` files whose leading comments (before any code, after an optional byte-order
 mark or shebang) carry the `@flow` pragma are separated from plain JavaScript. They ride on the tsx
@@ -281,23 +368,40 @@ ERROR nodes.
 
 The facts include grammar ERROR nodes. A language's parser may recover only part of such a file
 (a Flow-only construct, for example), so what it swallowed must not silently count as
-indexed; the symbols it did recover still count. Code in those files is unknown, not absent: a
-binding that may depend on them has status `unknown`, with the files in its reason. A completed
+indexed; the symbols it did recover still count. What it swallowed is unknown, not absent. The facts
+keep the lines each ERROR node spans, and a definition names what it defines, so only a name those
+lines mention can be hidden there: a call to such a name has status `unknown`, with the files in its
+reason, unless a definition in another file, not imported from one of them, settles it. A completed
 search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
 fact scans completed and which remain pending. A file that disappears after the working-directory
-inventory was built is reported separately as unavailable. Any ast-grep or ripgrep failure other
-than that verified disappearance still fails the lookup that triggered it.
+inventory was built, or changes after the index first read it, is reported separately as
+unavailable. So is a file too large to parse safely:
+`tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
+estimated parse peak (from the length of each line, `index/file_shape.py`) is over 250 MB, about
+70,000 bytes on one line. A large file that cannot be read to measure it is refused too, with the
+error. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
+peak and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
+searchable as text, it keeps its path in import relations (also as a re-export target), a name its
+bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
+`refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
+lookup that triggered it.
 
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
-`Binding(status, reason, target)`: `resolved` when a definition in the same file or an import naming
-it proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
+`Binding(status, reason, target)`: `resolved` when a module-level definition in the same file, or one
+an import names, proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
 definition elsewhere with no import), `unresolved` when nothing in scope defines it, and `unknown` when
-the definition may sit in a file the index could not parse. A host with a
-real resolver (a code-intelligence service, a TypeScript alias resolver, an LSP) passes it as
+the definition may sit in lines the index could not parse. References carry a binding too. A
+binding counts only the definitions its site can name: a type, a class or a declaration a type can
+name, such as an interface; an export, any definition; and a call or any other reference (an
+argument, receiver, condition or decorator), a function, class or declaration a value can name, such
+as a module constant. A host with a real resolver (a code-intelligence service, a TypeScript alias
+resolver, an LSP) passes it as
 `binding_resolver=`; its answer wins. Trace steps and search neighbours carry the binding, so a
 candidate edge is never presented as a proven call. Script constructor expressions such as `new
-MemoryAdapter()` are calls too. A bound method passed as an argument is indexed under its member name,
-so navigation can offer the method definition while keeping its name-only binding honest.
+MemoryAdapter()` are calls too. A bound method passed as an argument (`bus.on(self.handler)`) is
+indexed under its member name, so navigation can offer the method definition, and is bound like a
+method call on an unknown receiver: a function of that name in the same file or an import never
+proves it.
 
 Every `CodeSlice` records its source: `slice.source()` gives the file, line range, commit (with
 `+worktree` when the file had uncommitted changes) and how it was reached.
@@ -357,13 +461,18 @@ Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all
 `send`), such as a host's own orchestrator; a sync client also works there and runs in a worker
 thread. Both paths share one core: masking, the secret scan, the hash, the store lookup, the call
 budget, the journal and the recording are the same steps, and only the send differs (a direct call,
-or an awaited one). Batches of `check_each_async` and the places of each `find_code_async` round are
-sent with `asyncio.gather` — except that the first batch of a `check_each_async` whose served model
-is still unknown and which has an answer store goes out alone. Its live answer pins the served model,
-so the remaining batches can replay from the store exactly as the sequential path does. A sync method given an async client
-raises `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
+or an awaited one). Batches of `check_each_async` go out concurrently, at most
+`Judge(max_concurrency=N)` at once (default 16), and the places of each `find_code_async` round are
+sent with `asyncio.gather`; the first batch of a `check_each_async` whose served model is still
+unknown and which has an answer store goes out alone. Its live answer pins the served model, so the
+remaining batches can replay from the store. The sync `check_each`, `check_every` and their `iter_`
+forms send their batches on a thread pool under the same `max_concurrency` and first-batch rule; the `iter_` forms yield each batch as it completes. The
+call cap stays exact under concurrency, and after a failure or cancellation no batch sends a new
+request, while answers already received still yield. A sync method given an async client raises
+`TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
 
-Budgets: `judge.calls` counts requests sent (store hits are free). `Judge(max_calls=N)` caps a judge
+Budgets: `judge.calls` counts requests sent (store hits are free; `judge.replayed_answers` counts
+the answers the store gave instead). `Judge(max_calls=N)` caps a judge
 together with every `judge.scope()` made from it, and a scope counts its own calls; `find_code` runs
 on its own scope, so searches sharing one judge never use up each other's budget.
 
@@ -379,22 +488,41 @@ on its own scope, so searches sharing one judge never use up each other's budget
 - **Secrets.** `SecretMasker` masks private keys, token shapes, secret-named assignments and
   high-entropy assignments in every request, by content: a value hidden in one place is hidden
   everywhere in the request, for example where a relation text or another candidate quotes it.
-  The complete candidate set is masked before packing, so copied values stay hidden across batches.
+  The complete candidate set is masked once, before packing, so copied values stay hidden across
+  batches; the final scan still runs on every request before it is sent.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
   left in a key is refused too. Both are on by default; a host passes its own (a masker offers
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
-- **Answer store.** Every answer is stored with the served model and the thresholds in force. An
-  item answer is reused only when the item, the shared state, the question with its wording hash and
-  the served model all match; until the first live answer of a run the served model is unknown, and
+- **Batches.** A batched request carries at most `Judge(items_per_request=N)` items (default 16)
+  and closes early when the next item would not fit the size budget. Batches form over every item in
+  an order fixed by each unit's file and lines (by content for an item without them), so the same
+  units form the same batches whatever order a caller passes them in, and a request carries all
+  its batch mates even when some of their questions were answered before.
+- **Answer store.** Every answer is stored with the served model and the thresholds in force. Jev's
+  answer about one item changes with the other items in its request, so an item answer is reused
+  only when the item, its batch mates, the shared state, the question with its wording hash and the
+  served model all match. A route's refusal of an exact request for its input size is stored too, so
+  a replay splits that request again without sending it; until the first live answer of a run the served model is unknown, and
   unknown counts as a miss (or pass `served_model=`); with a store, a first `check_each_async` then sends its
   first batch alone, and the batches after that answer replay as usual. `ReplayOnlyClient` replays
   from the store and never calls Jev.
+  `JsonlAnswerStore` is one run's pack. `SqliteAnswerStore(path)` is one store shared by
+  every run on a machine, so a repeated run at the same commit asks nothing again but the requests
+  that learn the served model (one batch, or the places of a Find's first round). It never holds
+  code, state or question text: only hashes, unit locations, batch member ids, the batching rule and
+  size, the model, raw answers and timestamps. Each request records the day a run last stored or reused
+  it; the default store forgets a request unused for 30 days, and a store at a path you name keeps every
+  answer ([housekeeping](#where-jvn-keeps-runs-and-caches)).
+  `LayeredAnswerStore(pack, shared)` reads the pack first, copies every answer it finds only in the
+  shared store into the pack, and writes new answers to both, so the pack alone still replays the run.
 - **Journal, separate from the store.** Pass `journal=` (any object with `record_request(request) ->
   request_id`, `record_response(request_id, response)` and `record_failure(request_id, error,
   response)`). The judge records the masked request before dispatch and the raw response before
   parsing, as a `RawResponse(body, status, content_type, decoded)`: the body bytes as received, the HTTP
-  status and the content type. Transport errors and responses that fail to parse are recorded as
-  failures. Clients that offer `send` and `parse` return that `RawResponse`; the TypeSafe adapter
+  status, the content type and `input_tokens`, the count the provider reported or `null`; a missing
+  count is never written as 0, and the count is on the response line only. A replay from the store
+  sends nothing, is marked `from_store` and carries no count. Transport errors and responses that fail to
+  parse are recorded as failures. Clients that offer `send` and `parse` return that `RawResponse`; the TypeSafe adapter
   captures the exact bytes from its HTTP transport. A client that only parses is journaled with its
   decoded JSON and `exact=False`. `request_sha256` never includes the model; cache reuse checks the
   served model separately. A request holds code, and the library cannot know whose code it is, so
@@ -408,9 +536,11 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `record.sent_request()`, with a judge that has no store. `JsonlJournal(keep_request_text=True)`
   likewise keeps the body as handed to the client (`body_base64`) and the wire bytes when captured
   (`sent_body_base64`), and `export_for_review` keeps the order the request is sent in. By default the store keeps
-  hashes, question wording, and each item's file, lines and commit, so
-  `rebuild_request(record, CodeIndex.at_commit(...), shared)` can rebuild the exact request and prove
-  it matches, or name the part that differs.
+  hashes, question wording, and each item's ids, file, lines, commit and names, so
+  `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from the code at
+  that commit and proves it matches, or names the part that differs. A request whose items carried a
+  field that can quote code, such as a Trace link line or a Find signature, keeps that field withheld,
+  so it does not rebuild exactly; the mismatch then names the withheld fields first.
 
 ## Layer 3: directives
 
@@ -421,9 +551,12 @@ contain the code described in `target.description`?" and, per neighbour code lis
 callers in test files after the others; callees, proven production targets first and then the ones
 called from fewest places; code that
 refers to it or that it passes on without a call, as an argument, collection entry, assignment,
-decorator, export, return, method receiver or type; the other functions of its file, nearest
-first; lines anywhere in scope (docs and config too) that mention its environment variables or its
-quoted keys (six characters or more with a dot, underscore, colon, slash or dash), the
+decorator, export, return, method receiver or type; the modules it imports, re-exports or requires
+(module-level code takes its whole file's imports): the definitions of the names it takes from each,
+and the start of a module it takes whole or takes names from that it does not define itself; the
+other functions of its file, nearest first; lines anywhere in scope (docs and config too) that
+mention its environment variables or its quoted keys (six characters or more with a dot,
+underscore, colon, slash or dash), the
 rarest key first, skipping a key found on more than 30 lines; co-changed files; and the lines before and
 after it), whether the target could be inside it. Places that open the same lines of the same file are
 listed once, whatever move found them, and a place wholly inside the opened code is not listed;
@@ -431,7 +564,8 @@ identical code in two files stays two places. A line outside any function opens 
 module-level declaration when that has at most 120 lines; in a longer one it opens the window around the
 line under the definition's name. Either way the moves can follow that name. Callees and passed-on
 definitions are also offered from anonymous functions and windows. For an anonymous nested function,
-same-file navigation first offers the nearest named containing symbol. By default the finite,
+same-file navigation first offers the nearest named containing symbol, else the nearest containing
+one (a callback inside a test's callback offers that test). By default the finite,
 deduplicated frontier decides when the search is complete: depth, step, call and per-move neighbour
 limits are `None`. A caller can set any of those fields on `SearchBudget` when it has an explicit
 operational limit. Each round opens
@@ -444,22 +578,31 @@ Large openings split independent neighbour questions through the same Judge batc
 discarding candidates or previews. The global pick is optional: when its full request or option set
 exceeds provider capability, `open_first.unavailable` records why and individual neighbour scores
 still order the complete frontier. Every live sub-request counts toward the selected call allowance.
+Once the allowance has refused a request, the search keeps opening places only while the answer store
+still answers them; the first round that gets no answer at all ends the search as `budget`, and the
+places it did not open stay in `not_inspected` for Resume.
 Only HTTP 400 with `detail.error_type` equal to `max_tokens_exceeded` is a size refusal;
 mentions of that text in question IDs or unrelated error messages do not trigger splitting.
 A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code
-is not there. The search ends as `nothing_left` when no start or pick waits and no neighbour scores
-above the no bar (0.20 by default). A start place is judged but never ends the search as found, because
+is not there. The search runs out of places when no start or pick waits and no neighbour scores
+above the no bar (0.20 by default). It then ends as `nothing_left` only if its own moves parsed every
+code file in scope without a grammar error; otherwise it ends as `scope_incomplete`. The remaining
+files are never parsed just to choose the label. Of `FindResult.code_files`, `files_judged` counts the
+files in which Jev judged code (the opened places, not whole files) and `files_read` adds the files
+read only to list neighbours; the CLI prints all three, for example `scope_incomplete (not found: Jev
+judged code in 1 of 7 files; 4 more were read only to list links; 2 never reached)`. A start place is judged but never ends the search as found, because
 the caller already had it; `FindResult.starts` keeps each start with its verdict. Each neighbour's
 signature names its file and lines: a function quotes its first line; a window around a call, reference
 or key outside any function gives its line range and quotes that line; a stretch chosen by position (the
-lines before or after, the start of a co-changed file) gives its range and quotes its first line of
-code. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
+lines before or after, the start of a co-changed or imported file) gives its range and quotes its first
+line of code, past blank lines, comments, a license banner, a `'use strict'` directive or a module
+docstring. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
 `scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure` (bodies actually
 judged, start places apart in `starts`); and `not_inspected`, each entry with its reason (`budget`,
 `deprioritized`, `capped` or `depth`) and its `QueueTier`: `START`, `PICK` or `MOVE`. Resume
 preserves that role, so waiting starts still open before picks and are never reported as new finds.
 `searched` means "opened and judged at or below the no bar, probability kept", and `nothing_left`
-means "nothing left worth opening"; neither proves that the code does not exist, because one "no" about
+means "nothing left worth opening in a scope the search parsed whole"; neither proves that the code does not exist, because one "no" about
 one place can be wrong. When nothing reaches the yes bar, rank the opened places by their
 `contains_target` probability: the best-scored place is the likeliest one. Pass the result back as
 `resume=` to continue from that frontier with a fresh budget. Pass `commit=` to require that the index
@@ -473,10 +616,10 @@ note, and `Visit.code` ends at the last shown line). If the first line cannot fi
 `not_inspected` with reason `budget`; Resume with a larger slice budget inspects that same source.
 `questions=SearchQuestions(found=...,
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
-`places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `same_file`,
-`keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the index and the
-opened code that returns places. Pass a subset, or add a function of your own; `MOVES` itself is
-read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
+`places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `imported`,
+`same_file`, `keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the
+index and the opened code that returns places. Pass a subset, or add a function of your own; `MOVES`
+itself is read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
 `context_for_comment` takes `moves=` too. The directives take their check (`check=`) as a parameter too.
 
 Directives on top: `context_for_comment` and `find_similar_code`. The library finds code; answering
@@ -501,13 +644,16 @@ selects named sections and `history.state_for(names)` builds exactly that state.
 The default is `fetched`, so a history check never leans on the search's own verdicts; the
 `history` section carries no verdicts either. A check that is meant to read them selects `decisions`
 explicitly. An unknown name raises `UnknownSectionError`. Each section has its own `SectionLimit(max_entries, max_chars)`
-(newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the token budget.
+(newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the character budget.
 Text limits also apply inside nested lists and mappings. Rendering a limited view preserves the
 complete code and judgments in the append-only record.
-The budget is capped at Jev's 32k-token limit for state plus the longest question, the binding limit
-(the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026; a whole request
-may reach the documented 64k). The judge applies the same limit before sending and splits a batch
-that would exceed it. When the selected sections still do not fit, the
+The budget is a character box, capped at Jev's documented 32,000 tokens for state plus the longest
+question times 2.4 characters per token (the Engine's `REQUEST_CHARS_PER_TOKEN`), 76,800 characters
+(the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). A whole request
+may reach the documented 64k tokens, 153,600 characters. The batching owner (`check_each`,
+`check_every`) and the `find_code` opening questions measure the same boxes before sending and split
+what would exceed them; a direct `Judge.ask` sends what it is given and relies on the provider's
+refusal. When the selected sections still do not fit, the
 pluggable `evict` policy trims them; the default `drop_oldest_code` replaces the oldest code bodies with
 `[evicted]` and records each eviction in `history.evictions`. A check that reads no code never evicts.
 Pass `recorder=` (for example a `JsonlJournal`) to record every appended step; the recorder gets each
@@ -595,7 +741,7 @@ registration = RoundRegistration(
     rule={"yes_at": 0.9},
     library_commit="",  # Supply the verified navigator revision when known; empty means unknown.
 )
-round_dir = Path("jvn-results/order-limit-round")
+round_dir = Path("rounds/order-limit")
 freeze(round_dir, registration)  # Creates the directory; refuses to overwrite a frozen round.
 verify(round_dir, registration)  # Call before scoring stored answers.
 request_hash = registered_request_sha256(registration, {"code": "..."})

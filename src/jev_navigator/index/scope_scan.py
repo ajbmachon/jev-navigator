@@ -1,17 +1,18 @@
 """Syntax facts extracted together in one ast-grep pass over each requested file set.
 
-Each requested file set is handed to one ast-grep scan, which schedules parsing across its own worker
-pool without reparsing arbitrary fixed-size batches. The structure rules also match the grammar's
-ERROR nodes: a file the parser could only recover
+Each requested file set is handed to ast-grep scans of a few hundred files each, which schedule
+parsing across ast-grep's own worker pool; every match becomes its fact as it is printed. The
+structure rules also match the grammar's ERROR nodes: a file the parser could only recover
 partially (Flow types in a JavaScript file, say) is reported as unparsed too. Its matched symbols and
 calls still count — recovery keeps what it could — but whatever the ERROR nodes swallowed is unknown,
-not absent.
+not absent. ``FileFacts.unparsed_lines`` keeps the lines those nodes span, so a lookup can tell which
+names they may hide.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import tools
@@ -19,20 +20,20 @@ from .imports import _local
 from .languages import (
     CLASS_KINDS,
     DECLARATION_RULES,
+    EXPRESSION_KINDS,
     FLOW_LANGUAGE,
     FLOW_SGCONFIG,
     FUNCTION_KINDS,
+    NAME_HOLDERS,
+    NAME_WRAPPERS,
     declared_name,
     export_rules,
-    function_name,
     grammar_of,
-    language_for,
     language_of,
+    parse_language,
     reference_rules,
 )
 from .spans import Span
-
-LinesOf = Callable[[str], Sequence[str]]
 
 
 @dataclass
@@ -69,10 +70,14 @@ class CallMatch:
 
 @dataclass(frozen=True, order=True)
 class ReferenceMatch:
+    """One per file, line, role and name. ``receiver`` is what a qualified argument such as
+    ``self.handler`` is read from, None for a bare name."""
+
     file: str
     line: int
     role: str
     name: str
+    receiver: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,117 +87,181 @@ class FileFacts:
     references: tuple[ReferenceMatch, ...]
     incomplete: bool = False
     export_names: tuple[str, ...] = ()
+    # The first and last line of each stretch the grammar's ERROR nodes span, in file order.
+    unparsed_lines: tuple[tuple[int, int], ...] = ()
+    # Why the guard kept the file from the parser; such facts are empty and are never cached.
+    refusal: str | None = None
 
 
-def scan_facts(
-    files: Sequence[str], root: Path, lines_of: LinesOf, unparsed: Unparsed
-) -> dict[str, FileFacts]:
-    """Parse supported source files once; return empty facts for unsupported paths."""
-    matches: list[dict] = []
+def scan_facts(files: Sequence[str], root: Path, unparsed: Unparsed) -> dict[str, FileFacts]:
+    """Parse supported source files once; return empty facts for unsupported paths. Each match is
+    turned into its fact as the parser prints it, so memory holds facts, never the parser's output."""
+    found = {file: _FileFound() for file in files}
+    refused: dict[str, str] = {}
     supported_files = tuple(file for file in files if language_of(file) is not None)
-    for config, group, languages in _scan_groups(supported_files, lines_of):
-        rules = "\n---\n".join(
-            part
-            for part in (
-                _structure_rules(languages),
-                _call_rules(languages),
-                reference_rules(languages),
-                export_rules(languages),
-            )
-            if part
-        )
+    for config, group, languages in _scan_groups(supported_files, root):
+        rules = fact_rules(languages)
         if config is None:
-            matches.extend(tools.ast_grep_rules(rules, group, root))
+            matches = tools.ast_grep_rules(rules, group, root, refused=refused)
         else:
-            matches.extend(tools.ast_grep_rules(rules, group, root, config=config))
-    structure = _structure_from_matches(
-        files,
-        lines_of,
-        unparsed,
-        (match for match in matches if match["ruleId"] in {"function", "class", "declaration", _ERROR_RULE}),
-    )
-    calls = _calls_from_matches(match for match in matches if match["ruleId"] == "call")
-    references = _references_from_matches(
-        match
-        for match in matches
-        if match["ruleId"] not in {"function", "class", "declaration", _ERROR_RULE, "call", *_EXPORT_RULE_IDS}
-    )
-    surface = _export_names_from_matches(match for match in matches if match["ruleId"] in _EXPORT_RULE_IDS)
+            matches = tools.ast_grep_rules(rules, group, root, config=config, refused=refused)
+        for match in matches:
+            found[match["file"]].add(match)
+    unparsed.add("facts", [file for file, facts in found.items() if facts.error_lines])
+    incomplete = unparsed.files
     return {
-        file: FileFacts(
-            structure[file],
-            tuple(call for call in calls if call.file == file),
-            tuple(reference for reference in references if reference.file == file),
-            file in unparsed.files,
-            surface.get(file, ()),
-        )
-        for file in files
+        file: replace(facts.finished(file in incomplete), refusal=refused[file])
+        if file in refused
+        else facts.finished(file in incomplete)
+        for file, facts in found.items()
     }
 
 
-def _structure_from_matches(files, lines_of, unparsed, matches):
-    functions: dict[str, set[Span]] = {file: set() for file in files}
-    classes: dict[str, set[Span]] = {file: set() for file in files}
-    declarations: dict[str, set[Span]] = {file: set() for file in files}
-    for match in matches:
-        file, start, end = match["file"], _line_of(match), match["range"]["end"]["line"] + 1
-        if match["ruleId"] == _ERROR_RULE:
+def fact_rules(languages: Sequence[str]) -> str:
+    """The ast-grep rules one scan of files in ``languages`` runs."""
+    return "\n---\n".join(
+        part
+        for part in (
+            _structure_rules(languages),
+            _call_rules(languages),
+            reference_rules(languages),
+            export_rules(languages),
+        )
+        if part
+    )
+
+
+@dataclass
+class _FileFound:
+    """One file's facts, collected match by match."""
+
+    functions: set[Span] = field(default_factory=set)
+    classes: set[Span] = field(default_factory=set)
+    declarations: set[Span] = field(default_factory=set)
+    calls: list[tuple[tuple[str, int, int], CallMatch]] = field(default_factory=list)
+    receivers: dict[tuple[str, int, str, str], set[str | None]] = field(default_factory=dict)
+    export_names: set[str] = field(default_factory=set)
+    error_lines: list[tuple[int, int]] = field(default_factory=list)
+
+    def add(self, match: dict) -> None:
+        rule = match["ruleId"]
+        if rule == _ERROR_RULE:
             # The grammar reports ERROR nodes here: whatever recovery swallowed is unknown, while the
-            # symbols it did keep are still matched below.
-            unparsed.add("facts", [file])
-            continue
-        first_line = lines_of(file)[start - 1]
-        if match["ruleId"] == "declaration":
-            declarations[file].add(Span(file, start, end, declared_name(first_line)))
+            # symbols it did keep are still matched.
+            self.error_lines.append(_lines_of(match))
+        elif rule in _STRUCTURE_RULE_IDS:
+            self._add_structure(match)
+        elif rule == "call":
+            self._add_call(match)
+        elif rule in _EXPORT_RULE_IDS:
+            self._add_export(match)
         else:
-            target = functions if match["ruleId"] == "function" else classes
-            # The matched node's own text names the symbol even when the physical line opens with
-            # another declaration's head: a method on a one-line class shares the line `class Box`
-            # opens, and naming it from that line would collapse it into the class's span.
-            target[file].add(Span(file, start, end, function_name(match["text"], first_line)))
-    return {
-        file: FileStructure(
-            _ordered(functions[file]),
-            _ordered(functions[file] | classes[file]),
-            tuple(sorted(declarations[file])),
+            self._add_reference(match)
+
+    def finished(self, incomplete: bool) -> FileFacts:
+        functions = self.functions - _same_lines_as_a_named_symbol(self.functions | self.classes)
+        structure = FileStructure(
+            _ordered(functions),
+            _ordered(functions | self.classes),
+            tuple(sorted(self.declarations)),
         )
-        for file in files
-    }
+        calls = tuple(call for _, call in sorted(self.calls, key=lambda entry: entry[0]))
+        return FileFacts(
+            structure,
+            calls,
+            self._references(),
+            incomplete,
+            tuple(sorted(self.export_names)),
+            _merged_stretches(self.error_lines),
+        )
 
+    def _references(self) -> tuple[ReferenceMatch, ...]:
+        """When one line passes both ``x.name`` and ``name`` in the same role, the plain name stands
+        for that line, as a plain call does for callers."""
+        return tuple(
+            ReferenceMatch(*key, None if None in found else min(found))
+            for key, found in sorted(self.receivers.items())
+        )
 
-def _calls_from_matches(matches) -> tuple[CallMatch, ...]:
-    found = []
-    for match in matches:
+    def _add_structure(self, match: dict) -> None:
+        file, (start, end) = match["file"], _lines_of(match)
+        if match["ruleId"] == "declaration":
+            self.declarations.add(Span(file, start, end, declared_name(_first_line(match))))
+            return
+        target = self.functions if match["ruleId"] == "function" else self.classes
+        # The syntax tree names the symbol, never a physical line: a method on a one-line class
+        # shares the line `class Box` opens, and naming it from that line would collapse it into
+        # the class's span.
+        target.add(Span(file, start, end, symbol_name(_captured_name(match))))
+
+    def _add_call(self, match: dict) -> None:
         expression = match["metaVariables"]["single"]["CALLEE"]["text"]
         name = last_identifier(expression)
         if name:
-            found.append(CallMatch(match["file"], _line_of(match), name, receiver_of(expression)))
-    return tuple(sorted(found, key=lambda call: (call.file, call.line)))
+            call = CallMatch(match["file"], _line_of(match), name, receiver_of(expression))
+            self.calls.append((_outer_first(match), call))
+
+    def _add_reference(self, match: dict) -> None:
+        role, text = match["ruleId"], match["text"]
+        key = (match["file"], _line_of(match), role, _reference_name(role, text))
+        self.receivers.setdefault(key, set()).add(_reference_receiver(role, text))
+
+    def _add_export(self, match: dict) -> None:
+        """Exported declarations' name nodes, and the specifier nodes of ``{ ... }`` lists."""
+        text = match["text"]
+        self.export_names.add(_local(text) if match["ruleId"] == _EXPORT_SPECIFIER_RULE else text)
 
 
-def _references_from_matches(matches) -> tuple[ReferenceMatch, ...]:
-    return tuple(
-        sorted(
-            {
-                ReferenceMatch(
-                    match["file"],
-                    _line_of(match),
-                    match["ruleId"],
-                    _reference_name(match["ruleId"], match["text"]),
-                )
-                for match in matches
-            }
-        )
-    )
+def _same_lines_as_a_named_symbol(symbols: set[Span]) -> set[Span]:
+    """Anonymous functions spanning exactly a named symbol's lines: ``xs.map((x) => x.id)`` on the
+    one line of ``ids``. A place is lines, so such a callback is that symbol; kept apart, it would
+    contain the symbol's first line and stop it being top level."""
+    named = {(span.start, span.end) for span in symbols if span.name != "<anonymous>"}
+    return {span for span in symbols if span.name == "<anonymous>" and (span.start, span.end) in named}
+
+
+def _merged_stretches(ranges: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """ERROR node lines with nested and overlapping nodes merged into one stretch."""
+    stretches: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if stretches and start <= stretches[-1][1]:
+            stretches[-1] = (stretches[-1][0], max(end, stretches[-1][1]))
+        else:
+            stretches.append((start, end))
+    return tuple(stretches)
+
+
+def _outer_first(match: dict) -> tuple[str, int, int]:
+    """A match's place in its file, ordering the outer of two matches that start together first."""
+    offsets = match["range"]["byteOffset"]
+    return match["file"], offsets["start"], -offsets["end"]
 
 
 def _reference_name(role: str, text: str) -> str:
     return last_identifier(text) if role == "argument" else text
 
 
+def _reference_receiver(role: str, text: str) -> str | None:
+    return receiver_of(text) if role == "argument" else None
+
+
+OPAQUE_RECEIVER = "<expression>"
+
+
 def receiver_of(expression: str) -> str | None:
+    """What ``expression`` reads its last name from: a plain chain of names (``this.store``), the
+    placeholder ``OPAQUE_RECEIVER`` for anything else (a call, a subscript, a literal, a template),
+    or None when it reads it from nothing. Any other receiver text could quote a string literal, so
+    it is never kept."""
     head, dot, _ = expression.replace("?.", ".").rpartition(".")
-    return head if dot else None
+    if not dot:
+        return None
+    return head if _is_name_chain(head) else OPAQUE_RECEIVER
+
+
+def _is_name_chain(expression: str) -> bool:
+    """Names joined by dots, such as ``this.store``, ``self.items`` or ``super``, which quote no code."""
+    return all(part.removeprefix("#").replace("$", "_").isidentifier() for part in expression.split("."))
 
 
 def last_identifier(expression: str) -> str:
@@ -200,36 +269,24 @@ def last_identifier(expression: str) -> str:
     return tail if tail.isidentifier() else ""
 
 
+def symbol_name(captured: str) -> str:
+    """The name a captured name node gives a symbol: ``save`` for ``save``, ``this.save``,
+    ``exports.save``, ``#save`` and the key ``"save"``. A computed key, a string key that is no
+    identifier (``"risk.triage"``) and a missing name leave it anonymous."""
+    quoted = captured[:1] in ("'", '"')
+    name = captured[1:-1] if quoted else last_identifier(captured.replace("#", ""))
+    return name if name.isidentifier() else "<anonymous>"
+
+
+def _captured_name(match: dict) -> str:
+    return match.get("metaVariables", {}).get("single", {}).get("NAME", {}).get("text", "")
+
+
 _ERROR_RULE = "parse_error"
 _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
 _EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
-
-
-def _export_names_from_matches(matches) -> dict[str, tuple[str, ...]]:
-    """The names each file's parser says it exports, from real statement and specifier nodes."""
-    names: dict[str, set[str]] = {}
-    for match in matches:
-        found = names.setdefault(match["file"], set())
-        if match["ruleId"] == _EXPORT_SPECIFIER_RULE:
-            found.add(_local(match["text"]))
-        elif name := _export_statement_name(match["text"]):
-            found.add(name)
-    return {file: tuple(sorted(found)) for file, found in names.items()}
-
-
-def _export_statement_name(text: str) -> str:
-    """The name an ``export`` statement declares. Default, wildcard, namespace and ``{ ... }``
-    list statements contribute nothing here (lists name themselves through specifier nodes);
-    declarations are named by the same helpers the spans use."""
-    statement = " ".join(text.split())
-    body = statement.removeprefix("export").lstrip()
-    if body.startswith(("default", "*", "as ", "{", "=")):
-        return ""
-    name = function_name(statement)
-    if name == "<anonymous>":
-        name = declared_name(statement)
-    return name if name.isidentifier() else ""
+_STRUCTURE_RULE_IDS = ("function", "class", "declaration")
 
 
 def _structure_rules(languages: Sequence[str]) -> str:
@@ -244,6 +301,18 @@ def _structure_rules(languages: Sequence[str]) -> str:
     return "\n---\n".join(documents)
 
 
+# A component rendered as `<Name ...>` or `<ns.Name ...>` is called by the code that renders it;
+# lower-case names are the platform's own elements (`<div>`), defined nowhere in scope.
+_JSX_CALL_RULE = """rule:
+  any:
+    - kind: jsx_opening_element
+    - kind: jsx_self_closing_element
+  has:
+    field: name
+    regex: "^[A-Z]|[.][A-Z][^.]*$"
+    pattern: $CALLEE"""
+
+
 def _call_rules(languages: Sequence[str]) -> str:
     documents = []
     for language in languages:
@@ -251,15 +320,43 @@ def _call_rules(languages: Sequence[str]) -> str:
         documents.append(f"id: call\nlanguage: {grammar}\nrule:\n  pattern: $CALLEE($$$)")
         if grammar != "python":
             documents.append(f"id: call\nlanguage: {grammar}\nrule:\n  pattern: new $CALLEE($$$)")
+        if grammar == "tsx":
+            documents.append(f"id: call\nlanguage: {grammar}\n{_JSX_CALL_RULE}")
     return "\n---\n".join(documents)
 
 
 def _kind_rule(rule_id: str, language: str, kinds: Sequence[str]) -> str:
-    listed = "".join(f"\n    - kind: {kind}" for kind in kinds)
-    return f"id: {rule_id}\nlanguage: {grammar_of(language)}\nrule:\n  any:{listed}"
+    """Every node of ``kinds``, with the node that names it captured as ``$NAME``: a declaration's
+    own name; an expression's holder (see ``EXPRESSION_KINDS``), else its own name. ``any`` takes
+    the first alternative that matches, and a node with neither name still matches, unnamed."""
+    grammar = grammar_of(language)
+    declarations = [kind for kind in kinds if kind not in EXPRESSION_KINDS]
+    expressions = [kind for kind in kinds if kind in EXPRESSION_KINDS]
+    alternatives = [f"{{any: {_kinds(declarations)}, has: {_named_by('name')}}}"] if declarations else []
+    if expressions:
+        # The search stops at the first ancestor that is no wrapper, and that one must be the holder.
+        past_wrappers = f"{{not: {{any: {_kinds(NAME_WRAPPERS[grammar])}}}}}"
+        holders = ", ".join(
+            f"{{kind: {holder}, has: {_named_by(field)}}}" for holder, field in NAME_HOLDERS[grammar]
+        )
+        alternatives += [
+            f"{{any: {_kinds(expressions)}, inside: {{stopBy: {past_wrappers}, any: [{holders}]}}}}",
+            f"{{any: {_kinds(expressions)}, has: {_named_by('name')}}}",
+        ]
+    alternatives.append(f"{{any: {_kinds(kinds)}}}")
+    listed = "".join(f"\n    - {alternative}" for alternative in alternatives)
+    return f"id: {rule_id}\nlanguage: {grammar}\nrule:\n  any:{listed}"
 
 
-def _scan_groups(files: Sequence[str], lines_of: LinesOf) -> list[tuple[str | None, list[str], list[str]]]:
+def _kinds(kinds: Sequence[str]) -> str:
+    return "[" + ", ".join(f"{{kind: {kind}}}" for kind in kinds) + "]"
+
+
+def _named_by(field: str) -> str:
+    return f"{{field: {field}, pattern: $NAME}}"
+
+
+def _scan_groups(files: Sequence[str], root: Path) -> list[tuple[str | None, list[str], list[str]]]:
     """(sgconfig, files, languages) per invocation: every non-flow file scanned together exactly as
     before, and the ``@flow`` files in their own invocation, where the config's ``languageGlobs``
     parses the JavaScript suffixes with the tsx grammar. The globs are global per invocation, so
@@ -267,10 +364,7 @@ def _scan_groups(files: Sequence[str], lines_of: LinesOf) -> list[tuple[str | No
     plain: list[str] = []
     flow: list[str] = []
     for file in files:
-        if language_for(file, lines_of(file)) == FLOW_LANGUAGE:
-            flow.append(file)
-        else:
-            plain.append(file)
+        (flow if _is_flow(root, file) else plain).append(file)
     groups: list[tuple[str | None, list[str], list[str]]] = []
     if plain:
         groups.append((None, plain, _languages(plain)))
@@ -279,13 +373,35 @@ def _scan_groups(files: Sequence[str], lines_of: LinesOf) -> list[tuple[str | No
     return groups
 
 
+def _is_flow(root: Path, file: str) -> bool:
+    if language_of(file) != "javascript":
+        return False
+    try:
+        content = (root / file).read_bytes()
+    except FileNotFoundError:
+        return False
+    return parse_language(file, content) == FLOW_LANGUAGE
+
+
 def _languages(files: Sequence[str]) -> list[str]:
     return sorted({language for file in files if (language := language_of(file))})
 
 
 def _ordered(spans: set[Span]) -> tuple[Span, ...]:
-    return tuple(sorted(spans, key=lambda span: (span.start, -span.end)))
+    """By position, outer first; symbols on the same lines by name, so the order never depends on
+    the process's string hashing."""
+    return tuple(sorted(spans, key=lambda span: (span.start, -span.end, span.name)))
+
+
+def _first_line(match: dict) -> str:
+    """The first source line of the match as ast-grep read it, so names always agree with the text
+    that was parsed, even when the file changes on disk meanwhile."""
+    return match["lines"].split("\n", 1)[0].replace("\r", "").removeprefix("\ufeff")
 
 
 def _line_of(match: dict) -> int:
     return match["range"]["start"]["line"] + 1
+
+
+def _lines_of(match: dict) -> tuple[int, int]:
+    return _line_of(match), match["range"]["end"]["line"] + 1

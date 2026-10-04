@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from conftest import BudgetedClient
 
 from jev_navigator.directives.find_code import Outcome, SearchBudget, StopRule, find_code, find_code_async
 from jev_navigator.directives.places import place_for_line
 from jev_navigator.history import History, judge_history_async
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS, MAX_REQUEST_CHARS
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import CallCapReachedError, CallOffer, Judge
 from jev_navigator.judgments.questions import Check, Criterion, Pick, Rate
@@ -41,7 +45,8 @@ def run(coroutine):
     return asyncio.run(coroutine)
 
 
-BIG_ITEM = "1" * 30_000
+BIG_ITEM = "1" * (JEV_INPUT_BOX_CHARS * 3 // 5)
+"""Too big for two to share a request, small enough to send alone."""
 THREE_BATCH_ITEMS = [{"code": f"x{index} = {BIG_ITEM}"} for index in range(3)]
 
 
@@ -165,6 +170,45 @@ def test_find_code_async_searches_like_find_code(sample_index: CodeIndex) -> Non
     assert sorted(map(str, async_client.requests)) == sorted(map(str, sync_client.requests))
 
 
+def test_find_code_async_keeps_the_event_loop_running_while_a_place_is_opened(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    start = place_for_line(sample_index, "app/orders.py", 6, "start")
+    opening: list[float] = []
+
+    def slow_open():
+        opening.append(time.monotonic())
+        time.sleep(0.2)
+        opening.append(time.monotonic())
+        return start.open()
+
+    judge = Judge(AsyncScriptedJevClient(ScriptedJevClient(nouls=limit_check_answers)))
+    ticks: list[float] = []
+
+    async def search_beside_a_ticker():
+        async def tick():
+            while True:
+                ticks.append(time.monotonic())
+                await asyncio.sleep(0.01)
+
+        ticker = asyncio.create_task(tick())
+        try:
+            return await find_code_async(
+                sample_index, judge, TARGET, [replace(start, open=slow_open)], moves={}
+            )
+        finally:
+            ticker.cancel()
+
+    # Act
+    result = run(search_beside_a_ticker())
+
+    # Assert
+    began, ended = opening[0], opening[1]
+    assert result.steps == 1
+    assert len([tick for tick in ticks if began < tick < ended]) >= 2
+
+
 def test_find_code_async_applies_the_stop_rule_through_the_async_history_check(
     sample_index: CodeIndex,
 ) -> None:
@@ -210,7 +254,7 @@ def test_the_first_async_check_each_replays_the_remaining_batches_from_the_store
 
     # Assert: the first batch pins the served model, the other batches replay for free.
     assert judge.calls == 1
-    assert [result.from_store for result in results] == [False, True, True]
+    assert sorted(result.from_store for result in results) == [False, True, True]
     assert all(result.probability == 0.9 for result in results)
     # Replayed batches never send, so only the live first batch can be in flight.
     assert client.max_in_flight == 1
@@ -334,3 +378,35 @@ def test_the_first_async_batch_of_check_every_asks_each_item_once_per_check(
     assert judge.calls == 1
     for name in ("describes", "names_value"):
         assert [result.probability for result in results[name]] == [0.9, 0.9]
+
+
+class _AsyncBudgetedClient:
+    """The async form of ``BudgetedClient``: it refuses a request over the character boxes."""
+
+    def __init__(self, budgeted: BudgetedClient) -> None:
+        self.budgeted = budgeted
+
+    @property
+    def model(self) -> str:
+        return self.budgeted.model
+
+    async def ask(self, state: dict, questions: dict):
+        await asyncio.sleep(0)
+        return self.budgeted.ask(state, questions)
+
+
+def test_the_async_path_splits_a_batch_over_the_character_box_before_sending_it() -> None:
+    # Arrange
+    budgeted = BudgetedClient(MAX_REQUEST_CHARS, input_box=JEV_INPUT_BOX_CHARS)
+    judge = Judge(_AsyncBudgetedClient(budgeted))
+    items = [{"file": f"part{index}.py", "code": "y" * 19_300} for index in range(4)]
+
+    # Act
+    results = run(judge.check_every_async([DESCRIBES], items, SHARED, list_name="parts"))
+
+    # Assert
+    assert [result.probability for result in results["describes"]] == [0.9] * 4
+    assert budgeted.refusals == 0, "a request the measurement already rejects must not be paid for"
+    assert len(budgeted.requests) == 2
+    judged = [item["file"] for state, _ in budgeted.requests for item in state["parts"]]
+    assert sorted(judged) == [f"part{index}.py" for index in range(4)]

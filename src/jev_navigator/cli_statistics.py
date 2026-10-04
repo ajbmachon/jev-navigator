@@ -387,7 +387,8 @@ def _coverage_report(pack: dict) -> list[str]:
         skipped = ", ".join(f"`{path}`" for path in scope["skipped"])
         lines.append(f"Skipped outside parser coverage: {skipped}.")
     if scope["unmeasured"] or scope["unparsed"]:
-        never = ", ".join(f"`{path}`" for path in scope["unmeasured"])
+        reasons = pack["coverage"]["unavailable"]
+        never = ", ".join(_named_with_reason(path, reasons) for path in scope["unmeasured"])
         partly = ", ".join(f"`{path}`" for path in scope["unparsed"])
         named = "; ".join(
             label
@@ -405,6 +406,10 @@ def _coverage_report(pack: dict) -> list[str]:
         ]
     lines += [""] + [f"{number}. {limit}" for number, limit in enumerate(pack["limits"], start=1)]
     return lines
+
+
+def _named_with_reason(path: str, reasons: dict[str, str]) -> str:
+    return f"`{path}` ({reasons[path]})" if path in reasons else f"`{path}`"
 
 
 def _report(pack: dict) -> str:

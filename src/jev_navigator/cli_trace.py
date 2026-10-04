@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,9 +20,10 @@ from .index.code_index import CodeIndex
 from .index.spans import Span
 from .judgments.client import JevClient
 from .judgments.judge import CheckResult, Judge
-from .judgments.store import JsonlAnswerStore
+from .judgments.store import run_answer_store
 from .judgments.thresholds import Thresholds
 from .progress import ProgressJournal, TerminalProgress
+from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.trace-evidence-pack/v1"
 
@@ -43,6 +44,8 @@ def create_trace_evidence_pack(
     cancelled: Callable[[], bool] | None = None,
     served_model: str | None = None,
     answers_from: Path | None = None,
+    answer_store: Path | None = None,
+    keep_requests: bool = False,
 ) -> dict:
     """Trace the workflow around ``starts`` and write the reviewable evidence pack to ``output``.
 
@@ -53,8 +56,10 @@ def create_trace_evidence_pack(
     as there; ``depth`` and ``cancelled`` pass through to the static walk. ``served_model`` pins the
     model identity that ``answers.jsonl`` replays against, as a resumed pack does; ``answers_from``
     seeds this pack's answer store from a prior pack's, so identical questions about identical code
-    replay without a new request. ``question`` is
-    the workflow question every obligation is asked about.
+    replay without a new request. ``answer_store`` is the shared store file behind the pack
+    (default ``shared_store_path()``). ``question`` is
+    the workflow question every obligation is asked about. By default the pack keeps code locations
+    and request hashes; ``keep_requests`` also keeps the code and request text.
 
     Returns the manifest that is persisted as ``manifest.json`` next to ``report.md``,
     ``answers.jsonl`` (the shared answer store) and ``journal.jsonl`` (the shared request journal
@@ -81,7 +86,7 @@ def create_trace_evidence_pack(
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
-    journal = ProgressJournal(journal_path, progress)
+    journal = ProgressJournal(journal_path, progress, keep_request_text=keep_requests)
     progress.start()
     outcome = "failed"
     try:
@@ -89,7 +94,7 @@ def create_trace_evidence_pack(
         index = CodeIndex.from_directory(
             repository,
             prefixes=prefixes,
-            exclude_paths=(output, Path.cwd() / "jvn-results"),
+            exclude_paths=(output,),
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
@@ -100,7 +105,7 @@ def create_trace_evidence_pack(
             max_calls=max_calls,
             served_model=served_model,
             journal=journal,
-            store=JsonlAnswerStore(output / "answers.jsonl"),
+            store=run_answer_store(output / "answers.jsonl", answer_store),
         )
         progress.phase("tracing workflow")
         result = trace_workflow(index, judge, question, start_spans, depth=depth, cancelled=cancelled)
@@ -109,6 +114,8 @@ def create_trace_evidence_pack(
             repository, question, tuple(starts), prefixes, thresholds, depth, index, judge, result
         )
         progress.phase("writing evidence pack")
+        if not keep_requests:
+            _drop_code(manifest)
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n")
         (output / "report.md").write_text(_report(manifest))
         return manifest
@@ -165,7 +172,9 @@ def _manifest(
             "requested_model": getattr(judge.client, "model", "unknown"),
             "served_model": judge.served_model,
             "calls": judge.calls,
-            "input_tokens": judge.input_tokens,
+            "replayed_answers": judge.replayed_answers,
+            "input_tokens": judge.input_total.reported,
+            **usage_receipt(None, judge.input_total, judge.unanswered_requests),
         },
         "trace": {
             "outcome": _outcome(result),
@@ -178,6 +187,7 @@ def _manifest(
             "included": [_span_json(span) for span in result.included],
             "excluded": [_span_json(span) for span in result.excluded],
             "unresolved_links": [_link_json(link) for link in result.unresolved_links],
+            "unavailable_files": index.unavailable_files,
         },
     }
 
@@ -200,6 +210,13 @@ def _obligation_json(obligation: TraceObligation) -> dict:
         "unresolved": [_result_json(item) for item in obligation.unresolved],
         "checked": len(obligation.checked),
     }
+
+
+def _drop_code(manifest: dict) -> None:
+    """Leave each judged span as its location: the code it held stays in the repository."""
+    for obligation in manifest["trace"]["obligations"]:
+        for result in (*obligation["evidence"], *obligation["unresolved"]):
+            result.pop("code", None)
 
 
 def _result_json(result: CheckResult) -> dict:
@@ -238,6 +255,11 @@ def _link_json(link) -> dict:
     }
 
 
+def unavailable_file_lines(files: Mapping[str, str]) -> list[str]:
+    """One report line per file the index has no facts for, with the reason."""
+    return [f"- `{file}`: {reason}" for file, reason in sorted(files.items())]
+
+
 def _report(manifest: dict) -> str:
     trace = manifest["trace"]
     lines = [
@@ -250,6 +272,7 @@ def _report(manifest: dict) -> str:
         f"- Outcome: **{trace['outcome']}** (static walk: {trace['graph_stop']})",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
         f"`{manifest['provider']['served_model']}`, {manifest['provider']['calls']} live calls",
+        *usage_report_lines(manifest["provider"]),
         "",
         "Connectivity is the index's static view. It is not proof of a correct handoff: only the "
         "obligations below carry source-identified Jev evidence, and uncertain or missing static "
@@ -286,6 +309,8 @@ def _report(manifest: dict) -> str:
                 f"- `{source['file']}:{source['lines'][0]}-{source['lines'][1]}` "
                 f"P(yes) {evidence['probability']:.3f} ({evidence['verdict']})"
             ]
+    if trace["unavailable_files"]:
+        lines += ["", "## Files without facts", "", *unavailable_file_lines(trace["unavailable_files"])]
     lines += ["", "## Unresolved static links", ""]
     if not trace["unresolved_links"]:
         lines.append("Every static link in the walked component is resolved.")

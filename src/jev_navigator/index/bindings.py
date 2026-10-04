@@ -43,20 +43,24 @@ class BindingResolver(Protocol):
 
 @dataclass(frozen=True)
 class CallFacts:
-    """What the index knows about one call when no injected resolver answers."""
+    """What the index knows about one call when no injected resolver answers. ``top_level`` holds the
+    definitions no class or function contains: only those can be named from their file's module
+    scope, or by an import."""
 
     file: str
     name: str
     receiver: str | None
     definitions: Sequence[Span]
-    top_level_in_file: Sequence[Span]
+    top_level: Sequence[Span]
     imported_from: Sequence[ImportFact]
+    # Files that could hold a definition of ``name`` the index never saw.
     unparsed: frozenset[str] = frozenset()
 
 
 def binding_from_facts(facts: CallFacts) -> Binding:
-    """``unknown`` when the definition may sit in a file the index could not parse: no definition
-    was found, or the file the import names was not parsed. Missing evidence is never absence."""
+    """``unknown`` when the definition may sit where the index could not parse: no definition was
+    found, or the import or a definition names a file that could hold one unseen. Missing evidence is
+    never absence."""
     unparsed_import = [fact.path for fact in facts.imported_from if fact.path in facts.unparsed]
     unparsed_definitions = [span.file for span in facts.definitions if span.file in facts.unparsed]
     if facts.unparsed and (not facts.definitions or unparsed_import or unparsed_definitions):
@@ -70,11 +74,11 @@ def binding_from_facts(facts: CallFacts) -> Binding:
             BindingStatus.CANDIDATE,
             f"method call on {facts.receiver}; receiver type not resolved ({count} definitions)",
         )
-    same_file = [span for span in facts.top_level_in_file if span.file == facts.file]
+    same_file = [span for span in facts.top_level if span.file == facts.file]
     if same_file:
         return Binding(BindingStatus.RESOLVED, "defined in the same file", same_file[0])
     imported = [
-        (span, fact) for span in facts.definitions for fact in facts.imported_from if span.file == fact.path
+        (span, fact) for span in facts.top_level for fact in facts.imported_from if span.file == fact.path
     ]
     if len(imported) == 1:
         span, fact = imported[0]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from jev_navigator.index import tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.languages import has_flow_pragma
-from jev_navigator.index.scope_scan import FileFacts, FileStructure, Unparsed, scan_facts
+from jev_navigator.index.scope_scan import OPAQUE_RECEIVER, FileFacts, FileStructure, Unparsed, scan_facts
 from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
@@ -24,9 +25,9 @@ def ast_grep_runs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str | None
     runs: list[tuple[str, str | None, list[str]]] = []
     original_rules = tools.ast_grep_rules
 
-    def counted_rules(rules: str, files, cwd, config=None):
+    def counted_rules(rules: str, files, cwd, config=None, *, refused):
         runs.append((rules.split("\n", 1)[0], config, list(files)))
-        return original_rules(rules, files, cwd, config=config)
+        return original_rules(rules, files, cwd, config=config, refused=refused)
 
     monkeypatch.setattr(tools, "ast_grep_rules", counted_rules)
     return runs
@@ -218,8 +219,8 @@ def test_an_external_parser_failure_is_not_relabelled_as_incomplete(
 ) -> None:
     (tmp_path / "module.py").write_text("def run():\n    return 1\n")
 
-    def fail_parser(rules, files, cwd, config=None):
-        del rules, files, cwd, config
+    def fail_parser(rules, files, cwd, config=None, *, refused):
+        del rules, files, cwd, config, refused
         raise tools.ToolFailedError("ast-grep failed for a real tool reason")
 
     monkeypatch.setattr(tools, "ast_grep_rules", fail_parser)
@@ -233,17 +234,46 @@ def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp
     (tmp_path / "notes.md").write_text("# notes\n")
     (tmp_path / "module.py").write_text("def greet(): return 1\n")
 
-    def lines_of(path: str) -> list[str]:
-        return (tmp_path / path).read_text().splitlines()
-
     empty = FileFacts(FileStructure((), (), ()), (), ())
 
-    unsupported = scan_facts(["notes.md"], tmp_path, lines_of, Unparsed())
-    mixed = scan_facts(["module.py", "notes.md"], tmp_path, lines_of, Unparsed())
+    unsupported = scan_facts(["notes.md"], tmp_path, Unparsed())
+    mixed = scan_facts(["module.py", "notes.md"], tmp_path, Unparsed())
 
     assert unsupported == {"notes.md": empty}
     assert mixed["module.py"].structure.functions == (Span("module.py", 1, 1, "greet"),)
     assert mixed["notes.md"] == empty
+
+
+@pytest.mark.parametrize(
+    ("file", "declaration"),
+    [("module.ts", "const value{n} = {n};\n"), ("module.py", "value{n} = {n}\n")],
+)
+def test_a_module_declaration_is_printed_without_the_whole_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, declaration: str
+) -> None:
+    """ast-grep prints every node a rule's relations matched. A rule asking whether a declaration sits
+    in the program printed the whole file once per declaration, so the parser's output, and its
+    memory, grew with declarations times file size: 1.2 MB of ordinary code peaked over 2.5 GB."""
+    # Arrange
+    source = "".join(declaration.format(n=n) for n in range(400))
+    (tmp_path / file).write_text(source)
+    printed: list[dict] = []
+    original_rules = tools.ast_grep_rules
+
+    def recorded_rules(*arguments, **options):
+        for match in original_rules(*arguments, **options):
+            printed.append(match)
+            yield match
+
+    monkeypatch.setattr(tools, "ast_grep_rules", recorded_rules)
+
+    # Act
+    facts = scan_facts([file], tmp_path, Unparsed())
+
+    # Assert
+    declarations = [match for match in printed if match["ruleId"] == "declaration"]
+    assert len(facts[file].structure.declarations) == len(declarations) == 400
+    assert all(len(json.dumps(match)) < len(source) for match in declarations)
 
 
 def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_path: Path) -> None:
@@ -258,6 +288,41 @@ def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_p
 
     # Assert
     assert site.binding.status == "resolved"
+
+
+def test_calls_on_one_line_keep_their_source_order_on_every_scan(tmp_path: Path) -> None:
+    """ast-grep runs its rules in parallel, so the matches of `new Date(...)` and of `merge(...)`
+    arrive in either order. Calls on one line are ordered as the source writes them, on every scan.
+    Of two calls starting at one place, such as `new Foo(a)` and `new Foo(a).bar(...)`, the outer
+    comes first, as one rule already orders `foo.bar().baz()`."""
+    # Arrange
+    source = (
+        "function f(a) {\n"
+        "  const d = new Date(merge(a), now());\n"
+        "  x = new Foo(a).bar(now());\n"
+        "  const t = new Date(merge(a), now()).getTime();\n"
+        "  return foo.bar().baz();\n"
+        "}\n"
+    )
+    (tmp_path / "order.js").write_text(source)
+    expected = {
+        2: ("Date", "merge", "now"),
+        3: ("bar", "Foo", "now"),
+        4: ("getTime", "Date", "merge", "now"),
+        5: ("baz", "bar"),
+    }
+
+    # Act
+    orders = {
+        tuple(
+            (call.line, call.name)
+            for call in scan_facts(["order.js"], tmp_path, Unparsed())["order.js"].calls
+        )
+        for _ in range(50)
+    }
+
+    # Assert
+    assert orders == {tuple((line, name) for line, names in expected.items() for name in names)}
 
 
 def test_the_flow_pragma_is_taken_from_leading_comments_not_from_strings_or_the_body() -> None:
@@ -310,6 +375,109 @@ def test_a_method_on_a_one_line_class_is_named_and_counted_itself(tmp_path: Path
     # Act and assert
     assert [(span.name, span.start, span.end) for span in index.functions_in("src/box.ts")] == [("v", 1, 1)]
     assert {span.name for span in index.symbols_in("src/box.ts")} == {"Box", "v"}
+
+
+def test_a_symbol_is_named_by_the_syntax_tree_and_a_callback_stays_anonymous(tmp_path: Path) -> None:
+    """An expression is named by the declarator, field, key or assignment holding it, seen through
+    parentheses and casts, before its own name; a callback passed to a call has no name. Every
+    grammar is scanned together, so a node kind one grammar lacks would fail the whole scan."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/routes.ts": (
+                "export const load = (async () => fetchPage()) satisfies PageLoad;\n"
+                "export const GET = (() => respond()) as Handler;\n"
+                "const handler = function inner() { return 1; };\n"
+                'it("saves the order", () => { save(); });\n'
+                "orders.save = () => 1;\n"
+                'const routes = {\n  "risk.triage": () => 1,\n  plain: () => 2,\n};\n'
+                "abstract class Shape { #area() { return 0; } }\n"
+                "const Model = class {};\n"
+                "function* pages() {}\n"
+            ),
+            "src/view.tsx": (
+                'export const View = (() => <p />) satisfies Page;\ndescribe("view", () => {});\n'
+            ),
+            "src/legacy.js": (
+                "const run = (function () {});\n"
+                "class Job { start = () => 1; }\n"
+                "const each = function* () {};\n"
+            ),
+            "app/jobs.py": "class Job:\n    def run(self):\n        return 1\n",
+        },
+    )
+
+    # Act
+    named = {
+        file: [(span.start, span.name) for span in index.symbols_in(file)]
+        for file in ("src/routes.ts", "src/view.tsx", "src/legacy.js", "app/jobs.py")
+    }
+
+    # Assert
+    assert named == {
+        "src/routes.ts": [
+            (1, "load"),
+            (2, "GET"),
+            (3, "handler"),
+            (4, "<anonymous>"),
+            (5, "save"),
+            (7, "<anonymous>"),
+            (8, "plain"),
+            (10, "Shape"),
+            (10, "area"),
+            (11, "Model"),
+            (12, "pages"),
+        ],
+        "src/view.tsx": [(1, "View"), (2, "<anonymous>")],
+        "src/legacy.js": [(1, "run"), (2, "Job"), (2, "start"), (3, "each")],
+        "app/jobs.py": [(1, "Job"), (2, "run")],
+    }
+    assert index.unparsed_files == set()
+
+
+def test_a_callback_on_exactly_a_named_functions_lines_is_that_function(tmp_path: Path) -> None:
+    """A callback spanning exactly a named function's lines is the same place at line granularity,
+    so it stays part of that function: the function stays top level, a same-file call to it stays
+    proven, and a call inside the callback is still that function's call."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/util.ts": (
+                "export const ids = (xs: { id: number }[]) => xs.map((x) => x.id);\n"
+                "export function total(xs: number[]) { return xs.reduce((a, b) => a + b, 0); }\n"
+                "export const loadUser = (id: string) => request(id).then((r) => r.json());\n"
+                "export const wait = (ms: number) => new Promise((done) => {\n"
+                "  setTimeout(done, ms);\n"
+                "});\n"
+                "function request(id: string) { return fetch(id); }\n"
+                "export function run() {\n"
+                "  return ids([]).length + total([]);\n"
+                "}\n"
+            ),
+        },
+    )
+
+    # Act
+    symbols = [(span.start, span.end, span.name) for span in index.symbols_in("src/util.ts")]
+    bindings = {name: index.find_callers(name)[0].binding for name in ("ids", "total")}
+    request_caller = index.find_callers("request")[0].caller
+
+    # Assert
+    assert symbols == [
+        (1, 1, "ids"),
+        (2, 2, "total"),
+        (3, 3, "loadUser"),
+        (4, 6, "wait"),
+        (7, 7, "request"),
+        (8, 10, "run"),
+    ]
+    assert {name: (binding.status.value, binding.reason) for name, binding in bindings.items()} == {
+        "ids": ("resolved", "defined in the same file"),
+        "total": ("resolved", "defined in the same file"),
+    }
+    assert request_caller is not None and request_caller.name == "loadUser"
 
 
 def test_a_flow_typed_class_keeps_its_methods(tmp_path: Path) -> None:
@@ -372,8 +540,9 @@ def test_plain_javascript_is_unchanged_whether_or_not_flow_files_share_the_scope
 
 
 def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> None:
-    """Statement and specifier nodes carry the surface: default, wildcard, a multi-line list and a
-    template-literal body are each handled by the parser, not by source-text scanning."""
+    """Declaration name nodes and specifier nodes carry the surface: default, wildcard, a multi-line
+    list, two constants in one statement and a template-literal body are each handled by the
+    parser, not by source-text scanning."""
     # Arrange
     index = committed(
         tmp_path,
@@ -387,6 +556,7 @@ def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> 
                 "  createOrder as placeOrder,\n"
                 "} from './commands';\n"
                 "const tpl = `export function inTemplate() {}`;\n"
+                "export const first = 1, second = 2;\n"
             ),
         },
     )
@@ -395,7 +565,7 @@ def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> 
     facts = index._facts_in("src/service.ts")
 
     # Assert
-    assert facts.export_names == ("placeOrder", "refund", "run")
+    assert facts.export_names == ("first", "placeOrder", "refund", "run", "second")
     assert facts.incomplete is False
 
 
@@ -476,16 +646,55 @@ def test_an_unsupported_flow_construct_keeps_its_file_incomplete(tmp_path: Path)
     assert index.unparsed_files == {"src/native/RootTag.js"}
 
 
-def test_a_name_defined_only_in_a_partly_recovered_file_is_unknown_not_unresolved(tmp_path: Path) -> None:
+BROKEN_FLOW = "// @flow\nexport class Broken {\n  find(a: string:\n"
+
+
+@pytest.mark.parametrize(
+    ("files", "name", "status", "hiding"),
+    [
+        pytest.param(
+            {"src/native/RootTag.js": ROOT_TAG, "src/native/show.js": ROOT_TAG_CALLER},
+            "createRootTag",
+            "resolved",
+            None,
+            id="a-definition-recovered-outside-the-unread-lines-binds",
+        ),
+        pytest.param(
+            {
+                "src/broken.js": BROKEN_FLOW,
+                "src/use.js": "import { find } from './broken';\n\n"
+                "export function use() {\n  return find('a');\n}\n",
+            },
+            "find",
+            "unknown",
+            "src/broken.js",
+            id="a-name-on-an-unread-line-stays-unknown",
+        ),
+        pytest.param(
+            {"src/broken.js": BROKEN_FLOW, "src/use.js": "export function use() {\n  return missing();\n}\n"},
+            "missing",
+            "unresolved",
+            None,
+            id="a-name-no-unread-line-mentions-is-unresolved",
+        ),
+    ],
+)
+def test_a_partly_recovered_file_leaves_unknown_only_the_names_its_unread_lines_mention(
+    tmp_path: Path, files: dict[str, str], name: str, status: str, hiding: str | None
+) -> None:
+    """Code the grammar swallowed is unknown, not absent, but a definition names what it defines:
+    lines that never mention a name cannot hold its definition."""
     # Arrange
-    index = a_root_tag_scope(tmp_path)
+    index = committed(tmp_path, files)
+    assert len(index.unparsed_files) == 1
 
     # Act
-    site = index.find_callers("createRootTag")[0]
+    [site] = index.find_callers(name)
 
     # Assert
-    assert site.binding.status == "unknown"
-    assert "src/native/RootTag.js" in site.binding.reason
+    assert site.binding.status == status, site.binding.reason
+    if hiding is not None:
+        assert hiding in site.binding.reason
 
 
 def test_a_malformed_flow_file_still_counts_as_unparsed(tmp_path: Path) -> None:
@@ -509,3 +718,115 @@ def test_a_search_over_a_scope_with_grammar_errors_never_reports_nothing_left(tm
     assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.unparsed_files == {"src/native/RootTag.js"}
     assert result.history.steps[-1].judgments["unparsed_files"] == ["src/native/RootTag.js"]
+
+
+def test_an_empty_search_that_never_reached_every_file_says_so_without_parsing_the_rest(
+    tmp_path: Path, ast_grep_runs
+) -> None:
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "app/start.py": "def start():\n    return 1\n",
+            "app/billing.py": "def bill():\n    return 2\n",
+            "app/mail.py": "def send():\n    return 3\n",
+        },
+    )
+    judge = Judge(ScriptedJevClient(nouls=lambda question_id, question, state: 0.05))
+    start = [place_for_line(index, "app/start.py", 2, "start")]
+
+    # Act
+    result = find_code(index, judge, "where an order is shipped", start, moves={})
+
+    # Assert
+    parsed = {file for _rule, _config, files in ast_grep_runs for file in files}
+    assert parsed == {"app/start.py"}
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
+    assert result.parser_scans_pending == ("facts",)
+    assert (result.files_judged, result.files_read_only, result.files_never_reached) == (1, 0, 2)
+
+
+def test_an_empty_search_that_parsed_every_file_reports_nothing_left(tmp_path: Path) -> None:
+    # Arrange
+    index = committed(tmp_path, {"app/start.py": "def start():\n    return 1\n"})
+    judge = Judge(ScriptedJevClient(nouls=lambda question_id, question, state: 0.05))
+    start = [place_for_line(index, "app/start.py", 2, "start")]
+
+    # Act
+    result = find_code(index, judge, "where an order is shipped", start, moves={})
+
+    # Assert
+    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.parser_scans_pending == ()
+    assert (result.files_judged, result.files_read, result.code_files) == (1, 1, 1)
+
+
+def test_reading_the_parsed_files_receipt_parses_nothing(tmp_path: Path, ast_grep_runs) -> None:
+    # Arrange
+    index = committed(
+        tmp_path, {"app/a.py": "def a():\n    return 1\n", "app/b.py": "def b():\n    return 2\n"}
+    )
+    index.functions_in("app/a.py")
+    runs_before = len(ast_grep_runs)
+
+    # Act
+    parsed = index.parsed_files
+
+    # Assert
+    assert parsed == {"app/a.py"}
+    assert len(ast_grep_runs) == runs_before
+
+
+RECEIVERS = {
+    "app/clients.ts": "export function load(client, cfg, store) {\n"
+    '  client("api-key-literal").fetch(1);\n'
+    '  cfg["token-literal"].get(2);\n'
+    "  `template-${store}`.trim();\n"
+    "  this.store.save(3);\n"
+    "  store?.rows.push(4);\n"
+    "  run(this.handler, cfg.read);\n"
+    "}\n",
+    "app/model.py": "class Model:\n    def save(self):\n        self.items.append(1)\n"
+    '        super().save()\n        open("secret-path").read()\n',
+}
+
+
+def test_a_receiver_is_kept_only_as_a_plain_chain_of_names(tmp_path: Path) -> None:
+    # Arrange
+    commit_files(tmp_path, RECEIVERS)
+
+    # Act
+    facts = scan_facts(sorted(RECEIVERS), tmp_path, Unparsed())
+
+    # Assert
+    calls = {(call.name, call.receiver) for fact in facts.values() for call in fact.calls}
+    references = {(ref.name, ref.receiver) for fact in facts.values() for ref in fact.references}
+    assert {
+        ("fetch", OPAQUE_RECEIVER),
+        ("get", OPAQUE_RECEIVER),
+        ("trim", OPAQUE_RECEIVER),
+        ("save", "this.store"),
+        ("push", "store.rows"),
+        ("append", "self.items"),
+        ("read", OPAQUE_RECEIVER),
+    } <= calls
+    assert {("handler", "this"), ("read", "cfg")} <= references
+    receivers = " ".join(str(call.receiver) for fact in facts.values() for call in fact.calls)
+    assert "literal" not in receivers and "secret" not in receivers and "template" not in receivers
+
+
+def test_a_parsed_file_that_vanished_still_counts_as_read_and_is_listed_unavailable(tmp_path: Path) -> None:
+    # Arrange: its facts come from the bytes read before it vanished, which slices keep
+    index = committed(
+        tmp_path, {"app/a.py": "def a():\n    return 1\n", "app/b.py": "def b():\n    return 2\n"}
+    )
+    index.functions_in("app/a.py")
+    (tmp_path / "app" / "a.py").unlink()
+
+    # Act
+    pending = index.parser_scans_pending
+
+    # Assert
+    assert pending == ("facts",)
+    assert "app/a.py" in index.parsed_files
+    assert "app/a.py" in index.unavailable_files

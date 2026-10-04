@@ -153,17 +153,19 @@ places (starts, then Jev's picks, then the best-scored neighbours) and returns `
 
 Read `searched` and the outcome `nothing_left` as "opened and judged unlikely", never as "the code does
 not exist": one "no" about one place can be wrong. When nothing is found, rank the opened places by
-their probability and treat the best one as the likeliest place.
+their probability and treat the best one as the likeliest place. A search that ran out of places
+before parsing every code file in scope ends as `scope_incomplete`. `files_judged`, `files_read` and
+`code_files` say in how many files Jev judged code, how many the search read, and how many are in scope.
 
 Documents and other files without a supported code grammar remain searchable as text and can
 participate in text-based moves. Syntax operations return no symbols, calls or references for them;
 they are never sent to ast-grep with an empty language rule. This does not claim their text was
 parsed as code.
 
-The CLI creates a unique run directory under `jvn-results/` in the invocation directory when `--out`
-is omitted. Each run retains its report, manifest and request journal. Generated result directories
-are excluded from the CLI's source inventory so repeated searches do not search their own evidence.
-Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
+The CLI creates a unique run folder under `$XDG_DATA_HOME/jev-navigator/runs/` when `--out` is
+omitted. Each run retains its report, manifest and request journal. An `--out` folder inside the
+searched directory is excluded from the CLI's source inventory so repeated searches do not search
+their own evidence. Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
 
 Agents can pass the same CLI request as JSON with `jvn --json request.json`, an inline JSON object,
 or `jvn --json -` for stdin. `jvn schema find` emits its JSON Schema without model calls. The CLI parser remains the single owner of options, types and defaults. `target` is
@@ -181,9 +183,10 @@ wire captures or re-encoded SDK data.
 ## Choosing how the search moves
 
 A move is a plain function of the index and the opened code that returns places. `places.MOVES` maps
-each built-in move's name to its function (callers, callees, references, code passed on, the same
-file, quoted keys and environment variables, co-changed files, the lines before and after) and is
-read-only. Pass `moves=` to `find_code`, `find_code_async` or `context_for_comment` to use a subset,
+each built-in move's name to its function (callers, callees, references, code passed on, imported
+modules, the same file, quoted keys and environment variables, co-changed files, the lines before
+and after) and is read-only. Pass `moves=` to `find_code`, `find_code_async` or
+`context_for_comment` to use a subset,
 for example `{name: MOVES[name] for name in ("callers", "callees")}`, or add a function of your own.
 `FindResult.moves` and the final `stop` step of the history name the moves the search used, so every
 result says how it was found. Your move's places go through the same filter as the built-in ones:
@@ -229,13 +232,31 @@ text before any paid call.
 
 ### Parser facts and naming
 
-Function and class names come from the matched AST node, with the containing physical line used
-only when the node does not contain its binding name (for example an assigned anonymous function).
-This keeps a method on a one-line TypeScript class distinct from its enclosing class.
-Persistent facts are keyed by source bytes, language, parser version and `FACT_RULE_VERSION`.
-A change to extracted facts must change that rule identity so existing cached results are reparsed.
-Name lookups reuse an in-memory index of parsed definitions, calls and references, including facts
-loaded from the persistent cache. Text discovery searches only files without facts. A bidirectional
+Function and class names come from the syntax tree, never from a physical line. A declaration is
+named by its own name node. A function or class expression is named by the declarator, class field,
+object key or assignment that holds it, looking through parentheses and type casts
+(`export const load = (async () => ...) satisfies PageLoad` is `load`), and only then by its own
+name. A callback passed to a call (`it("works", () => ...)`) is held by no name and stays
+`<anonymous>`. This keeps a method on a one-line TypeScript class distinct from its enclosing class,
+and keeps test and framework callbacks from sharing the names `it`, `describe` or `expect`. A
+callback spanning exactly a named symbol's lines (`xs.map((x) => x.id)` on the one line of `ids`) is
+the same place, so it is left out rather than listed as a second, anonymous symbol.
+Persistent facts are keyed by source bytes, language, parser version, the ast-grep rule text a scan
+of that language sends, and the source of the modules that build the rules and turn matches into
+facts (`fact_cache._MODULES_THAT_READ_MATCHES`). Changing a rule or the code that reads matches
+reparses existing cached results by itself; there is no version string to bump. A new module that
+shapes facts belongs in that tuple.
+
+Name lookups read `name_table.NameTable`: one SQLite file per `table_identity()`, which hashes
+`fact_cache.facts_identity()` (the parser version and every language's rules) with the source of
+`name_table.py`. Rows are written only from facts, at `CodeIndex._remember_facts`, keyed by the git
+blob id of the file content, and hold names, kinds, lines, roles and receivers as the facts hold them:
+`scope_scan.receiver_of` keeps a receiver only as a plain chain of names and records anything else,
+which could quote a string literal, as `OPAQUE_RECEIVER`. `CodeIndex` records the files navigation
+reaches apart from the table's coverage, and `parsed_files`, `parser_scans_pending` and
+`observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
+linked into place (`shared_database.open_shared_database`), and each content's rows are written in
+one transaction. A bidirectional
 trace prepares the scoped fact inventory in one batch before walking incoming and outgoing links;
 it does not launch one repository search for every encountered name.
 

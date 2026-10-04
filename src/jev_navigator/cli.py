@@ -13,32 +13,55 @@ import sys
 from collections.abc import MutableMapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from time import monotonic
 
 from .adapters.typesafe import TypeSafeJevClient
+from .cache_root import cache_root
+from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
-from .cli_trace import create_trace_evidence_pack
+from .cli_trace import create_trace_evidence_pack, unavailable_file_lines
+from .data_root import default_run_folder
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
 from .directives.places import Place, place_for_line
+from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
 from .index.code_index import CodeIndex
 from .index.languages import language_of
+from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
-from .judgments.store import JsonlAnswerStore
+from .judgments.store import (
+    SHARED_STORE_VARIABLE,
+    StoreInCacheFolderError,
+    default_shared_store,
+    run_answer_store,
+    shared_store_path,
+)
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
+from .run_files import place_label, source_shown, step_shown
+from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
+KEEP_REQUESTS_HELP = (
+    "Keep the code and full request text in the run folder (default: code locations and request "
+    "hashes only); for your own or open-source code"
+)
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
 POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
+OUT_HELP = (
+    "New or empty output directory, never pruned (default: a unique run under "
+    f"$XDG_DATA_HOME/jev-navigator/runs, pruned after {FINISHED_RUN_DAYS} days, {RESUMABLE_RUN_DAYS} "
+    "while resumable)"
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -50,8 +73,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser = _parser()
         (_command_parser(parser, args.topic) if args.topic else parser).print_help()
         return 0
-    if args.command == "stats":
-        return _run_statistics(args)
+    if args.command == "cache":
+        return run_cache_command(args.action)
+    status = _run_statistics(args) if args.command == "stats" else _run_search(args)
+    return 130 if tidy_after_run() else status
+
+
+def _run_search(args: argparse.Namespace) -> int:
     if args.command not in ("find", "findall", "trace"):
         raise AssertionError(f"unhandled command: {args.command}")
     budget = SearchBudget(
@@ -67,6 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _parser().error(str(error))
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
+    answer_store = _answer_store(args)
     client: TypeSafeJevClient | None = None
     try:
         _load_typesafe_environment(os.environ)
@@ -83,6 +112,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 depth=budget.max_depth,
                 max_calls=budget.max_calls,
                 verbose=args.verbose,
+                answer_store=answer_store,
+                keep_requests=args.keep_requests,
             )
         else:
             resume_from = Path(args.resume).expanduser() if getattr(args, "resume", None) else None
@@ -97,6 +128,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     client,
                     thresholds=Thresholds.from_env(),
                     verbose=args.verbose,
+                    answer_store=answer_store,
+                    keep_requests=args.keep_requests,
                     workflow=args.command,
                     resume_from=resume_from,
                 )
@@ -137,7 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     else:
         print(f"evidence pack: {output.resolve()}")
-        print(f"outcome: {search_outcome} ({calls} live calls)")
+        print(f"outcome: {_outcome_summary(result)} ({calls} live calls)")
         if resume_directory is not None:
             print(f"resume: use --resume {output.resolve()} with the same target and repository")
     return 130 if search_outcome == "cancelled" else 0
@@ -175,7 +208,7 @@ def _run_statistics(args: argparse.Namespace) -> int:
         index = CodeIndex.from_directory(
             repository,
             prefixes=tuple(args.prefix),
-            exclude_paths=(output, Path.cwd() / "jvn-results"),
+            exclude_paths=(output,),
             scan_observer=progress.scan,
         )
         pack = create_statistics_pack(
@@ -237,10 +270,13 @@ def create_evidence_pack(
     thresholds: Thresholds | None = None,
     verbose: bool = False,
     fact_cache_dir: Path | None = None,
+    answer_store: Path | None = None,
     workflow: str = "find",
     resume_from: Path | None = None,
+    keep_requests: bool = False,
 ) -> dict:
-    """Run the real index/search owners and persist their reviewable evidence."""
+    """Run the real index/search owners and persist their reviewable evidence. By default the pack
+    keeps code locations and request hashes; ``keep_requests`` also keeps the code and request text."""
     if workflow not in ("find", "findall"):
         raise ValueError(f"unknown search workflow: {workflow}")
     repository = repository.resolve()
@@ -257,12 +293,12 @@ def create_evidence_pack(
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
-    journal = ProgressJournal(journal_path, progress)
+    journal = ProgressJournal(journal_path, progress, keep_request_text=keep_requests)
     progress.start()
     outcome = "failed"
     try:
         progress.phase("indexing files")
-        excluded = (output, Path.cwd() / "jvn-results")
+        excluded = (output,)
         if resume_from is not None:
             excluded += (resume_from.resolve(),)
         index = CodeIndex.from_directory(
@@ -272,6 +308,7 @@ def create_evidence_pack(
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
+        journal.place_label = partial(place_label, index)
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
         checkpoint = SavedSearch(None)
@@ -289,7 +326,7 @@ def create_evidence_pack(
             max_calls=budget.max_calls,
             served_model=previous["provider"]["served_model"] if previous else None,
             journal=journal,
-            store=JsonlAnswerStore(output / "answers.jsonl"),
+            store=run_answer_store(output / "answers.jsonl", answer_store),
         )
         selection: EntrySelection | None = None
         started = monotonic()
@@ -378,7 +415,8 @@ def create_evidence_pack(
             result,
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
-            input_tokens=judge.input_tokens,
+            input_total=judge.input_total,
+            unanswered_requests=judge.unanswered_requests,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
@@ -403,7 +441,8 @@ def create_evidence_pack(
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
             manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
-
+        if not keep_requests:
+            _drop_code(manifest, index)
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
@@ -432,7 +471,7 @@ def _parser() -> argparse.ArgumentParser:
 
 For agents: jvn schema find prints the request's JSON Schema without making model calls.
 JSON mode writes results to stdout; progress goes to stderr. Ctrl-C cancels.
-Results default to ./jvn-results/<directory>-<timestamp> in the invocation directory.
+Results default to <directory>-<timestamp> under $XDG_DATA_HOME/jev-navigator/runs (~/.local/share).
 Credentials: process environment, then ~/.config/jvn/env (TYPESAFE_API_KEY / TYPESAFE_BASE_URL).
 Use jvn help find for options and examples. Exit codes: 0 completed, 1 failed, 2 invalid input, 130 cancelled.
 A completed search can have a non-found outcome; inspect search.outcome in JSON output.""",
@@ -468,7 +507,19 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         "topic", choices=("find", "findall", "trace", "stats"), help="command whose request schema to show"
     )
     help_command = commands.add_parser("help", help="show general or command-specific help")
-    help_command.add_argument("topic", nargs="?", choices=("find", "findall", "trace", "stats", "schema"))
+    help_command.add_argument(
+        "topic", nargs="?", choices=("find", "findall", "trace", "stats", "schema", "cache")
+    )
+    cache = commands.add_parser(
+        "cache",
+        help="show or prune what JVN keeps on disk (no model calls)",
+        description="Show what JVN's caches and run folders hold, or run the housekeeping rules now.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="jvn cache status\njvn cache prune\n"
+        "Every find, findall, trace and stats run also prunes, at most once a day.\n"
+        "Rules: README.md, section 'Where JVN keeps runs and caches'.",
+    )
+    cache.add_argument("action", choices=CACHE_ACTIONS, help="status shows, prune deletes now")
     _add_search_arguments(find)
     find.add_argument(
         "--resume",
@@ -509,12 +560,14 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     trace.add_argument("--repo", default=".", help="Source directory (default: current directory)")
     trace.add_argument("--prefix", action="append", default=[], help="Optional source scope; repeatable")
-    trace.add_argument("--out", help="New or empty output directory (default: ./jvn-results/<run>)")
+    trace.add_argument("--out", help=OUT_HELP)
     trace.add_argument("--max-depth", type=int, help="Optional maximum static relationship hops")
     trace.add_argument(
         "--max-calls", type=_count_or_none, help="Optional model-request cap; none is unlimited"
     )
     trace.add_argument("--verbose", action="store_true", help="Print expanded masked model requests")
+    _add_answer_store_argument(trace)
+    trace.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
     stats = commands.add_parser(
         "stats",
         help="count and rank parsed functions/classes without model calls",
@@ -529,7 +582,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     stats.add_argument("--repo", default=".", help="Source directory (default: current directory)")
     stats.add_argument("--prefix", action="append", default=[], help="Source scope; repeatable")
-    stats.add_argument("--out", help="New or empty output directory (default: ./jvn-results/<run>)")
+    stats.add_argument("--out", help=OUT_HELP)
     stats.add_argument(
         "--operation",
         action="append",
@@ -549,6 +602,29 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         "--top-level", action="store_true", help="Exclude nested symbols from ranking and ranges"
     )
     return parser
+
+
+def _answer_store(args: argparse.Namespace) -> Path:
+    """The shared store this run uses (``shared_store_path``), which the run names on stderr. A named
+    store inside JVN's cache folder is a usage error."""
+    try:
+        path = shared_store_path(args.answer_store)
+    except StoreInCacheFolderError as error:
+        _parser().error(str(error))
+    print(f"answer store: {path}", file=sys.stderr)
+    return path
+
+
+def _add_answer_store_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--answer-store",
+        metavar="PATH",
+        help=(
+            f"Shared answer store file (default: ${SHARED_STORE_VARIABLE}, else {default_shared_store()}); "
+            "a new file keeps this run from replaying another run's answers; it must lie outside "
+            f"JVN's cache folder {cache_root()}, which JVN prunes"
+        ),
+    )
 
 
 def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEFAULT_MAX_CALLS) -> None:
@@ -571,10 +647,8 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         metavar="PATH:LINE",
         help="Known entry or caller line; repeatable. Without one, jvn chooses a narrow entry point.",
     )
-    scope.add_argument(
-        "--out",
-        help="New or empty output directory (default: a unique run under ./jvn-results)",
-    )
+    scope.add_argument("--out", help=OUT_HELP)
+    _add_answer_store_argument(find)
     defaults = SearchBudget()
     limits.add_argument(
         "--max-depth",
@@ -633,6 +707,7 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         action="store_true",
         help="show expanded masked requests on stderr (default: concise live progress)",
     )
+    find.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -812,8 +887,7 @@ def _previous_pack(
 
 
 def _default_output(repository: Path) -> Path:
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    return Path.cwd() / "jvn-results" / f"{repository.name}-{stamp}"
+    return default_run_folder(repository, datetime.now(UTC))
 
 
 def _scope_warning(file_count: int) -> str | None:
@@ -826,8 +900,9 @@ def _load_typesafe_environment(
     environment: MutableMapping[str, str],
     path: Path | None = None,
 ) -> None:
-    """Load official TypeSafe SDK settings: process environment, then checkout `.env`,
-    then the legacy `~/.config/jvn/env`; a process value always takes precedence."""
+    """Load official TypeSafe SDK settings: process environment, then this tool's checkout `.env`
+    (never a repository under analysis), then the legacy `~/.config/jvn/env`; a process value always
+    takes precedence."""
     from .environment import load_typesafe_environment
 
     load_typesafe_environment(environment, legacy=path)
@@ -858,7 +933,8 @@ def _manifest(
     *,
     requested_model: str,
     served_model: str | None,
-    input_tokens: int,
+    input_total: TokenTotal,
+    unanswered_requests: int,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -890,7 +966,8 @@ def _manifest(
         "provider": {
             "requested_model": requested_model,
             "served_model": served_model,
-            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_tokens,
+            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
+            **usage_receipt(previous, input_total, unanswered_requests),
         },
         "search": {
             "outcome": result.outcome,
@@ -920,6 +997,9 @@ def _manifest(
                 for entry in result.not_inspected
             ],
             "unparsed_files": sorted(result.unparsed_files),
+            "files_judged": result.files_judged,
+            "files_read": result.files_read,
+            "code_files": result.code_files,
             "parser_scans": {
                 "completed": list(result.parser_scans_completed),
                 "pending": list(result.parser_scans_pending),
@@ -931,6 +1011,41 @@ def _manifest(
             ],
         },
     }
+
+
+def _drop_code(manifest: dict, index: CodeIndex) -> None:
+    """Leave each place as its location: the code it held stays in the repository."""
+    _drop_entry_code(manifest.get("entry_selection") or {}, index)
+    for name in ("search", "seed_search"):
+        _drop_search_code(manifest.get(name) or {}, index)
+
+
+def _drop_entry_code(entry_selection: dict, index: CodeIndex) -> None:
+    for decision in entry_selection.get("decisions", []):
+        for option in decision.get("options", []):
+            option.pop("description", None)
+    for candidate in entry_selection.get("candidates", []):
+        candidate["signature"] = place_label(index, candidate["place"])
+
+
+def _drop_search_code(search: dict, index: CodeIndex) -> None:
+    visits = [visit for group in ("found", "starts", "searched", "unsure") for visit in search.get(group, [])]
+    for visit in visits:
+        visit.pop("code", None)
+        if "place" in visit:
+            visit["source"] = source_shown(visit["source"], visit["place"])
+    for entry in search.get("not_inspected", []):
+        entry["signature"] = place_label(index, entry["place"])
+    search["history"] = [_step_without_code(step, index) for step in search.get("history", [])]
+
+
+def _step_without_code(step: dict, index: CodeIndex) -> dict:
+    shown = step_shown(step)
+    for fetched in shown["fetched"]:
+        fetched.pop("code", None)
+    for offered in shown["judgments"].get("could_contain", []):
+        offered["signature"] = place_label(index, offered["place"])
+    return shown
 
 
 def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previous: dict | None) -> dict:
@@ -991,12 +1106,15 @@ def _find_all_report(manifest: dict) -> str:
                 f"`{source['file']}:{source['lines'][0]}-{source['lines'][1]}` |"
             )
     lines += ["", "## Coverage gaps", ""]
-    for field in ("remaining_files", "unparsed_files", "unsupported_files", "unavailable_files"):
+    for field in ("remaining_files", "unparsed_files", "unsupported_files"):
         lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
+    lines.append("- unavailable_files:" if search["unavailable_files"] else "- unavailable_files: none")
+    lines += unavailable_file_lines(search["unavailable_files"])
     lines += ["", "## Matching bodies", ""]
     for value in search["found"]:
         source = value["source"]
-        lines += [f"### {source['file']}:{source['lines'][0]}", "", "```", value["code"], "```", ""]
+        lines += [f"### {source['file']}:{source['lines'][0]}-{source['lines'][1]}", ""]
+        lines += _code_block(value, "")
     return "\n".join(lines) + "\n"
 
 
@@ -1058,6 +1176,24 @@ def _included_in_opened_span(candidate, result: FindResult) -> str | None:
     return None
 
 
+def _outcome_summary(search: dict) -> str:
+    """The outcome name; an empty Find also says how much of the scope Jev judged and code read."""
+    outcome = str(search["outcome"])
+    if "files_judged" not in search or outcome not in ("nothing_left", "scope_incomplete"):
+        return outcome
+    judged, read, total = search["files_judged"], search["files_read"], search["code_files"]
+    seen = f"Jev judged code in {judged} of {total} files"
+    if outcome == "nothing_left":
+        return f"{outcome} (nothing left worth opening: {seen}; all {total} were read)"
+    parts = [f"not found: {seen}", f"{read - judged} more were read only to list links"]
+    parts.append(f"{total - read} never reached")
+    if search["unparsed_files"]:
+        parts.append(f"{len(search['unparsed_files'])} parsed only partly")
+    if search["unavailable_files"]:
+        parts.append(f"{len(search['unavailable_files'])} gone from disk")
+    return f"{outcome} ({'; '.join(parts)})"
+
+
 _FRONTIER_REASONS = {
     "target_found": "Search stopped after finding a match",
     "deprioritized": "Candidate score did not exceed the opening threshold",
@@ -1070,9 +1206,15 @@ _FRONTIER_REASONS = {
 }
 
 
+def _code_block(place: dict, language: str) -> list[str]:
+    """The place's code, when the pack kept it (``--keep-requests``); otherwise only its location."""
+    return [f"```{language}", place["code"], "```", ""] if "code" in place else []
+
+
 def _report(manifest: dict) -> str:
     source = manifest["source"]
     search = manifest["search"]
+    provider = manifest["provider"]
     lines = [
         "# Jev navigator evidence pack",
         "",
@@ -1082,17 +1224,19 @@ def _report(manifest: dict) -> str:
         f"- Revision: `{source['revision']}`",
         f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes']) or 'whole directory'}",
         f"- Target: {manifest['target']}",
-        f"- Outcome: **{search['outcome']}**",
+        f"- Outcome: **{_outcome_summary(search)}**",
         *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
-        f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
-        f"`{manifest['provider']['served_model']}`",
+        f"- Provider: requested `{provider['requested_model']}`, served `{provider['served_model']}`",
+        *usage_report_lines(provider),
         f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
         "(indexing and entry selection excluded)",
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "
         f"{len(search['unparsed_files'])} files failed a completed parser scan. "
         f"Pending parser scans: {', '.join(search['parser_scans']['pending']) or 'none'}.",
-        f"- Files that disappeared after inventory: {len(search['unavailable_files'])}.",
+        "- Files unavailable (disappeared or changed on disk, or refused by the parser): "
+        f"{len(search['unavailable_files'])}.",
+        *unavailable_file_lines(search["unavailable_files"]),
         "",
         "## Opened code",
         "",
@@ -1119,10 +1263,7 @@ def _report(manifest: dict) -> str:
             "",
             f"Raw P(contains target): **{visit['probability']:.3f}**. Reached by `{source['reached_by']}`.",
             "",
-            f"```{language}",
-            visit["code"],
-            "```",
-            "",
+            *_code_block(visit, language),
         ]
     lines += [
         "## Candidates not independently opened",

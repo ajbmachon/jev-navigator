@@ -71,7 +71,8 @@ class Coverage:
     ``measured`` and ``skipped`` split ``scope``: files a fact scan can bring structure back from,
     and files with no grammar to parse (a document, data, a manifest), where there is no structure
     to measure and no gap to report. ``unmeasured`` names the files that were asked about yet
-    never scanned — outside the index scope, or gone from the disk — and ``unparsed`` the measured
+    never scanned — outside the index scope, gone from the disk, or refused by the parser as too
+    large to parse — and ``unparsed`` the measured
     files whose parse reported grammar errors. An empty scope measures nothing and says so.
     """
 
@@ -94,14 +95,14 @@ class Coverage:
             return "no scope was given, so no file was measured"
         if self.unmeasured and self.unparsed:
             return (
-                f"{len(self.unmeasured)} file(s) in scope could not be read and "
+                f"{len(self.unmeasured)} file(s) in scope were never scanned and "
                 f"{len(self.unparsed)} parsed only partially: what those files hold is unknown, not "
                 "absent, so this measurement covers the rest of the scope only"
             )
         if self.unmeasured:
             return (
-                f"{len(self.unmeasured)} file(s) in scope could not be read and were never scanned, so "
-                "what they hold is unknown, not absent"
+                f"{len(self.unmeasured)} file(s) in scope were never scanned (unreadable, or refused by "
+                "the parser), so what they hold is unknown, not absent"
             )
         if self.unparsed:
             return (
@@ -262,8 +263,7 @@ def facts_of(index: CodeIndex, scope: Sequence[str] | None = None) -> dict[str, 
     )
     if not wanted:
         return {}
-    index._ensure_facts(wanted)
-    return {path: index._facts[path] for path in wanted if path in index._facts}
+    return index.facts_in_files(wanted)
 
 
 def file_structure(index: CodeIndex, file: str) -> FileStructure | None:
@@ -276,9 +276,9 @@ def scan_coverage(index: CodeIndex, scope: Sequence[str] | None = None) -> Cover
     """How much of ``scope`` the parser could see: scanned, skipped, unreadable, partly parsed.
 
     The whole scope goes to the index's fact scan at once, so what a file's grammar could not
-    recover is known before any count is taken from it. A file outside the index's inventory and a
-    file that has gone from the disk are both ``unmeasured``: neither was scanned, so neither may
-    be read as an empty result.
+    recover is known before any count is taken from it. A file outside the index's inventory, a file
+    that has gone from the disk, and a file the parser refused are all ``unmeasured``: none was
+    scanned, so none may be read as an empty result.
     """
     wanted = scope_of(index, scope)
     unreadable = tuple(path for path in wanted if path not in index.available_files)

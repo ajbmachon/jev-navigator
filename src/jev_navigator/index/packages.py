@@ -22,6 +22,7 @@ from .tsconfig import best_pattern, build_layout, normalised
 # subpath at one bundle. Other conditions follow in written order.
 CONDITIONS = ("source", "types", "import", "module", "development", "browser", "node", "default", "require")
 ENTRY_FIELDS = ("source", "types", "typings", "module", "main")
+DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
 _SCRIPT_EXTENSION = re.compile(r"(\.d)?\.[cm]?[jt]sx?$")
 
 
@@ -77,6 +78,36 @@ class Packages:
         closest = max(closeness, default=None)
         best = [manifest for manifest, c in zip(claimants, closeness, strict=True) if c == closest]
         return best[0] if len(best) == 1 else None
+
+    def links(self, name: str, importer: str) -> bool:
+        """Whether ``name`` certainly means the repository's package for ``importer``: its own
+        package through ``exports`` (Node's self-reference), or the only package of that name,
+        which the importer's package.json depends on through the ``workspace:`` protocol."""
+        own = self.scope_of(importer)
+        if own is None:
+            return False
+        if own.fields.get("name") == name:
+            return own.fields.get("exports") is not None
+        if not self.nearest_on_disk(importer, own):
+            return False
+        ranges = [own.fields.get(field) for field in DEPENDENCY_FIELDS]
+        # `workspace:<range>` links the workspace package; `workspace:<other-name>@<range>` is an alias.
+        linked = any(
+            isinstance(r, dict)
+            and re.fullmatch(r"workspace:(\*|[~^]|[~^<>=]*\d[\w.\-+ |<>=~^]*)", str(r.get(name, "")))
+            for r in ranges
+        )
+        return linked and len(self._named.get(name, [])) == 1
+
+    def nearest_on_disk(self, file: str, manifest: Manifest) -> bool:
+        """Whether ``manifest`` is the nearest package.json that exists above ``file``, readable or not."""
+        for parent in PurePosixPath(file).parents:
+            folder = _folder(str(parent))
+            if folder == manifest.directory:
+                return True
+            if (self.root / folder / "package.json").exists():
+                return False
+        return False
 
     def target_bases(self, directory: str, target: str) -> list[str]:
         """Root-relative bases for a target the package in ``directory`` declares: the target, then,

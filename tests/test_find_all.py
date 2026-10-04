@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 from jev_navigator.directives.find_all import find_all
@@ -155,3 +156,60 @@ def test_budget_stop_retains_completed_batches_and_cache_only_replay(tmp_path):
     assert completed.coverage == "functions_examined"
     assert len(completed.judged) == 3
     assert completed.calls == 2
+
+
+class ReleasesInOrder:
+    """A provider that holds a wave's requests until all of them arrived, then answers them one at a
+    time, by the first item's line, ascending or descending, so the judge sees them complete in a
+    chosen order."""
+
+    def __init__(self, expected: int, *, descending: bool) -> None:
+        self.script = ScriptedJevClient(default_noul=0.05)
+        self.expected = expected
+        self.descending = descending
+        self.arrived: list[int] = []
+        self.answered: list[int] = []
+        self.turns = threading.Condition()
+
+    @property
+    def model(self) -> str:
+        return self.script.model
+
+    def send(self, state, questions):
+        line = state["items"][0]["lines"][0]
+        with self.turns:
+            self.arrived.append(line)
+            self.turns.notify_all()
+            self.turns.wait_for(lambda: len(self.arrived) >= self.expected, timeout=10)
+            order = sorted(self.arrived, reverse=self.descending)
+            self.turns.wait_for(lambda: order[len(self.answered)] == line, timeout=10)
+            self.answered.append(line)
+            self.turns.notify_all()
+        return self.script.send(state, questions)
+
+    def parse(self, raw):
+        return self.script.parse(raw)
+
+
+def test_find_all_lists_its_judged_functions_in_file_and_line_order_however_answers_arrive(tmp_path):
+    # Arrange: forty functions in ten batches, answered in line order in one run and reversed in the other
+    source = "".join(
+        f"def check_{index}(items):\n    return len(items) <= {index}\n\n" for index in range(40)
+    )
+    (tmp_path / "checks.py").write_text(source)
+    index = CodeIndex(tmp_path, {"checks.py": source})
+    runs = []
+
+    # Act
+    for descending in (False, True):
+        provider = ReleasesInOrder(10, descending=descending)
+        result = find_all(index, Judge(provider, items_per_request=4), "the item limit check", [])
+        runs.append(([r.item["span_key"] for r in result.judged], provider.answered))
+
+    # Assert: the providers answered in opposite orders, and both results list the same order
+    (forward, forward_answered), (backward, backward_answered) = runs
+    assert forward_answered == sorted(forward_answered) and backward_answered == sorted(
+        backward_answered, reverse=True
+    )
+    assert forward == backward
+    assert forward == sorted(forward, key=lambda key: int(key.split(":")[1].split("-")[0]))

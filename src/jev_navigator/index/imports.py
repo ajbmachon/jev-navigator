@@ -64,6 +64,54 @@ def imported_modules(source: str, path: str) -> list[str]:
     return list(dict.fromkeys(specifier for _, specifier in sorted(found)))
 
 
+def module_imports(source: str, path: str) -> tuple[tuple[str, frozenset[str] | None], ...]:
+    """Each module specifier the source imports, re-exports or requires, in source order, with the
+    names it takes by name as that module exports them; ``None`` when it takes the whole module (a
+    namespace or default import, ``export *``, ``require``, a dynamic or bare import, ``import m``)."""
+    if path.endswith(".py"):
+        found = [
+            (match.start(), match.group(1), _python_names(match.group(2)))
+            for match in _PYTHON_FROM.finditer(source)
+        ]
+        found += [(match.start(), match.group(1), None) for match in _PYTHON_IMPORT.finditer(source)]
+    else:
+        code = _without_script_comments(source)
+        found = [
+            (match.start(), match.group(3), _script_names(match.group(1), match.group(2)))
+            for match in _SCRIPT_FROM.finditer(code)
+        ]
+        found += [(match.start(), match.group(1), None) for match in _SCRIPT_BARE.finditer(code)]
+    taken: dict[str, frozenset[str] | None] = {}
+    for _, specifier, names in sorted(found, key=lambda entry: entry[0]):
+        if names == frozenset():
+            continue
+        before = taken.get(specifier, frozenset())
+        taken[specifier] = None if before is None or names is None else before | names
+    return tuple(taken.items())
+
+
+def _python_names(clause: str) -> frozenset[str] | None:
+    parts = [
+        part.strip() for part in _PYTHON_COMMENT.sub("", clause).strip("()\n ").split(",") if part.strip()
+    ]
+    if "*" in parts:
+        return None
+    return frozenset(part.split(" as ")[0].strip() for part in parts)
+
+
+def _script_names(keyword: str, clause: str) -> frozenset[str] | None:
+    """The names a script import or re-export takes, as its module exports them."""
+    if "*" in clause or (keyword == "import" and _SCRIPT_DEFAULT_NAME.match(clause)):
+        return None
+    names = frozenset(
+        part.strip().removeprefix("type ").split(" as ")[0].strip()
+        for braces in _SCRIPT_BRACES.findall(clause)
+        for part in braces.split(",")
+        if part.strip()
+    )
+    return None if "default" in names else names
+
+
 def resolve_import(
     specifier: str,
     importer: str,
@@ -115,19 +163,57 @@ def _resolve_script(
     if specifier.startswith("#"):
         manifest = packages.scope_of(importer)
         targets = manifest.import_targets(specifier) if manifest else []
+        certain = manifest is not None and packages.nearest_on_disk(importer, manifest)
     else:
         name, subpath = package_name(specifier)
         manifest = packages.named(name, importer)
         targets = manifest.export_targets(subpath) if manifest else []
+        certain = packages.links(name, importer)
+    if manifest is None:
+        return None
+    mapping = f"repository package.json mapping for {specifier}"
+    uncertain = "" if certain else ", a package the importer does not link by workspace: or self-reference"
+    # Discovery keeps main's order: each target, then the source it is built from.
+    chosen: ImportFact | None = None
     for target in targets:
         if target.startswith("."):
             path = _scope_file(packages.target_bases(manifest.directory, target), scope)
-        else:
-            redirected = _resolve_script(target, importer, scope, script_paths, packages, seen)
-            path = redirected.path if redirected else None
-        if path is not None:
-            return ImportFact(path, False, f"repository package.json mapping for {specifier}")
-    return None
+            if path is not None:
+                chosen = ImportFact(path, False, mapping)
+                break
+            continue
+        redirected = _resolve_script(target, importer, scope, script_paths, packages, seen)
+        if redirected is not None:
+            chosen = ImportFact(redirected.path, redirected.proven and not target.startswith("#"), mapping)
+            break
+    if chosen is None:
+        return None
+    # Proof: every declared target that exists names the same file, and it is not a declaration file.
+    declared = set()
+    for target in targets:
+        if target.startswith("."):
+            if (
+                path := _scope_file(packages.target_bases(manifest.directory, target)[:1], scope)
+            ) is not None:
+                declared.add(path)
+        elif (
+            redirected := _resolve_script(target, importer, scope, script_paths, packages, seen)
+        ) is not None:
+            declared.add(
+                redirected.path if redirected.proven and not target.startswith("#") else "<unproven>"
+            )
+    agreed = declared == {chosen.path}
+    proven = certain and agreed and not chosen.path.endswith((".d.ts", ".d.mts", ".d.cts"))
+    if proven:
+        return ImportFact(chosen.path, True, mapping)
+    why = uncertain or (
+        ", declared targets differ by condition"
+        if len(declared) > 1
+        else ", a declaration file"
+        if agreed
+        else ", source inferred from build output"
+    )
+    return ImportFact(chosen.path, False, mapping + why)
 
 
 def _scope_file(bases: list[str], scope: frozenset[str]) -> str | None:
