@@ -125,6 +125,34 @@ def test_the_export_surface_is_the_ast_grep_statement_nodes(tmp_path: Path) -> N
     assert names == ("READY", "placeOrder", "publicLocal", "refund", "run")
 
 
+def test_a_destructured_export_is_part_of_the_export_surface(tmp_path: Path) -> None:
+    """`export const { verify, sign: signToken } = jwt` exports `verify` and `signToken`, so an import
+    through a barrel that re-exports the module finds `verify`. A property key, a default value and a
+    computed key export nothing."""
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            "src/jwt/tools.ts": (
+                "const jwt = make();\n"
+                "export const { verify, sign: signToken, decode = fallback, [key]: other } = jwt;\n"
+            ),
+            "src/jwt/index.ts": 'export * from "./tools";\n',
+            "src/page.ts": (
+                'import { verify } from "./jwt";\nexport function check() {\n  return verify();\n}\n'
+            ),
+        },
+    )
+
+    # Act
+    names = index._facts_in("src/jwt/tools.ts").export_names
+    binding = index.find_callers("verify")[0].binding
+
+    # Assert
+    assert names == ("decode", "other", "signToken", "verify")
+    assert (binding.status, binding.target) == ("resolved", Span("src/jwt/tools.ts", 2, 2, "verify"))
+
+
 def test_a_template_literal_body_is_not_part_of_the_export_surface(tmp_path: Path) -> None:
     """The regression: a template literal whose text looks like export statements names nothing,
     so the privately defined `run` behind the barrel stays a candidate."""
