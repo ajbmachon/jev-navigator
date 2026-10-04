@@ -118,7 +118,12 @@ _IN_TYPED_MODULE = (
     f"{{kind: ambient_declaration, {_IN_MODULE}}}]}}"
 )
 _TYPED_MODULE_LEVEL = f"not: {{not: {{{_IN_TYPED_MODULE}}}}}"
-_MODULE_VARIABLES = f"{{kind: lexical_declaration, not: {{not: {{{_IN_MODULE}}}}}}}"
+_ANY_VARIABLES = "any: [{kind: lexical_declaration}, {kind: variable_declaration}]"
+_MODULE_VARIABLES = f"{{{_ANY_VARIABLES}, not: {{not: {{{_IN_MODULE}}}}}}}"
+_TYPED_MODULE_VARIABLES = f"{{{_ANY_VARIABLES}, {_TYPED_MODULE_LEVEL}}}"
+_AMBIENT_FUNCTIONS = (
+    f"{{kind: function_signature, not: {{not: {{inside: {{kind: ambient_declaration, {_IN_MODULE}}}}}}}}}"
+)
 
 # A function or class assigned to a property, `foo.bar = function () {}`, gives its module no name.
 # Assigned to `exports.x` or `module.exports.x`, or listed in `module.exports = {...}`, it is one of
@@ -142,15 +147,21 @@ COMMONJS_EXPORT_PAIR = f"{{kind: pair, inside: {COMMONJS_EXPORTS_OBJECT}}}"
 # negation, `not: {not: ...}`: it holds the same and prints only the match.
 #
 # Module-level declarations by what may name them, each a rule per grammar that has such
-# declarations: a type alias or interface only a type, a constant or variable only a value, and an
-# enum or a Python assignment (which may be a type alias) both.
+# declarations: a type alias or interface only a type, a `const`, `let` or `var`, or a TypeScript
+# `declare function`, only a value, and an enum or a Python assignment (which may be a type alias)
+# both.
 _SCRIPT_TYPES = (
     f"  any: [{{kind: type_alias_declaration}}, {{kind: interface_declaration}}]\n  {_TYPED_MODULE_LEVEL}"
 )
 _SCRIPT_VALUES = f"  any: [{_MODULE_VARIABLES}]"
+_TYPED_SCRIPT_VALUES = f"  any: [{_TYPED_MODULE_VARIABLES}, {_AMBIENT_FUNCTIONS}]"
 _SCRIPT_ENUMS = f"  kind: enum_declaration\n  {_TYPED_MODULE_LEVEL}"
 TYPE_DECLARATIONS = {"typescript": _SCRIPT_TYPES, "tsx": _SCRIPT_TYPES}
-VALUE_DECLARATIONS = {"typescript": _SCRIPT_VALUES, "tsx": _SCRIPT_VALUES, "javascript": _SCRIPT_VALUES}
+VALUE_DECLARATIONS = {
+    "typescript": _TYPED_SCRIPT_VALUES,
+    "tsx": _TYPED_SCRIPT_VALUES,
+    "javascript": _SCRIPT_VALUES,
+}
 TYPE_AND_VALUE_DECLARATIONS = {
     "python": (
         "  kind: assignment\n  not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}"
@@ -197,7 +208,8 @@ _TYPED_SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}, {{kind: type_id
             field: name
             any:
               - kind: variable_declarator
-                inside: {_MODULE_VARIABLES}
+                inside: {_TYPED_MODULE_VARIABLES}
+              - {_AMBIENT_FUNCTIONS}
               - kind: type_alias_declaration
               - kind: interface_declaration
               - kind: enum_declaration
@@ -224,7 +236,6 @@ DECLARED_NAME_RULES = {
 # `require('./jwt').verify`, `require('./jwt')(options)` and a require of a computed or template
 # string bind none. A pattern captures its metavariables without printing the nodes it matched them
 # in, so the conditions on those nodes sit under a double negation too.
-_ANY_VARIABLES = "any: [{kind: lexical_declaration}, {kind: variable_declaration}]"
 _SCRIPT_MODULE_ALIASES = (
     f"""  pattern: {{context: 'var $NAME = require($SPEC)', selector: variable_declarator}}
   all:
@@ -322,7 +333,7 @@ CLASS_KINDS[FLOW_LANGUAGE] = CLASS_KINDS["tsx"]
 VALUE_KINDS[FLOW_LANGUAGE] = VALUE_KINDS["tsx"]
 NAMESPACE_KINDS[FLOW_LANGUAGE] = NAMESPACE_KINDS["tsx"]
 TYPE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_TYPES
-VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_VALUES
+VALUE_DECLARATIONS[FLOW_LANGUAGE] = _TYPED_SCRIPT_VALUES
 TYPE_AND_VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_ENUMS
 DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
 MODULE_ALIAS_RULES[FLOW_LANGUAGE] = _SCRIPT_MODULE_ALIASES
@@ -495,17 +506,16 @@ REFERENCE_ROLES[FLOW_LANGUAGE] = _TYPED_SCRIPT_ROLES
 
 _EXPORT = "{field: declaration, kind: export_statement}"
 _AMBIENT_EXPORT = f"{{kind: ambient_declaration, inside: {_EXPORT}}}"
-_VARIABLES = "[{kind: lexical_declaration}, {kind: variable_declaration}]"
 _EXPORTED_NAME = f"""  inside:
     field: name
     any:
       - inside: {{field: declaration, kind: export_statement, not: {{has: {{regex: '^default$'}}}}}}
       - kind: variable_declarator
-        inside: {{any: {_VARIABLES}, inside: {_EXPORT}}}"""
+        inside: {{{_ANY_VARIABLES}, inside: {_EXPORT}}}"""
 _TYPED_EXPORTED_NAME = f"""{_EXPORTED_NAME}
       - inside: {_AMBIENT_EXPORT}
       - kind: variable_declarator
-        inside: {{any: {_VARIABLES}, inside: {_AMBIENT_EXPORT}}}"""
+        inside: {{{_ANY_VARIABLES}, inside: {_AMBIENT_EXPORT}}}"""
 # The name node of each declaration an ``export`` statement makes, one match per name, so the
 # declaration's body (a nested function, a template literal) never names the export. A default
 # export has no name of its own.

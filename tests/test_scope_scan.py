@@ -534,6 +534,52 @@ def test_a_declaration_names_every_name_it_binds(tmp_path: Path) -> None:
     }
 
 
+def test_module_level_var_and_ambient_declarations_define_their_names(tmp_path: Path) -> None:
+    """A module-level `var` and TypeScript's `declare const`, `declare let`, `declare var` and
+    `declare function` define names, so a call to one finds a definition instead of none. A `var`
+    inside a function is the function's own."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "lib/app.js": (
+                "var app = exports = module.exports = {};\nvar a = 1, b = 2;\n"
+                "function inner() {\n  var hidden = 1;\n  return hidden;\n}\n"
+            ),
+            "types/env.d.ts": (
+                "declare const VERSION: string;\nexport declare let mode: number, level: number;\n"
+                "declare var legacy: number;\ndeclare function boot(): void;\n"
+                "export declare function stop(code: number): void;\n"
+            ),
+            "src/main.ts": "export function main() {\n  return boot();\n}\n",
+        },
+    )
+
+    # Act
+    declared = {
+        file: [(span.start, span.name) for span in index.declarations_in(file)]
+        for file in ("lib/app.js", "types/env.d.ts")
+    }
+    boot = index.find_callers("boot")[0].binding
+
+    # Assert
+    assert declared == {
+        "lib/app.js": [(1, "app"), (2, "a"), (2, "b")],
+        "types/env.d.ts": [
+            (1, "VERSION"),
+            (2, "level"),
+            (2, "mode"),
+            (3, "legacy"),
+            (4, "boot"),
+            (5, "stop"),
+        ],
+    }
+    assert (boot.status.value, boot.reason) == (
+        "candidate",
+        "name match only; 1 definitions in scope and no import of a module in scope names it",
+    )
+
+
 def test_whether_a_type_or_a_value_names_a_declaration_follows_its_own_kind(tmp_path: Path) -> None:
     """A type alias is named only by a type and a constant only by a value, also when the declaration
     starts after other code on its line."""
