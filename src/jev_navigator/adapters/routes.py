@@ -22,6 +22,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
+from ..errors import UsageError
 from ..judgments.answers import JevResponse, response_from_raw
 from ..judgments.client import LATEST_JEV, InputBudgetExceededError, input_budget_error
 from ..judgments.journal import AttemptJournalCallbackError, RawResponse
@@ -79,7 +80,7 @@ def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
         model = model or default_model
 
     if not endpoint or not model:
-        raise ValueError(
+        raise UsageError(
             f"route {name!r} is incomplete: set {ROUTES_ENV} names it, but it needs "
             f"SYSTEM_ONE_{upper}_ENDPOINT and SYSTEM_ONE_{upper}_MODEL"
             + (f" (or SYSTEM_ONE_{upper}=1 for the hosted {name} defaults)" if name in KNOWN_ROUTES else "")

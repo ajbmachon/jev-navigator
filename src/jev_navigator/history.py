@@ -39,6 +39,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
+from .errors import JvnRefusal
 from .judgments.answers import JevResponse
 from .judgments.client import DEFAULT_QUESTION_RESERVE, JEV_STATE_TOKEN_LIMIT, estimate_tokens
 from .judgments.judge import Judge
@@ -118,7 +119,7 @@ class StepRecorder(Protocol):
     def record_step(self, step: Mapping) -> None: ...
 
 
-class HistoryTooLargeError(ValueError):
+class HistoryTooLargeError(JvnRefusal, ValueError):
     """Even with every code body evicted the selected sections do not fit the budget."""
 
 

@@ -12,6 +12,8 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 
+from ..errors import UsageError
+
 ENVIRONMENT_NAMES = {
     "choice_min_confidence": "JEV_NAVIGATOR_CHOICE_MIN_CONFIDENCE",
     "noul_yes_at": "JEV_NAVIGATOR_NOUL_YES_AT",
@@ -34,9 +36,9 @@ class Thresholds:
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
             if not 0.0 <= value <= 1.0:
-                raise ValueError(f"{name} must be between 0 and 1, got {value}")
+                raise UsageError(f"{name} must be between 0 and 1, got {value}")
         if self.noul_no_at >= self.noul_yes_at:
-            raise ValueError(f"noul_no_at ({self.noul_no_at}) must be below noul_yes_at ({self.noul_yes_at})")
+            raise UsageError(f"noul_no_at ({self.noul_no_at}) must be below noul_yes_at ({self.noul_yes_at})")
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> Thresholds:

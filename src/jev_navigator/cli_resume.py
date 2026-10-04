@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .directives.find_code import FindResult, NotInspected, Outcome, QueueTier, Visit
 from .directives.places import Place, place_relationship
+from .errors import UsageError
 from .index.bindings import Binding
 from .index.code_index import CodeIndex
 from .index.spans import CodeSlice, Span
@@ -84,13 +85,13 @@ def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
     """Return a fresh-index frontier, or None when entry selection must be replayed."""
     state = json.loads(path.read_text())
     if state.get("version") != STATE_VERSION:
-        raise ValueError("unsupported find resume state version")
+        raise UsageError("unsupported find resume state version")
     if state.get("scope_digest") != scope_identity(index)[0]:
-        raise ValueError("repository source or scope changed since the evidence pack")
+        raise UsageError("repository source or scope changed since the evidence pack")
     if state.get("stage") == "entry":
         return SavedSearch(None)
     if state.get("stage") not in ("navigation", "enumeration"):
-        raise ValueError("invalid find resume stage")
+        raise UsageError("invalid find resume stage")
     record = state["result"]
     result = FindResult(
         outcome=Outcome(record.get("outcome", Outcome.BUDGET)),

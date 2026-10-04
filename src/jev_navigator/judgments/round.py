@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..errors import JvnRefusal
 from .secrets import Masker, SecretMasker, mask_request
 
 DEFAULT_MASKER = SecretMasker()
@@ -49,7 +50,7 @@ SIDECAR_FILE = "FROZEN.txt"
 VERIFIER_REPORT_FILE = "verifier-report.txt"
 
 
-class FrozenRoundError(RuntimeError):
+class FrozenRoundError(JvnRefusal, RuntimeError):
     """The round's files or runtime differ from its registration."""
 
 

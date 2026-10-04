@@ -1,3 +1,5 @@
+"""The `jvn` evidence packs end to end: the real index and search behind the CLI, scripted judgments."""
+
 from __future__ import annotations
 
 import inspect
@@ -21,6 +23,9 @@ from jev_navigator.cli import (
     main,
 )
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.errors import UsageError
+from jev_navigator.history import HistoryTooLargeError
+from jev_navigator.index.code_index import RevisionMismatchError
 from jev_navigator.testing import ScriptedJevClient
 
 
@@ -167,7 +172,7 @@ def test_resume_rejects_changed_source_before_reusing_the_frontier(tmp_path: Pat
     (repository / "policy.py").write_text("def policy():\n    return 2\n")
     next_client = ScriptedJevClient()
 
-    with pytest.raises(ValueError, match="source or scope changed"):
+    with pytest.raises(UsageError, match="source or scope changed"):
         create_evidence_pack(
             repository,
             (),
@@ -382,7 +387,7 @@ def test_cancelled_navigation_writes_a_resumable_evidence_pack(tmp_path: Path) -
 @pytest.fixture
 def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
     """``main`` without credentials or a search: each pack request is recorded by parameter name and
-    answered with ``outcome``."""
+    answered with ``outcome``, or raises ``error`` when one is set."""
     from jev_navigator import cli
 
     class Client:
@@ -392,10 +397,12 @@ def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
             pass
 
     signature = inspect.signature(cli.create_evidence_pack)
-    calls: dict = {"outcome": "found", "packs": []}
+    calls: dict = {"outcome": "found", "packs": [], "error": None}
 
     def create_evidence_pack(*args, **kwargs):
         calls["packs"].append(signature.bind(*args, **kwargs).arguments)
+        if calls["error"] is not None:
+            raise calls["error"]
         return {"search": {"outcome": calls["outcome"], "calls": 1}, "provider": {"requested_model": "test"}}
 
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
@@ -413,6 +420,100 @@ def test_main_maps_a_cancelled_pack_to_the_shell_interrupt_status(tmp_path: Path
 
     # Assert
     assert status == 130
+
+
+def _provider_refusal() -> Exception:
+    sdk = pytest.importorskip("typesafe_sdk")
+    httpx2 = pytest.importorskip("httpx2")
+    return sdk.TypeSafeAuthenticationError(401, {}, httpx2.Headers(), message="the API key is invalid")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        lambda: UsageError("output directory is not empty: out"),
+        lambda: RevisionMismatchError("repository revision changed since the evidence pack"),
+        lambda: HistoryTooLargeError("the selected sections need more than 4000 tokens"),
+        lambda: FileNotFoundError("no such repository"),
+        lambda: subprocess.CalledProcessError(128, ["git", "rev-parse", "HEAD"]),
+        lambda: ModuleNotFoundError("No module named 'typesafe_sdk'"),
+        _provider_refusal,
+    ],
+    ids=["usage", "revision", "history-too-large", "file", "git", "missing-extra", "provider-refusal"],
+)
+def test_an_expected_failure_is_one_line_and_exit_status_one(
+    tmp_path: Path, offline_main: dict, capsys: pytest.CaptureFixture[str], error
+) -> None:
+    # Arrange
+    offline_main["error"] = error()
+
+    # Act
+    status = main(["find", "the policy", "--repo", str(tmp_path), "--out", str(tmp_path / "out")])
+
+    # Assert
+    assert status == 1
+    assert capsys.readouterr().err == f"jvn find: {offline_main['error']}\n"
+
+
+@pytest.mark.parametrize(
+    ("raised", "last_line"),
+    [
+        ("KeyError('search')", "KeyError: 'search'"),
+        ("TypeError('a programming bug')", "TypeError: a programming bug"),
+        ("ValueError('a bare value error')", "ValueError: a bare value error"),
+        ("RuntimeError('a bare runtime error')", "RuntimeError: a bare runtime error"),
+    ],
+    ids=["key", "type", "bare-value", "bare-runtime"],
+)
+def test_an_unexpected_failure_keeps_its_traceback(tmp_path: Path, raised: str, last_line: str) -> None:
+    script = (
+        "import sys\n"
+        "from jev_navigator import cli\n"
+        "class Client:\n"
+        "    model = 'test'\n"
+        "    def close(self):\n"
+        "        pass\n"
+        "def broken(*args, **kwargs):\n"
+        f"    raise {raised}\n"
+        "cli._load_typesafe_environment = lambda environment: None\n"
+        "cli.TypeSafeJevClient = Client\n"
+        "cli.create_evidence_pack = broken\n"
+        "raise SystemExit(cli.main(sys.argv[1:]))\n"
+    )
+    arguments = ["find", "the policy", "--repo", str(tmp_path), "--out", str(tmp_path / "out")]
+
+    result = subprocess.run([sys.executable, "-c", script, *arguments], text=True, capture_output=True)
+
+    assert result.returncode == 1
+    assert "Traceback (most recent call last)" in result.stderr
+    assert result.stderr.endswith(f"{last_line}\n")
+    assert "jvn find:" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("error", "reported"),
+    [(UsageError("min_lines must not exceed max_lines"), True), (KeyError("coverage"), False)],
+    ids=["expected", "unexpected"],
+)
+def test_statistics_report_expected_failures_and_raise_unexpected_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], error, reported
+) -> None:
+    from jev_navigator import cli
+
+    class Index:
+        @staticmethod
+        def from_directory(*args, **kwargs):
+            raise error
+
+    monkeypatch.setattr(cli, "CodeIndex", Index)
+    arguments = ["stats", "--repo", str(tmp_path), "--out", str(tmp_path / "out")]
+
+    if reported:
+        assert main(arguments) == 1
+        assert f"jvn stats: {error}" in capsys.readouterr().err
+    else:
+        with pytest.raises(KeyError, match="coverage"):
+            main(arguments)
 
 
 @pytest.mark.parametrize(

@@ -8,6 +8,7 @@ from git_repos import commit_files
 
 from jev_navigator.cli import create_evidence_pack
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.errors import UsageError
 from jev_navigator.testing import ScriptedJevClient
 
 
@@ -68,7 +69,7 @@ def test_findall_reopens_remaining_functions_without_repeating_completed_judgmen
     checkpoint["check_id"] = "previous-containment-question"
     (first / "resume.json").write_text(json.dumps(checkpoint))
     stale_client = ScriptedJevClient(nouls=response)
-    with pytest.raises(ValueError, match="question changed"):
+    with pytest.raises(UsageError, match="question changed"):
         create_evidence_pack(
             repository,
             (),

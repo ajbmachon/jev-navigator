@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from functools import cache
 from typing import Protocol
 
+from ..errors import JvnRefusal
+
 MASK = "[MASKED]"
 _PRIVATE_KEY_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|\Z)", re.S
@@ -52,7 +54,7 @@ class Scanner(Protocol):
     def findings(self, text: str) -> list[str]: ...
 
 
-class SecretInRequestError(RuntimeError):
+class SecretInRequestError(JvnRefusal, RuntimeError):
     """The final pre-send scan found a secret; the request was not sent."""
 
 

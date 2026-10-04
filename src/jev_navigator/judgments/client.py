@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import Protocol
 
+from ..errors import JvnRefusal
 from .answers import JevResponse
 
 LATEST_JEV = "jev-latest"
@@ -50,11 +51,11 @@ class AsyncJevClient(Protocol):
     async def ask(self, state: Mapping, questions: Mapping) -> JevResponse: ...
 
 
-class MissingAnswerError(LookupError):
+class MissingAnswerError(JvnRefusal, LookupError):
     """Replay found no stored answer for a request."""
 
 
-class InputBudgetExceededError(RuntimeError):
+class InputBudgetExceededError(JvnRefusal, RuntimeError):
     """The provider refused a request whose input exceeded the model's input budget."""
 
 

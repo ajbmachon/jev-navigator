@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 
-from .adapters.typesafe import TypeSafeJevClient
+from .adapters.typesafe import TypeSafeJevClient, provider_errors
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
 from .cli_trace import create_trace_evidence_pack
@@ -24,7 +24,8 @@ from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
 from .directives.places import Place, place_for_line
-from .index.code_index import CodeIndex
+from .errors import JvnRefusal, UsageError
+from .index.code_index import CodeIndex, RevisionMismatchError
 from .index.languages import language_of
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
@@ -39,6 +40,10 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
+# The failures a command reports in one line: files, git and other subprocesses, a missing extra,
+# and JVN's own refusals. Anything else, a bare ValueError or KeyError included, is a bug and keeps
+# its traceback, the only copy of its cause.
+EXPECTED_ERRORS: tuple[type[Exception], ...] = (OSError, subprocess.SubprocessError, ImportError, JvnRefusal)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -104,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     break
                 resume_from = output
                 output = output.parent / _default_output(repository).name
-    except Exception as error:
+    except (*EXPECTED_ERRORS, *provider_errors()) as error:
         print(f"jvn {args.command}: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
@@ -218,7 +223,7 @@ def _run_statistics(args: argparse.Namespace) -> int:
         outcome = "cancelled"
         print("jvn stats: cancelled", file=sys.stderr)
         return 130
-    except Exception as error:
+    except EXPECTED_ERRORS as error:
         print(f"jvn stats: {error}", file=sys.stderr)
         return 1
     finally:
@@ -277,12 +282,12 @@ def create_evidence_pack(
         checkpoint = SavedSearch(None)
         if previous is not None:
             if previous["source"]["revision"] != index.commit:
-                raise ValueError("repository revision changed since the evidence pack")
+                raise RevisionMismatchError("repository revision changed since the evidence pack")
             checkpoint = load_resume(resume_from.resolve() / "resume.json", index)
         resume = checkpoint.result
         resuming_enumeration = checkpoint.completed is not None
         if resuming_enumeration and checkpoint.check_id != CONTAINS_IMPLEMENTATION.question_id:
-            raise ValueError("Find All question changed since the evidence pack; start a new search")
+            raise UsageError("Find All question changed since the evidence pack; start a new search")
         judge = Judge(
             client,
             thresholds=thresholds,
@@ -769,12 +774,12 @@ def _validate_budget(budget: SearchBudget) -> None:
     ]
     invalid += [name for name in POSITIVE_BUDGET_FIELDS if getattr(budget, name) < 1]
     if invalid:
-        raise ValueError(f"invalid search budget fields: {', '.join(invalid)}")
+        raise UsageError(f"invalid search budget fields: {', '.join(invalid)}")
 
 
 def _prepare_output(output: Path) -> None:
     if output.exists() and any(output.iterdir()):
-        raise ValueError(f"output directory is not empty: {output}")
+        raise UsageError(f"output directory is not empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
 
 
@@ -793,9 +798,9 @@ def _previous_pack(
     source = resume_from.resolve()
     previous = json.loads((source / "manifest.json").read_text())
     if not (source / "resume.json").is_file():
-        raise ValueError(f"no saved search frontier in {source}")
+        raise UsageError(f"no saved search frontier in {source}")
     if previous["search"]["outcome"] not in ("budget", "cancelled"):
-        raise ValueError("only a budget-stopped or cancelled search can resume")
+        raise UsageError("only a budget-stopped or cancelled search can resume")
     if (
         previous.get("workflow", "find") != workflow
         or previous["source"]["repository"] != str(repository)
@@ -805,7 +810,7 @@ def _previous_pack(
         or previous["thresholds"] != thresholds.as_dict()
         or previous["provider"]["requested_model"] != getattr(client, "model", "unknown")
     ):
-        raise ValueError(
+        raise UsageError(
             "resume must use the same workflow, repository, scope, target, starts, thresholds and model"
         )
     return previous
@@ -836,13 +841,13 @@ def _load_typesafe_environment(
 def _parse_start(index: CodeIndex, value: str) -> Place:
     path, separator, raw_line = value.rpartition(":")
     if not separator or not path:
-        raise ValueError(f"start must be PATH:LINE, got {value!r}")
+        raise UsageError(f"start must be PATH:LINE, got {value!r}")
     try:
         line = int(raw_line)
     except ValueError as error:
-        raise ValueError(f"start line must be an integer, got {value!r}") from error
+        raise UsageError(f"start line must be an integer, got {value!r}") from error
     if line < 1 or line > len(index.lines(path)):
-        raise ValueError(f"start line is outside {path}: {line}")
+        raise UsageError(f"start line is outside {path}: {line}")
     return place_for_line(index, path, line, "caller-provided start")
 
 

@@ -17,6 +17,7 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
+from ..errors import JvnRefusal
 from .answers import JevResponse, NoulAnswer, response_to_raw
 from .client import (
     JEV_STATE_TOKEN_LIMIT,
@@ -58,7 +59,7 @@ _DEFAULT_MASKER = SecretMasker()
 _DEFAULT_SCANNER = SecretScanner()
 
 
-class CallCapReachedError(RuntimeError):
+class CallCapReachedError(JvnRefusal, RuntimeError):
     """A call would exceed the ``max_calls`` cap of this judge or of a judge it was scoped from."""
 
 
@@ -642,7 +643,7 @@ class Judge:
         original = error.original_error
         try:
             self._journal_failure(request_id, original, raw)
-        except Exception as failure_error:
+        except Exception as failure_error:  # noqa: BLE001 - noted on the original, which re-raises
             original.add_note(
                 "The logical request failure could not be recorded either: "
                 f"{type(failure_error).__name__}: {failure_error}"

@@ -13,6 +13,8 @@ import os
 from collections.abc import MutableMapping
 from pathlib import Path
 
+from .errors import UsageError
+
 TYPESAFE_SETTINGS = ("TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL")
 LEGACY_CONFIG = Path.home() / ".config/jvn/env"
 
@@ -43,7 +45,7 @@ def load_typesafe_environment(
                 environment[name] = value
                 contributed[name] = value
     if not environment.get("TYPESAFE_API_KEY", "").strip():
-        raise RuntimeError(
+        raise UsageError(
             "TYPESAFE_API_KEY is unset: export it, or set it in the checkout's .env "
             f"(see .env.example) or {LEGACY_CONFIG}"
         )

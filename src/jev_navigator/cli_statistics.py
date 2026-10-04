@@ -31,6 +31,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .directives import statistics
+from .errors import UsageError
 from .index.code_index import CodeIndex
 
 SCHEMA_VERSION = "jev-navigator.statistics-pack/v1"
@@ -87,9 +88,9 @@ def create_statistics_pack(
     # behind: a half-written output directory is as misleading as an empty pack.
     _validate(operations, kinds, limit)
     if any(value is not None and value < 1 for value in (min_lines, max_lines)):
-        raise ValueError("line sizes must be positive")
+        raise UsageError("line sizes must be positive")
     if min_lines is not None and max_lines is not None and min_lines > max_lines:
-        raise ValueError("min_lines must not exceed max_lines")
+        raise UsageError("min_lines must not exceed max_lines")
     output = _output_directory(output)
     repository = Path(repository).resolve()
     prefixes = tuple(prefixes)
@@ -154,12 +155,12 @@ def create_statistics_pack(
 def _output_directory(output: Path | None) -> Path:
     """Refuse a file, and a directory that already holds something, so packs are never mixed."""
     if output is None:
-        raise ValueError("a statistics pack needs somewhere to write statistics.json and statistics.md")
+        raise UsageError("a statistics pack needs somewhere to write statistics.json and statistics.md")
     output = Path(output).expanduser()
     if output.is_file():
-        raise ValueError(f"statistics output would have to be a directory and is a file: {output}")
+        raise UsageError(f"statistics output would have to be a directory and is a file: {output}")
     if output.is_dir() and any(output.iterdir()):
-        raise ValueError(
+        raise UsageError(
             f"statistics output directory is not empty, so an old pack would be mixed "
             f"into the new one: {output}"
         )
@@ -169,23 +170,23 @@ def _output_directory(output: Path | None) -> Path:
 
 def _validate(operations: Sequence[str], kinds: Sequence[str], limit: int | None) -> None:
     if not operations:
-        raise ValueError("name at least one statistics operation: " + ", ".join(STATISTICS_OPERATIONS))
+        raise UsageError("name at least one statistics operation: " + ", ".join(STATISTICS_OPERATIONS))
     unknown = [name for name in operations if name not in STATISTICS_OPERATIONS]
     if unknown:
-        raise ValueError(
+        raise UsageError(
             f"statistics knows the operations {', '.join(STATISTICS_OPERATIONS)}; nothing called "
             f"{', '.join(unknown)}"
         )
     if not kinds:
-        raise ValueError("a statistics pack measures symbol kinds, so name the kinds to measure")
+        raise UsageError("a statistics pack measures symbol kinds, so name the kinds to measure")
     unknown_kinds = [kind for kind in kinds if kind not in STATISTICS_KINDS]
     if unknown_kinds:
-        raise ValueError(
+        raise UsageError(
             f"a symbol is a function or a class here, so there is nothing to measure called "
             f"{', '.join(unknown_kinds)}"
         )
     if limit is not None and limit < 1:
-        raise ValueError("limit says how many of the widest to show, so it needs a positive number")
+        raise UsageError("limit says how many of the widest to show, so it needs a positive number")
 
 
 def _symbol(index: CodeIndex, symbol: statistics.Symbol, *, quoted: bool) -> dict:

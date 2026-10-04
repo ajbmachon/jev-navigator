@@ -16,6 +16,7 @@ from git_repos import write_files
 
 from jev_navigator.cli_statistics import STATISTICS_OPERATIONS, create_statistics_pack
 from jev_navigator.directives import statistics as stats
+from jev_navigator.errors import UsageError
 from jev_navigator.index.code_index import CodeIndex
 
 BASKET = """\
@@ -455,17 +456,17 @@ def test_a_pack_refuses_an_occupied_output_and_an_option_that_measures_nothing(
     (occupied / "evidence.json").write_text("{}\n", encoding="utf-8")
 
     # Act / Assert
-    with pytest.raises(ValueError, match="needs somewhere to write"):
+    with pytest.raises(UsageError, match="needs somewhere to write"):
         create_statistics_pack(root, (), None)
-    with pytest.raises(ValueError, match="is a file"):
+    with pytest.raises(UsageError, match="is a file"):
         create_statistics_pack(root, (), root / "web" / "broken.ts")
-    with pytest.raises(ValueError, match="not empty"):
+    with pytest.raises(UsageError, match="not empty"):
         create_statistics_pack(root, (), occupied)
-    with pytest.raises(ValueError, match="nothing called catalog"):
+    with pytest.raises(UsageError, match="nothing called catalog"):
         create_statistics_pack(root, (), tmp_path / "catalog", operations=("catalog",))
-    with pytest.raises(ValueError, match="nothing to measure called method"):
+    with pytest.raises(UsageError, match="nothing to measure called method"):
         create_statistics_pack(root, (), tmp_path / "method", kinds=("method",))
-    with pytest.raises(ValueError, match="needs a positive number"):
+    with pytest.raises(UsageError, match="needs a positive number"):
         create_statistics_pack(root, (), tmp_path / "zero", limit=0)
 
     # Assert: a refused call leaves no half-written pack behind
