@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from ..errors import UsageError
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.scope_scan import FileFacts, FileStructure
@@ -351,7 +352,7 @@ def largest_functions(
     index, so they join the ranking by default; ``held=False`` ranks only what nothing else holds.
     """
     if limit is not None and limit < 1:
-        raise ValueError("limit says how many of the widest symbols to keep, so it needs a positive number")
+        raise UsageError("limit says how many of the widest symbols to keep, so it needs a positive number")
     coverage = scan_coverage(index, scope)
     measured = [
         symbol

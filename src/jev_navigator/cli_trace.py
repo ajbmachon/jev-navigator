@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .directives.trace import EvidenceStatus, TraceObligation, TraceResult, trace_workflow
+from .errors import UsageError
 from .index.code_index import CodeIndex
 from .index.spans import Span
 from .judgments.client import JevClient
@@ -64,18 +65,18 @@ def create_trace_evidence_pack(
     unexamined spans stay ``unresolved``, and cached answers replay without a live call.
     """
     if not question.strip():
-        raise ValueError("trace needs a workflow question")
+        raise UsageError("trace needs a workflow question")
     if not starts:
-        raise ValueError("trace needs at least one start as PATH:LINE")
+        raise UsageError("trace needs at least one start as PATH:LINE")
     repository = repository.resolve()
     output = output.resolve()
     if output.exists() and any(output.iterdir()):
-        raise ValueError(f"output directory is not empty: {output}")
+        raise UsageError(f"output directory is not empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
     if answers_from is not None:
         source = answers_from.resolve()
         if not source.is_file():
-            raise ValueError(f"no answer store to replay at {source}")
+            raise UsageError(f"no answer store to replay at {source}")
         shutil.copyfile(source, output / "answers.jsonl")
     thresholds = thresholds or Thresholds()
     journal_path = output / "journal.jsonl"
@@ -124,16 +125,16 @@ def _start_span(index: CodeIndex, start: str) -> Span:
     """The concrete function span that contains the caller's ``PATH:LINE`` start."""
     path, separator, raw_line = start.rpartition(":")
     if not separator or not path:
-        raise ValueError(f"start must be PATH:LINE, got {start!r}")
+        raise UsageError(f"start must be PATH:LINE, got {start!r}")
     try:
         line = int(raw_line)
     except ValueError as error:
-        raise ValueError(f"start line must be an integer, got {start!r}") from error
+        raise UsageError(f"start line must be an integer, got {start!r}") from error
     if line < 1 or line > len(index.lines(path)):
-        raise ValueError(f"start line is outside {path}: {line}")
+        raise UsageError(f"start line is outside {path}: {line}")
     span = index.enclosing_symbol(path, line)
     if span is None:
-        raise ValueError(f"start line {line} of {path} is not inside a function")
+        raise UsageError(f"start line {line} of {path} is not inside a function")
     return span
 
 

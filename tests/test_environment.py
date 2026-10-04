@@ -11,6 +11,7 @@ from jev_navigator.environment import (
     _env_file,
     load_typesafe_environment,
 )
+from jev_navigator.errors import UsageError
 
 
 @pytest.fixture(autouse=True)
@@ -65,7 +66,7 @@ def test_the_legacy_config_fills_what_both_left_open(tmp_path, monkeypatch):
 
 def test_a_missing_key_everywhere_raises_with_every_source_named(tmp_path, monkeypatch):
     monkeypatch.setattr("jev_navigator.environment.LEGACY_CONFIG", tmp_path / "absent-legacy-env")
-    with pytest.raises(RuntimeError, match=r"\.env|jvn/env"):
+    with pytest.raises(UsageError, match=r"\.env|jvn/env"):
         load_typesafe_environment(root=tmp_path)
 
 

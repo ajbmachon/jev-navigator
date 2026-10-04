@@ -23,6 +23,8 @@ from jev_navigator.cli import (
     main,
 )
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.errors import UsageError
+from jev_navigator.index.code_index import RevisionMismatchError
 from jev_navigator.testing import ScriptedJevClient
 
 
@@ -169,7 +171,7 @@ def test_resume_rejects_changed_source_before_reusing_the_frontier(tmp_path: Pat
     (repository / "policy.py").write_text("def policy():\n    return 2\n")
     next_client = ScriptedJevClient()
 
-    with pytest.raises(ValueError, match="source or scope changed"):
+    with pytest.raises(UsageError, match="source or scope changed"):
         create_evidence_pack(
             repository,
             (),
@@ -428,13 +430,14 @@ def _provider_refusal() -> Exception:
 @pytest.mark.parametrize(
     "error",
     [
-        lambda: ValueError("repository revision changed since the evidence pack"),
+        lambda: UsageError("output directory is not empty: out"),
+        lambda: RevisionMismatchError("repository revision changed since the evidence pack"),
         lambda: FileNotFoundError("no such repository"),
         lambda: subprocess.CalledProcessError(128, ["git", "rev-parse", "HEAD"]),
         lambda: ModuleNotFoundError("No module named 'typesafe_sdk'"),
         _provider_refusal,
     ],
-    ids=["value", "file", "git", "missing-extra", "provider-refusal"],
+    ids=["usage", "revision", "file", "git", "missing-extra", "provider-refusal"],
 )
 def test_an_expected_failure_is_one_line_and_exit_status_one(
     tmp_path: Path, offline_main: dict, capsys: pytest.CaptureFixture[str], error
@@ -450,7 +453,17 @@ def test_an_expected_failure_is_one_line_and_exit_status_one(
     assert capsys.readouterr().err == f"jvn find: {offline_main['error']}\n"
 
 
-def test_an_unexpected_failure_keeps_its_traceback(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("raised", "last_line"),
+    [
+        ("KeyError('search')", "KeyError: 'search'"),
+        ("TypeError('a programming bug')", "TypeError: a programming bug"),
+        ("ValueError('a bare value error')", "ValueError: a bare value error"),
+        ("RuntimeError('a bare runtime error')", "RuntimeError: a bare runtime error"),
+    ],
+    ids=["key", "type", "bare-value", "bare-runtime"],
+)
+def test_an_unexpected_failure_keeps_its_traceback(tmp_path: Path, raised: str, last_line: str) -> None:
     script = (
         "import sys\n"
         "from jev_navigator import cli\n"
@@ -459,7 +472,7 @@ def test_an_unexpected_failure_keeps_its_traceback(tmp_path: Path) -> None:
         "    def close(self):\n"
         "        pass\n"
         "def broken(*args, **kwargs):\n"
-        "    raise TypeError('a programming bug')\n"
+        f"    raise {raised}\n"
         "cli._load_typesafe_environment = lambda environment: None\n"
         "cli.TypeSafeJevClient = Client\n"
         "cli.create_evidence_pack = broken\n"
@@ -471,13 +484,13 @@ def test_an_unexpected_failure_keeps_its_traceback(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "Traceback (most recent call last)" in result.stderr
-    assert result.stderr.endswith("TypeError: a programming bug\n")
+    assert result.stderr.endswith(f"{last_line}\n")
     assert "jvn find:" not in result.stderr
 
 
 @pytest.mark.parametrize(
     ("error", "reported"),
-    [(ValueError("no indexable files"), True), (TypeError("a programming bug"), False)],
+    [(UsageError("min_lines must not exceed max_lines"), True), (KeyError("coverage"), False)],
     ids=["expected", "unexpected"],
 )
 def test_statistics_report_expected_failures_and_raise_unexpected_ones(
@@ -497,7 +510,7 @@ def test_statistics_report_expected_failures_and_raise_unexpected_ones(
         assert main(arguments) == 1
         assert f"jvn stats: {error}" in capsys.readouterr().err
     else:
-        with pytest.raises(TypeError, match="a programming bug"):
+        with pytest.raises(KeyError, match="coverage"):
             main(arguments)
 
 

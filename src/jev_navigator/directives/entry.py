@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+from ..errors import UsageError
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import Span
@@ -36,6 +37,10 @@ CHOOSE_SPAN = Pick(
         "`target.description`? Choose from the supplied spans only."
     ),
 )
+
+
+class NoSafeEntryError(RuntimeError):
+    """Jev chose no path or span confidently enough to start the search there."""
 
 
 @dataclass(frozen=True)
@@ -106,7 +111,7 @@ def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> En
     """Select one file and one span, retaining every closed-choice receipt and span alternative."""
     files = tuple(file for file in index.available_files if language_of(file))
     if not files:
-        raise ValueError("the repository scope contains no supported code files")
+        raise UsageError("the repository scope contains no supported code files")
     decisions: list[EntryDecision] = []
     parent = ""
     while True:
@@ -281,7 +286,7 @@ def _pick(judge, question, target, level, parent, entries, descriptions, identif
         {"target": {"description": target}, "current": parent},
     )
     if result is None:
-        raise RuntimeError(f"automatic entry selection had no safe {level} options")
+        raise NoSafeEntryError(f"automatic entry selection had no safe {level} options")
     position = int(result.choice)
     option_rows = tuple(
         {"id": str(index), "entry": identify(entry), "description": descriptions[index]}

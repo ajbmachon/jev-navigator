@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from git_repos import commit_all, git, write_files
 
+from jev_navigator.errors import UsageError
 from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError, UnsafePathError
 from jev_navigator.index.spans import Span, TextHit
 
@@ -156,7 +157,7 @@ def test_paths_outside_the_scope_are_refused(sample_repo: Path) -> None:
 
     # Act and Assert
     assert index.find_definition("validate_order") == ()
-    with pytest.raises(ValueError, match="outside the index scope"):
+    with pytest.raises(UsageError, match="outside the index scope"):
         index.read_window("app/orders.py", 1)
 
 

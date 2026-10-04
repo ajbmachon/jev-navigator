@@ -10,6 +10,7 @@ import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
+from .errors import UsageError
 from .index.bindings import Binding, BindingStatus
 from .index.code_index import CodeIndex
 from .index.languages import language_of
@@ -251,7 +252,7 @@ def _next_hop(
 
 def _require_depth(depth: int | None) -> None:
     if depth is not None and depth < 0:
-        raise ValueError("trace depth must be non-negative")
+        raise UsageError("trace depth must be non-negative")
 
 
 def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ...]:
