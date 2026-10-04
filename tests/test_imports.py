@@ -13,6 +13,7 @@ from jev_navigator.index.imports import (
     ImportedName,
     imported_modules,
     imported_names,
+    module_imports,
     reexported_names,
 )
 from jev_navigator.index.spans import Span
@@ -348,6 +349,24 @@ def test_a_parenthesised_python_import_over_several_lines_lists_every_name() -> 
         "send_invoice": ImportedName("app.jobs", "send_invoice"),
         "give_back": ImportedName("app.jobs", "refund"),
     }
+
+
+def test_a_python_import_of_several_modules_imports_each_in_source_order() -> None:
+    # Arrange
+    source = "import json, app.billing as billing, app.mail\nfrom app.jobs import run\n"
+
+    # Act
+    modules = imported_modules(source, "app/routes.py")
+    taken = module_imports(source, "app/routes.py")
+
+    # Assert
+    assert modules == ["json", "app.billing", "app.mail", "app.jobs"]
+    assert taken == (
+        ("json", None),
+        ("app.billing", None),
+        ("app.mail", None),
+        ("app.jobs", frozenset({"run"})),
+    )
 
 
 def test_an_index_at_an_old_commit_still_reads_configs_outside_its_scope(tmp_path: Path) -> None:

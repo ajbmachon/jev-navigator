@@ -16,7 +16,10 @@ from .packages import Packages, package_name
 from .tsconfig import ScriptPaths, normalised
 
 _PYTHON_FROM = re.compile(r"^[ \t]*from\s+(\.*[\w.]*)\s+import\s+(\([^)]*\)|[^\n]*)", re.M)
-_PYTHON_IMPORT = re.compile(r"^[ \t]*import\s+([\w.]+)", re.M)
+_PYTHON_IMPORT = re.compile(
+    r"^[ \t]*import[ \t]+([\w.]+(?:[ \t]+as[ \t]+\w+)?(?:[ \t]*,[ \t]*[\w.]+(?:[ \t]+as[ \t]+\w+)?)*)", re.M
+)
+_PYTHON_IMPORTED_MODULE = re.compile(r"([\w.]+)(?:[ \t]+as[ \t]+(\w+))?")
 _SCRIPT_FROM = re.compile(
     r"""^[ \t]*(import|export)\s+(?:type\s+)?"""
     r"""((?:(?!\n[ \t]*(?:import|export)\b)[\w$*\s{},])*?)\s*from\s*['"]([^'"]+)['"]""",
@@ -59,7 +62,7 @@ def imported_modules(source: str, path: str) -> list[str]:
     """The module specifiers a file imports, in source order, each once."""
     if path.endswith(".py"):
         found = [(match.start(), match.group(1)) for match in _PYTHON_FROM.finditer(source)]
-        found += [(match.start(), match.group(1)) for match in _PYTHON_IMPORT.finditer(source)]
+        found += [(position, module) for position, module, _ in _python_imports(source)]
     else:
         code = _without_script_comments(source)
         found = [(match.start(), match.group(3)) for match in _SCRIPT_FROM.finditer(code)]
@@ -76,7 +79,7 @@ def module_imports(source: str, path: str) -> tuple[tuple[str, frozenset[str] | 
             (match.start(), match.group(1), _python_names(match.group(2)))
             for match in _PYTHON_FROM.finditer(source)
         ]
-        found += [(match.start(), match.group(1), None) for match in _PYTHON_IMPORT.finditer(source)]
+        found += [(position, module, None) for position, module, _ in _python_imports(source)]
     else:
         code = _without_script_comments(source)
         found = [
@@ -91,6 +94,16 @@ def module_imports(source: str, path: str) -> tuple[tuple[str, frozenset[str] | 
         before = taken.get(specifier, frozenset())
         taken[specifier] = None if before is None or names is None else before | names
     return tuple(taken.items())
+
+
+def _python_imports(source: str) -> list[tuple[int, str, str | None]]:
+    """Each module an ``import`` statement names, with its position and its ``as`` name, if any:
+    ``import json, app.billing as billing`` imports ``json`` and ``app.billing``."""
+    return [
+        (statement.start(1) + module.start(), module.group(1), module.group(2))
+        for statement in _PYTHON_IMPORT.finditer(source)
+        for module in _PYTHON_IMPORTED_MODULE.finditer(statement.group(1))
+    ]
 
 
 def _python_names(clause: str) -> frozenset[str] | None:
