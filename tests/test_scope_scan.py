@@ -11,6 +11,7 @@ from jev_navigator.directives.places import neighbours_and_omissions, place_for_
 from jev_navigator.index import scope_scan, tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.index.fact_cache import FactCache
 from jev_navigator.index.languages import has_flow_pragma, language_of
 from jev_navigator.index.scope_scan import FileFacts, FileStructure, Unparsed, scan_facts
 from jev_navigator.index.spans import Span
@@ -263,12 +264,10 @@ export default class Store {
 """
 
 
-def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
-    sample_repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The scan decodes only the match fields its facts are built from. Built from every field of
-    the parser's output instead, every file's facts are the same, so no field the facts read is
-    skipped: Python, TypeScript, TSX, plain JavaScript, Flow and a file the grammar cannot recover."""
+@pytest.fixture
+def every_language(sample_repo: Path) -> list[str]:
+    """The sample repository's code files plus TSX, plain JavaScript, Flow and a file the grammar
+    cannot recover: every language and fact kind the scan produces."""
     write_files(
         sample_repo,
         {
@@ -280,7 +279,16 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             "js/index.js": ADAPTER_CALLER,
         },
     )
-    files = [file for file in tools.listed_files(sample_repo) if language_of(file)]
+    return [file for file in tools.listed_files(sample_repo) if language_of(file)]
+
+
+def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
+    sample_repo: Path, every_language: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scan decodes only the match fields its facts are built from. Built from every field of
+    the parser's output instead, every file's facts are the same, so no field the facts read is
+    skipped."""
+    files = every_language
 
     narrow = scan_facts(files, sample_repo, Unparsed())
     monkeypatch.setattr(scope_scan, "decode_match", json.loads)
@@ -289,6 +297,25 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
     assert {language_of(file) for file in files} == {"python", "typescript", "tsx", "javascript"}
     assert any(facts.incomplete for facts in whole.values())
     assert narrow == whole
+
+
+def test_every_language_s_facts_load_back_from_the_fact_cache_as_they_were_scanned(
+    sample_repo: Path, every_language: list[str], tmp_path: Path
+) -> None:
+    # Arrange
+    scanned = scan_facts(every_language, sample_repo, Unparsed())
+    contents = {file: (sample_repo / file).read_bytes() for file in every_language}
+    cache = FactCache(tmp_path / "facts")
+
+    # Act
+    for file, facts in scanned.items():
+        cache.save(file, contents[file], facts)
+    loaded = {file: cache.load(file, contents[file]) for file in every_language}
+
+    # Assert
+    assert any(facts.incomplete and facts.unparsed_lines for facts in scanned.values())
+    assert any(facts.export_names and facts.references for facts in scanned.values())
+    assert loaded == scanned
 
 
 def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_path: Path) -> None:

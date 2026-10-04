@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
-from dataclasses import asdict
 from functools import cache
 from pathlib import Path
+
+import msgspec
 
 from ..cache_root import cache_root
 from . import imports, languages, scope_scan, spans
@@ -40,12 +41,13 @@ class FactCache:
             return None
 
     def save(self, file: str, content: bytes, facts: FileFacts) -> None:
+        """Writes ``facts`` as JSON with one key per dataclass field, the shape ``_decode`` reads."""
         path = self._path(file, content)
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
-            "w", dir=path.parent, prefix=f".{path.name}.", delete=False
+            "wb", dir=path.parent, prefix=f".{path.name}.", delete=False
         ) as temporary:
-            temporary.write(json.dumps(_encode(facts), sort_keys=True, separators=(",", ":")))
+            temporary.write(msgspec.json.encode(facts))
             temporary_path = Path(temporary.name)
         try:
             temporary_path.replace(path)
@@ -86,21 +88,6 @@ def _match_reader_source() -> str:
 
 def _span(file: str, raw: dict) -> Span:
     return Span(file, raw["start"], raw["end"], raw.get("name", ""))
-
-
-def _encode(facts: FileFacts) -> dict:
-    return {
-        "structure": {
-            "functions": [asdict(span) for span in facts.structure.functions],
-            "symbols": [asdict(span) for span in facts.structure.symbols],
-            "declarations": [asdict(span) for span in facts.structure.declarations],
-        },
-        "calls": [asdict(call) for call in facts.calls],
-        "references": [asdict(reference) for reference in facts.references],
-        "incomplete": facts.incomplete,
-        "export_names": list(facts.export_names),
-        "unparsed_lines": [list(stretch) for stretch in facts.unparsed_lines],
-    }
 
 
 def _decode(file: str, raw: dict) -> FileFacts:
