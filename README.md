@@ -245,6 +245,7 @@ applies every rule now.
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator import operations, comments
 from jev_navigator.index import units
+from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS
 
 index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))
 old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
@@ -255,6 +256,8 @@ index.find_references("send_invoice")  # Reference(name, file, line, role, holde
 index.references_in(span)  # names a function passes on without calling (callbacks, registries)
 index.enclosing_symbol(file, line)
 index.symbols_in(file)
+index.decorator_starts_in(file)  # each decorated function's span and its first decorator line
+index.stubs_in(file)  # functions whose body is only ..., pass, a docstring or raise NotImplementedError
 index.read_slice(span)
 index.read_window(file, line, radius=10)
 index.search_text("orders.max_items")  # ripgrep over the narrowed files only
@@ -262,8 +265,8 @@ index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
 
-units.list_units(index, files, box_chars=76_800)  # outermost functions and methods, top-level code
-units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=76_800)  # line, range or symbol
+units.list_units(index, files, box_chars=JEV_INPUT_BOX_CHARS)  # outermost functions and methods, top-level code
+units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=JEV_INPUT_BOX_CHARS)  # line, range or symbol
 
 operations.slice_around(index, file, line)  # the enclosing function, or a window
 operations.code_described_by_comment(index, file, line)  # the whole next symbol or block

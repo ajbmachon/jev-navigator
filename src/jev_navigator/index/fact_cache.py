@@ -157,6 +157,8 @@ def _encode(facts: FileFacts) -> dict:
             "functions": [asdict(span) for span in facts.structure.functions],
             "symbols": [asdict(span) for span in facts.structure.symbols],
             "declarations": [asdict(span) for span in facts.structure.declarations],
+            "decorated": [list(decorated) for decorated in facts.structure.decorated],
+            "stubs": [list(stub) for stub in facts.structure.stubs],
         },
         "calls": [asdict(call) for call in facts.calls],
         "references": [asdict(reference) for reference in facts.references],
@@ -173,6 +175,8 @@ def _decode(file: str, raw: dict) -> FileFacts:
             tuple(_span(file, span) for span in structure["functions"]),
             tuple(_span(file, span) for span in structure["symbols"]),
             tuple(_span(file, span) for span in structure["declarations"]),
+            tuple((int(start), int(end), int(line)) for start, end, line in structure["decorated"]),
+            tuple((int(start), int(end)) for start, end in structure["stubs"]),
         ),
         tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
         tuple(

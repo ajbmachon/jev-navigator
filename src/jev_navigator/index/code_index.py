@@ -313,6 +313,24 @@ class CodeIndex:
     def functions_in(self, file: str) -> tuple[Span, ...]:
         return self._file_structure(file).functions
 
+    def decorator_starts_in(self, file: str) -> dict[Span, int]:
+        """Each function of ``file`` whose decorators sit before it, and the line of its first
+        decorator. The function's span still starts at its own first line, below its decorators."""
+        structure = self._file_structure(file)
+        starts = {(start, end): line for start, end, line in structure.decorated}
+        return {
+            span: starts[(span.start, span.end)]
+            for span in structure.functions
+            if (span.start, span.end) in starts
+        }
+
+    def stubs_in(self, file: str) -> tuple[Span, ...]:
+        """The functions of ``file`` whose body only declares a shape: ``...``, ``pass``, a docstring
+        or ``raise NotImplementedError``."""
+        structure = self._file_structure(file)
+        stubs = set(structure.stubs)
+        return tuple(span for span in structure.functions if (span.start, span.end) in stubs)
+
     def functions_in_files(self, files: Sequence[str]) -> tuple[Span, ...]:
         """Enumerate functions with one batched fact scan for the not-yet-cached source files."""
         files = tuple(dict.fromkeys(files))

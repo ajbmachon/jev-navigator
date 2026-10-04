@@ -297,8 +297,9 @@ than AST parent identities. The `jvn stats` CLI writes these measurements as JSO
 from jev_navigator.index.units import (
     LineAnchor, RangeAnchor, SymbolAnchor, items_to_judge, list_units, read_ranges, resolve_anchors,
 )
+from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS
 
-BOX = 76_800  # characters the request may give the unit: Jev's box for state plus longest question
+BOX = JEV_INPUT_BOX_CHARS  # characters the request may give the unit: Jev's box for state plus longest question
 listing = list_units(index, index.files, box_chars=BOX)
 for unit in listing.units:
     print(unit.id, unit.kind, unit.symbol, unit.content_sha256[:12], unit.nested_in)
@@ -324,13 +325,24 @@ hash when other lines of its file change. The record holds locations and hashes,
 top-level code. `read_ranges(index, file, ranges)` is the one reader of that code, joining the ranges
 in order with a newline. `write_units` and `read_units` store records as one JSON object per line.
 
+A function's or method's unit starts at its first decorator, so a route such as
+`@app.route("/orders")` or NestJS `@Get()` is judged with its handler and is not top-level code.
+Only the unit's `ranges` reach back to the decorator: its id, like the index's span
+(`CodeIndex.decorator_starts_in`), still starts at the function's own first line. Python and
+TypeScript put decorators before the function node; JavaScript's parser already starts a method at
+its decorators. A class's decorators stay with the class head in the top-level code. A stub, a Python
+function whose body is only `...`, `pass`, a docstring or `raise NotImplementedError`
+(`CodeIndex.stubs_in`), is no unit of its own: its lines are top-level code, so a Protocol is judged
+whole, and an anchor on a stub names that top-level code.
+
 Top-level code is a file's lines outside every function and method, class bodies included, kept as
 runs of lines in order (`ranges`) without the blank lines at their edges. A file whose top-level code
 is only imports, comments, directives such as `"use client"`, lines of closing brackets and blank
 lines lists no top-level unit. A file in a language JVN does not parse gives no units and is named
 in `unlisted` with `language not supported`, as is a file that disappeared after the inventory.
 
-A unit whose text fits `box_chars` is one item, whatever its length. Only a larger unit is cut into
+A unit whose text fits `box_chars`, measured as escaped JSON like every request
+(`judgments.questions.serialized_chars`), is one item, whatever its length. Only a larger unit is cut into
 `pieces` of at most 60 lines, in order, with no overlap and never across two runs of top-level code;
 each piece has its own range, hash and size. A piece still larger than the box is
 `too_large_to_judge`: it keeps its range and size, and `judged_pieces` leaves it out. A cut unit

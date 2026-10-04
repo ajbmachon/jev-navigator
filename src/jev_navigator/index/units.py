@@ -1,11 +1,13 @@
 """Units: what a search judges and what a result names, and the one resolver for a caller's anchors.
 
 A unit is one function, one method, or one file's top-level code: its lines outside every function
-and method, class bodies included, kept as runs of lines in order. A record carries the unit's
-identity, kind, qualified symbol and the hash of its own text. Only a unit larger than the request
-box is cut, into pieces of up to 60 lines with no overlap; a piece never spans two runs. The unit
-stays one unit, scored by its best piece. A piece still over the box is too large to judge: it is
-named with its range and size and never judged.
+and method, class bodies included, kept as runs of lines in order. A function's or method's unit
+starts at its first decorator, so a route travels with its handler, while its id stays the index's
+span key. A stub, a function whose body only declares a shape (``CodeIndex.stubs_in``), is no unit:
+its lines are top-level code. A record carries the unit's identity, kind, qualified symbol and the
+hash of its own text. Only a unit larger than the request box is cut, into pieces of up to 60 lines
+with no overlap; a piece never spans two runs. The unit stays one unit, scored by its best piece. A
+piece still over the box is too large to judge: it is named with its range and size and never judged.
 
 Spans are lines, so functions on the same lines have the same text and are one unit, named by the
 first named of them. A function nested in another is a unit of its own (``nested_in`` names the
@@ -331,9 +333,11 @@ class _SourceFile:
         self._lines = index.lines(file)
         self._symbols = index.symbols_in(file)
         self._all_functions = frozenset(index.functions_in(file))
-        functions = _one_per_range(index.functions_in(file))
+        self._decorator_starts = index.decorator_starts_in(file)
+        stubs = frozenset(index.stubs_in(file))
+        functions = _one_per_range(span for span in index.functions_in(file) if span not in stubs)
         self.functions = tuple(self._function_unit(span, functions) for span in functions)
-        self.top_level = self._top_level_unit(functions)
+        self.top_level = self._top_level_unit()
 
     def listed(self) -> tuple[Unit, ...]:
         outermost = tuple(unit for unit in self.functions if unit.nested_in is None)
@@ -359,10 +363,11 @@ class _SourceFile:
         outer = holder_of(functions, span)
         kind = UnitKind.METHOD if is_method else UnitKind.FUNCTION
         nested_in = None if outer is None else outer.key
-        return self._unit(span.key, ((span.start, span.end),), kind, self.qualified(span), nested_in)
+        start = self._decorator_starts.get(span, span.start)
+        return self._unit(span.key, ((start, span.end),), kind, self.qualified(span), nested_in)
 
-    def _top_level_unit(self, functions: Sequence[Span]) -> Unit | None:
-        inside = {line for span in functions for line in range(span.start, span.end + 1)}
+    def _top_level_unit(self) -> Unit | None:
+        inside = _lines_of(self.functions)
         outside = (line for line in range(1, len(self._lines) + 1) if line not in inside)
         ranges = tuple(trimmed for run in _runs(outside) if (trimmed := self._without_blank_edges(run)))
         if not ranges:
@@ -510,6 +515,10 @@ def _one_per_range(spans: Iterable[Span]) -> tuple[Span, ...]:
         by_range.setdefault((span.start, span.end), []).append(span)
     chosen = (min(group, key=lambda span: (not _is_named(span), span.name)) for group in by_range.values())
     return tuple(sorted(chosen, key=lambda span: (span.start, -span.end)))
+
+
+def _lines_of(units: Iterable[Unit]) -> frozenset[int]:
+    return frozenset(line for unit in units for start, end in unit.ranges for line in range(start, end + 1))
 
 
 def _runs(lines: Iterable[int]) -> list[LineRange]:

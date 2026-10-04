@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from jev_navigator.index.units import (
     Origin,
     RangeAnchor,
     SymbolAnchor,
+    Unit,
     UnitKind,
     best_piece,
     items_to_judge,
@@ -589,6 +591,186 @@ def test_top_level_code_over_the_box_is_cut_into_pieces(shop: CodeIndex) -> None
         (2, 99, 130),
     ]
     assert not any(piece.too_large_to_judge for piece in top.pieces)
+
+
+FLASK_VIEWS = """\
+from app import app
+import functools
+
+
+@app.route(
+    "/orders",
+    methods=["POST"],
+)
+@functools.cache
+def create_order():
+    return save()
+
+
+class Views:
+    @staticmethod
+    # Lists every order.
+    def list_orders():
+        return []
+"""
+
+NEST_CONTROLLER = """\
+import { Controller, Get, HttpCode, Post } from "@nestjs/common";
+
+@Controller("orders")
+export class OrdersController {
+  @Get(":id")
+  find(id: string) {
+    return id;
+  }
+
+  @Post()
+  // Created orders answer 201.
+  @HttpCode(201)
+  create() {
+    return 1;
+  }
+}
+"""
+
+
+@pytest.fixture
+def decorated(tmp_path: Path) -> CodeIndex:
+    root = tmp_path / "decorated"
+    write_files(root, {"app/views.py": FLASK_VIEWS, "web/orders.controller.ts": NEST_CONTROLLER})
+    commit_all(root)
+    return CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+
+def _code_lines(source: str) -> list[int]:
+    return [number for number, line in enumerate(source.split("\n"), 1) if line.strip()]
+
+
+def _code_lines_in(units: Iterable[Unit], source: str) -> list[int]:
+    """Each line of code in ``units``, once per unit holding it, so a line in two units shows twice."""
+    code = set(_code_lines(source))
+    lines = (line for unit in units for start, end in unit.ranges for line in range(start, end + 1))
+    return sorted(line for line in lines if line in code)
+
+
+def test_a_python_function_unit_includes_its_decorators(decorated: CodeIndex) -> None:
+    # Act
+    units = _units_by_id(decorated, ("app/views.py",))
+
+    # Assert: the route travels with its handler, so Jev judges the handler with its route, and the
+    # decorator lines leave the top-level code. The id and the index's span still start at `def`.
+    assert sorted(units) == ["app/views.py:10-11", "app/views.py:17-18", "app/views.py:top"]
+    assert units["app/views.py:10-11"].ranges == ((5, 11),)
+    assert read_ranges(decorated, "app/views.py", units["app/views.py:10-11"].ranges).startswith(
+        '@app.route(\n    "/orders",'
+    )
+    assert (units["app/views.py:17-18"].symbol, units["app/views.py:17-18"].ranges) == (
+        "Views.list_orders",
+        ((15, 18),),
+    )
+    assert units["app/views.py:top"].ranges == ((1, 2), (14, 14))
+    assert _code_lines_in(units.values(), FLASK_VIEWS) == _code_lines(FLASK_VIEWS)
+    assert [(span.start, span.end) for span in decorated.functions_in("app/views.py")] == [(10, 11), (17, 18)]
+
+
+def test_a_typescript_method_unit_includes_its_decorators(decorated: CodeIndex) -> None:
+    # Act
+    units = _units_by_id(decorated, ("web/orders.controller.ts",))
+
+    # Assert: each method takes its own decorators, past a comment between them; the class's
+    # decorator stays with the class head in the top-level code.
+    assert sorted(units) == [
+        "web/orders.controller.ts:13-15",
+        "web/orders.controller.ts:6-8",
+        "web/orders.controller.ts:top",
+    ]
+    assert units["web/orders.controller.ts:6-8"].ranges == ((5, 8),)
+    assert units["web/orders.controller.ts:13-15"].ranges == ((10, 15),)
+    assert units["web/orders.controller.ts:6-8"].symbol == "OrdersController.find"
+    assert units["web/orders.controller.ts:top"].ranges == ((1, 4), (16, 16))
+    assert _code_lines_in(units.values(), NEST_CONTROLLER) == _code_lines(NEST_CONTROLLER)
+    assert [(span.start, span.end) for span in decorated.functions_in("web/orders.controller.ts")] == [
+        (6, 8),
+        (13, 15),
+    ]
+
+
+def test_an_anchor_on_a_decorator_names_the_function_it_decorates(decorated: CodeIndex) -> None:
+    # Act
+    resolved = resolve_anchors(
+        decorated,
+        (LineAnchor("app/views.py", 6), LineAnchor("web/orders.controller.ts", 12)),
+        box_chars=JEV_BOX,
+    )
+
+    # Assert
+    assert [unit.symbol for unit in resolved.units] == ["create_order", "OrdersController.create"]
+
+
+CLIENT_PROTOCOL = """\
+from typing import Protocol
+
+
+class JevClient(Protocol):
+    def ask(self, state, questions) -> dict: ...
+
+    def close(self) -> None:
+        '''Releases the connection.'''
+
+    def flush(self) -> None:
+        pass
+
+    def reset(self) -> None:
+        raise NotImplementedError
+
+    def retry(self) -> None:
+        \"\"\"Tries again.\"\"\"
+        raise NotImplementedError("retry is not supported")
+
+
+def call(client: JevClient):
+    \"\"\"Asks once.\"\"\"
+    return client.ask({}, {})
+"""
+
+
+@pytest.fixture
+def protocol(tmp_path: Path) -> CodeIndex:
+    root = tmp_path / "protocol"
+    write_files(root, {"app/client.py": CLIENT_PROTOCOL})
+    commit_all(root)
+    return CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+
+def test_a_stub_joins_its_files_top_level_code(protocol: CodeIndex) -> None:
+    # Act
+    units = _units_by_id(protocol, ("app/client.py",))
+
+    # Assert: methods whose body is only `...`, a docstring, `pass` or `raise NotImplementedError`,
+    # alone or together, declare a shape and do nothing, so the Protocol is judged whole in the
+    # top-level code. A docstring before real code is no stub. The index still knows every stub as a
+    # function.
+    assert sorted(units) == ["app/client.py:21-23", "app/client.py:top"]
+    assert units["app/client.py:top"].ranges == ((1, 18),)
+    assert _code_lines_in(units.values(), CLIENT_PROTOCOL) == _code_lines(CLIENT_PROTOCOL)
+    assert [span.name for span in protocol.functions_in("app/client.py")] == [
+        "ask",
+        "close",
+        "flush",
+        "reset",
+        "retry",
+        "call",
+    ]
+
+
+def test_an_anchor_on_a_stub_names_the_top_level_code(protocol: CodeIndex) -> None:
+    # Act
+    resolved = resolve_anchors(
+        protocol, (SymbolAnchor("JevClient.ask"), LineAnchor("app/client.py", 11)), box_chars=JEV_BOX
+    )
+
+    # Assert
+    assert [unit.id for unit in resolved.units] == ["app/client.py:top"]
 
 
 def test_an_anchor_outside_every_function_resolves_to_the_top_level_unit(shop: CodeIndex) -> None:
