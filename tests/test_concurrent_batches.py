@@ -305,3 +305,52 @@ def test_a_capped_async_call_always_answers_the_first_batches_in_their_stable_or
     # Assert
     assert len(set(answered_runs)) == 1
     assert len(answered_runs[0]) == 3
+
+
+@dataclass
+class OneFailingAsyncClient:
+    """An async provider whose request for ``f0.py`` fails at once while the other requests of its
+    wave are still in flight; it records each request that finishes."""
+
+    script: ScriptedJevClient = field(default_factory=lambda: ScriptedJevClient(default_noul=0.9))
+    finished: list[str] = field(default_factory=list)
+
+    @property
+    def model(self) -> str:
+        return self.script.model
+
+    async def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        file = state["items"][0]["file"]
+        if file == "f0.py":
+            raise ConnectionError("the provider is down")
+        for _ in range(3):
+            await asyncio.sleep(0)
+        self.finished.append(file)
+        return self.script.send(state, questions)
+
+    def parse(self, raw: RawResponse):
+        return self.script.parse(raw)
+
+
+def test_an_async_batch_failure_is_raised_only_after_the_rest_of_its_wave_settles() -> None:
+    # Arrange
+    client = OneFailingAsyncClient()
+    judge = Judge(client, max_concurrency=3, items_per_request=1)
+    finished_when_raised: list[str] = []
+
+    async def judged_then_given_time() -> None:
+        try:
+            await judge.check_each_async(DESCRIBES, SMALL_ITEMS[:3], SHARED)
+        except ConnectionError:
+            finished_when_raised.extend(client.finished)
+            raise
+        finally:
+            for _ in range(10):
+                await asyncio.sleep(0)
+
+    # Act
+    with pytest.raises(ConnectionError, match="the provider is down"):
+        asyncio.run(judged_then_given_time())
+
+    # Assert: no request of the failed call was still running when the failure came out
+    assert sorted(finished_when_raised) == sorted(client.finished) == ["f1.py", "f2.py"]

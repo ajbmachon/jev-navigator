@@ -339,7 +339,8 @@ class Judge:
         """``check_every`` with its batches sent concurrently, at most ``max_concurrency`` at once and,
         under a call cap, in waves no larger than the calls left, as the sync path does. When the
         served model is still unknown and an answer store is present, the first batch pins the model
-        before the remaining batches look in the store."""
+        before the remaining batches look in the store. A failed batch is raised once the rest of
+        its wave has settled, so no request of the call is still running when the error comes out."""
         plan = self._check_plan(checks, items, shared, list_name, thresholds)
         batches = plan.batches
         if batches and self._must_learn_model_first():
@@ -350,7 +351,10 @@ class Judge:
         while batches:
             size = self._wave_size(len(batches))
             wave, batches = batches[:size], batches[size:]
-            await asyncio.gather(*(self._answer_batch_async(plan, batch, slots) for batch in wave))
+            settled = await asyncio.gather(
+                *(self._answer_batch_async(plan, batch, slots) for batch in wave), return_exceptions=True
+            )
+            _raise_first_failure(settled)
         return plan.answers()
 
     async def _answer_batch_async(self, plan: _CheckPlan, batch: _Batch, slots: asyncio.Semaphore) -> None:
@@ -1139,6 +1143,13 @@ class _CallRequest:
 def _positions(batch: _Batch) -> list[int]:
     """The item positions a batch carries, in their place in the request."""
     return list(batch.members)
+
+
+def _raise_first_failure(settled: Sequence[object]) -> None:
+    """The first failure of a settled async wave, in the wave's stable order, raised as itself."""
+    for outcome in settled:
+        if isinstance(outcome, BaseException):
+            raise outcome
 
 
 def _completed_batches(futures: list[Future]) -> Iterator[tuple[_Batch, JevResponse]]:
