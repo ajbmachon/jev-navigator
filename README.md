@@ -299,8 +299,9 @@ an import names, proves the target, `candidate` when only the name matches (a me
 definition elsewhere with no import), `unresolved` when nothing in scope defines it, and `unknown` when
 the definition may sit in lines the index could not parse. A call `jwt.verify()` where module-level
 code binds `jwt` to a whole module of the scope (`import * as jwt`, `const jwt = require('./jwt')`,
-read from the syntax tree) binds to the `verify` that module, or one it re-exports from, defines; only
-that module's facts are read. A name a function binds for its own body (a parameter, a local
+in Python `import app.jwt as jwt`, and `app.jwt.verify()` after `import app.jwt`, all read from the
+syntax tree) binds to the `verify` that module, or one it re-exports from, defines; only that module's
+facts are read. A name a function binds for its own body (a parameter, a local
 variable, a caught error or a loop variable) replaces any module-level definition or import of that
 name inside the function: `db.query()` with a parameter `db`, or `stop()` with a parameter `stop`,
 binds to no import; it is a `candidate` whose local value is not resolved. A function counts from its

@@ -498,14 +498,28 @@ def _captured_names_by_file(matches) -> dict[str, tuple[str, ...]]:
 
 
 def _module_aliases_from_matches(matches) -> dict[str, tuple[ModuleAlias, ...]]:
-    """Each file's module aliases in source order; the module is the captured string without its
-    quotes."""
+    """Each file's module aliases in source order (see ``MODULE_ALIAS_RULES``)."""
     aliases: dict[str, list[tuple[int, ModuleAlias]]] = {}
     for match in matches:
-        captured = match["metaVariables"]["single"]
-        alias = ModuleAlias(captured["NAME"]["text"], captured["SPEC"]["text"][1:-1])
-        aliases.setdefault(match["file"], []).append((match["range"]["byteOffset"]["start"], alias))
+        found = aliases.setdefault(match["file"], [])
+        found += [(match["range"]["byteOffset"]["start"], alias) for alias in _module_aliases_of(match)]
     return {file: tuple(alias for _, alias in sorted(found)) for file, found in aliases.items()}
+
+
+def _module_aliases_of(match: dict) -> list[ModuleAlias]:
+    """A script module is the captured string without its quotes. A Python import without ``as``
+    makes each dotted prefix of its module reach the module of that name: ``app`` and ``app.jobs``
+    for ``import app.jobs``."""
+    captured = match["metaVariables"]["single"]
+    name = captured["NAME"]["text"]
+    if "SPEC" not in captured:
+        parts = name.split(".")
+        return [
+            ModuleAlias(prefix, prefix)
+            for prefix in (".".join(parts[:end]) for end in range(1, len(parts) + 1))
+        ]
+    module = captured["SPEC"]["text"]
+    return [ModuleAlias(name, module[1:-1] if module[:1] in ("'", '"') else module)]
 
 
 def _module_alias_rules(languages: Sequence[str]) -> str:

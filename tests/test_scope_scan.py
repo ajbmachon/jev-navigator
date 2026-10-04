@@ -908,6 +908,73 @@ def test_a_module_alias_is_read_from_module_level_code_only(tmp_path: Path) -> N
     assert dict(aliases) == {"jwt": "./jwt", "db": "./db", "legacy": "./legacy"}
 
 
+def test_a_python_module_alias_is_read_from_module_level_imports_only(tmp_path: Path) -> None:
+    """`import a.b as n` binds `n` to `a.b`, and `import a.b` makes `a` and `a.b` reach the modules
+    of those names; one statement may import several modules, and a module-level `try` counts. A
+    name imported from a module, an import inside a function or class, and a comment hold none."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "app/main.py": (
+                "import app.jobs as jobs\nimport app.mail  # sends receipts\n"
+                "import json, app.billing as billing\nfrom app import tools\n# import app.old as old\n"
+                "try:\n    import ujson as fast\nexcept ImportError:\n    pass\n\n\n"
+                "def f():\n    import app.local as local\n    return local\n\n\n"
+                "class K:\n    import app.inner as inner\n"
+            ),
+        },
+    )
+
+    # Act
+    aliases = index._facts_in("app/main.py").module_aliases
+
+    # Assert
+    assert dict(aliases) == {
+        "jobs": "app.jobs",
+        "app": "app",
+        "app.mail": "app.mail",
+        "json": "json",
+        "billing": "app.billing",
+        "fast": "ujson",
+    }
+
+
+def test_a_call_through_a_python_module_import_reads_only_that_module(tmp_path: Path, ast_grep_runs) -> None:
+    """`jobs.run()` after `import app.jobs as jobs`, and `app.jobs.run()` after `import app.jobs`,
+    call the `run` that module defines, read from its own facts like a script module import. A
+    parameter named `jobs` replaces the import inside its function."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "app/__init__.py": "",
+            "app/jobs.py": "def run(task):\n    return task\n",
+            "app/unrelated.py": "def run():\n    return 0\n",
+            "app/worker.py": (
+                "import app.jobs as jobs\nimport app.jobs\n\n\n"
+                "def aliased(task):\n    return jobs.run(task)\n\n\n"
+                "def dotted(task):\n    return app.jobs.run(task)\n\n\n"
+                "def injected(jobs, task):\n    return jobs.run(task)\n"
+            ),
+        },
+    )
+    caller = {span.name: span for span in index.functions_in("app/worker.py")}
+
+    # Act
+    through_imports = [
+        edge.binding for name in ("aliased", "dotted") for edge in index.callee_edges(caller[name])
+    ]
+    scanned = {file for _, _, files in ast_grep_runs for file in files}
+    injected = index.callee_edges(caller["injected"])[0].binding
+
+    # Assert
+    run = Span("app/jobs.py", 1, 2, "run")
+    assert [(binding.status.value, binding.target) for binding in through_imports] == [("resolved", run)] * 2
+    assert "app/unrelated.py" not in scanned
+    assert (injected.status.value, injected.target) == ("candidate", None)
+
+
 def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_it(tmp_path: Path) -> None:
     """`db.query()` binds to db.js's `query` where `db` is the module-level alias; a parameter `db`, a
     `const store = require(...)` inside a function, or an alias that only a template string spells,

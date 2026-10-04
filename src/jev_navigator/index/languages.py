@@ -249,8 +249,27 @@ _SCRIPT_MODULE_ALIASES = (
     - pattern: import $DEFAULT, * as $NAME from $SPEC
   not: {not: {inside: {kind: program}}}""",
 )
+# In Python, `import app.jobs as jobs` binds `jobs` to `app.jobs`, and `import app.jobs` makes the
+# dotted name `app.jobs` reach that module, outside any function or class. A plain import captures
+# no `$SPEC`: the name is the module.
+_PYTHON_OUTSIDE_SCOPES = (
+    "not: {inside: {stopBy: end, any: [{kind: function_definition}, {kind: class_definition}]}}"
+)
+_PYTHON_MODULE_ALIASES = (
+    f"""  kind: aliased_import
+  all:
+    - has: {{field: name, pattern: $SPEC}}
+    - has: {{field: alias, pattern: $NAME}}
+    - not: {{not: {{inside: {{kind: import_statement}}}}}}
+    - {_PYTHON_OUTSIDE_SCOPES}""",
+    f"""  kind: dotted_name
+  pattern: $NAME
+  all:
+    - not: {{not: {{inside: {{field: name, kind: import_statement}}}}}}
+    - {_PYTHON_OUTSIDE_SCOPES}""",
+)
 MODULE_ALIAS_RULES = {
-    "python": (),
+    "python": _PYTHON_MODULE_ALIASES,
     "typescript": _SCRIPT_MODULE_ALIASES,
     "tsx": _SCRIPT_MODULE_ALIASES,
     "javascript": _SCRIPT_MODULE_ALIASES,
