@@ -4,6 +4,7 @@ everything else is the real scope, index, masker and judge."""
 
 from __future__ import annotations
 
+import tracemalloc
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -271,3 +272,44 @@ class _MarkScanner:
 def _scripted(question: Mapping, state: Mapping, by_file: Mapping[str, float]) -> float:
     slot = int(question["instructions"].split("`files[")[1].split("]")[0])
     return by_file[state["files"][slot]["file"]]
+
+
+def test_a_one_line_bundle_naming_a_path_reaches_python_only_as_a_window(tmp_path: Path) -> None:
+    # Arrange: jvn-verifier's shape, a 20 MB one-line bundle naming the path 600,000 times beside
+    # 200 small files that name it once each
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "dist").mkdir()
+    (repo / "src/util.js").write_text("export const util = 1;\n")
+    (repo / "dist/bundle.js").write_text("var a=require('./src/util.js');a.util(1);" * 600_000 + "\n")
+    for number in range(200):
+        (repo / f"src/m{number}.js").write_text(
+            f"import {{ util }} from './src/util.js';\nexport const m{number} = util;\n"
+        )
+    tracemalloc.start()
+
+    # Act
+    naming = files_naming(repo, ["src/util.js"])
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # Assert
+    [bundle_hit] = [hit for hit in naming["src/util.js"] if hit.file == "dist/bundle.js"]
+    assert len(naming["src/util.js"]) == 201
+    assert peak < 10 * 2**20
+    assert bundle_hit.line == 1 and "src/util.js" in bundle_hit.text
+    assert len(bundle_hit.text) <= 2 * NAMING_LINE_CHARS + len("src/util.js") + 2
+
+
+def test_a_sentence_ending_with_the_path_names_it(tmp_path: Path) -> None:
+    # Arrange: the full stop after the path starts no file extension
+    repo = _repository(
+        tmp_path / "repo",
+        {"web/bundle.js": BUNDLE, "README.md": "Rebuild web/bundle.js.\nSee web/bundle.json.\n"},
+    )
+
+    # Act
+    naming = files_naming(repo, ["web/bundle.js"])
+
+    # Assert
+    assert [(hit.file, hit.line) for hit in naming["web/bundle.js"]] == [("README.md", 1)]

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import subprocess
@@ -269,12 +268,25 @@ def _stderr_text(errors: IO[bytes]) -> str:
 def ripgrep_fixed(
     text: str, files: Sequence[str], cwd: Path, max_hits: int, context_bytes: int, *, whole_word: bool = False
 ) -> list[TextHit]:
-    """The lines holding ``text``, at most ``max_hits`` per file, each as the bytes around one hit:
-    up to ``context_bytes`` before and after, so a one-line bundle costs no more than a short line.
-    ``whole_word`` keeps only hits no word character touches. The match runs on to the end of the
-    line, so each line matches once, and ``--replace`` prints only its window; ripgrep's JSON would
-    carry the whole line."""
-    pattern = _hit_window(text, context_bytes, whole_word)
+    """``ripgrep_windows`` for the exact ``text``; ``whole_word`` keeps only hits no word character
+    touches."""
+    hit = literal_pattern(text)
+    if whole_word:
+        hit = rf"(?:^|\W){hit}(?:\W|$)"
+    return ripgrep_windows(hit, files, cwd, max_hits, context_bytes)
+
+
+def ripgrep_windows(
+    hit_pattern: str, files: Sequence[str], cwd: Path, max_hits: int, context_bytes: int
+) -> list[TextHit]:
+    """The lines matching the ripgrep regular expression ``hit_pattern``, at most ``max_hits`` per
+    file, each as the bytes around its first hit: up to ``context_bytes`` before and after, so a
+    one-line bundle costs no more than a short line. The match runs on to the end of the line, so
+    each line matches once, and ``--replace`` prints only its window; ripgrep's JSON would carry the
+    whole line."""
+    if not files:
+        return []
+    pattern = f"(?P<window>(?-u:.){{0,{context_bytes}}}{hit_pattern}(?-u:.){{0,{context_bytes}}})(?-u:.)*"
     command = [*_RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null"]
     command += ["--max-count", str(max_hits), "--replace", "$window", "--regexp", pattern, "--"]
     hits: dict[tuple[str, int], TextHit] = {}
@@ -284,16 +296,10 @@ def ripgrep_fixed(
     return list(hits.values())
 
 
-def _hit_window(text: str, context_bytes: int, whole_word: bool) -> str:
-    """A regular expression capturing, as ``window``, ``text`` with up to ``context_bytes`` of any
-    bytes on either side, then matching the rest of the line. The text's characters other than
-    letters, digits and underscores are written as code points, so no character of it is read as
-    syntax."""
-    context = f"(?-u:.){{0,{context_bytes}}}"
-    literal = "".join(char if char.isalnum() or char == "_" else f"\\x{{{ord(char):x}}}" for char in text)
-    if whole_word:
-        literal = rf"(?:^|\W){literal}(?:\W|$)"
-    return f"(?P<window>{context}{literal}{context})(?-u:.)*"
+def literal_pattern(text: str) -> str:
+    """``text`` as a ripgrep regular expression matching exactly it: characters other than letters,
+    digits and underscores are written as code points, so none is read as syntax."""
+    return "".join(char if char.isalnum() or char == "_" else f"\\x{{{ord(char):x}}}" for char in text)
 
 
 def _windows(output: bytes) -> Iterator[TextHit]:
@@ -312,23 +318,10 @@ def _windows(output: bytes) -> Iterator[TextHit]:
         position = window_end + 1
 
 
-def ripgrep_lines(texts: Sequence[str], files: Sequence[str], cwd: Path) -> list[TextHit]:
-    """Every line of the supplied files holding any of the exact ``texts``, all texts searched in one
-    pass over the files."""
-    if not files or not texts:
-        return []
-    hits = []
-    with _pattern_file(texts) as patterns:
-        command = [*_RIPGREP_SAFE, "--json", "--fixed-strings", "-f", patterns]
-        for chunk in file_chunks(files, bytes_only=True):
-            hits += _match_lines(run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT))
-    return hits
-
-
 def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -> tuple[str, ...]:
     """Every supplied file containing any of the exact ``texts``, without a result-count cutoff. Only
     paths come back, and ripgrep stops reading a file at its first match, so a 20 MB one-line bundle
-    costs what a small file does; ``ripgrep_lines`` would print that line with every match."""
+    costs what a small file does; a search printing lines would print that line with every match."""
     patterns = [texts] if isinstance(texts, str) else list(texts)
     if not files or not patterns:
         return ()
@@ -351,13 +344,6 @@ def _pattern_file(texts: Sequence[str]) -> Iterator[str]:
         pattern_file.write("".join(f"{text}\n" for text in texts))
         pattern_file.flush()
         yield pattern_file.name
-
-
-def _match_lines(output: str) -> list[TextHit]:
-    """The match events of ripgrep's JSON output. Events are split at newlines only, since a line of
-    code may hold a Unicode line separator that ``str.splitlines`` would split."""
-    events = (json.loads(line) for line in output.split("\n") if line.strip())
-    return [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
 
 
 def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
@@ -414,18 +400,6 @@ def head_commit(cwd: Path) -> str:
     """HEAD's commit in the Git worktree at ``cwd``; empty before its first commit, which is the one
     case `git rev-parse -q --verify` reports with exit 1 and no message. Any other failure raises."""
     return run_command(["git", "rev-parse", "-q", "--verify", "HEAD"], cwd, no_match_exit=1).strip()
-
-
-def _text_hit(match: dict) -> TextHit:
-    return TextHit(_decoded(match["path"]), match["line_number"], _decoded(match["lines"]).rstrip("\r\n"))
-
-
-def _decoded(field: dict) -> str:
-    """ripgrep reports a path or line that is not valid UTF-8 as base64 ``bytes`` instead of ``text``;
-    it is decoded the way the index reads files, with invalid bytes replaced."""
-    if "text" in field:
-        return field["text"]
-    return base64.b64decode(field["bytes"]).decode("utf-8", errors="replace")
 
 
 def git(arguments: Sequence[str], cwd: Path, *, stdin: str | None = None) -> str:

@@ -502,10 +502,10 @@ def test_a_literal_search_over_more_files_than_a_parser_command_takes_starts_one
 @pytest.mark.parametrize(
     "search",
     [
-        lambda files, root: [hit.file for hit in tools.ripgrep_lines(["return"], files, root)],
+        lambda files, root: [hit.file for hit in tools.ripgrep_fixed("return", files, root, 10, 200)],
         lambda files, root: list(tools.ripgrep_files("return", files, root)),
     ],
-    ids=["ripgrep_lines", "ripgrep_files"],
+    ids=["ripgrep_fixed", "ripgrep_files"],
 )
 def test_a_pattern_file_search_over_more_files_than_a_parser_command_takes_starts_one_ripgrep(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawned: Counter[str], search

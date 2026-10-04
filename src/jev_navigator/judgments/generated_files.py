@@ -11,7 +11,6 @@ as source. A file the secret scan refuses is never sent; it is named as not judg
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -94,16 +93,20 @@ def generated_file_entry(index: CodeIndex, path: str, shape: FileShape, naming: 
 
 def files_naming(root: Path, paths: Sequence[str]) -> dict[str, tuple[TextHit, ...]]:
     """For each of ``paths``, the first line of every other file in the directory listing that names
-    it as a whole path, non-test files first, then by file. All paths are searched in one ripgrep pass."""
+    it as a whole path, non-test files first, then by file. One ripgrep pass, which prints only paths,
+    finds the files naming any of them; each path's lines are then searched in those files alone."""
     if not paths:
         return {}
-    first_lines: dict[str, dict[str, TextHit]] = {path: {} for path in paths}
-    tokens = {path: _whole_path(path) for path in paths}
-    for hit in tools.ripgrep_lines(paths, tools.listed_files(root), root):
-        for path, token in tokens.items():
-            if hit.file != path and hit.file not in first_lines[path] and token.search(hit.text):
-                first_lines[path][hit.file] = hit
-    return {path: tuple(sorted(hits.values(), key=_naming_order)) for path, hits in first_lines.items()}
+    candidates = tools.ripgrep_files(paths, tools.listed_files(root), root)
+    return {path: _first_lines_naming(root, path, candidates) for path in paths}
+
+
+def _first_lines_naming(root: Path, path: str, candidates: Sequence[str]) -> tuple[TextHit, ...]:
+    """The first line of each candidate other than ``path`` that names it, as a window of up to
+    ``NAMING_LINE_CHARS`` on either side of the name, so a one-line bundle never reaches Python whole."""
+    others = [file for file in candidates if file != path]
+    hits = tools.ripgrep_windows(_whole_path(path), others, root, max_hits=1, context_bytes=NAMING_LINE_CHARS)
+    return tuple(sorted(hits, key=_naming_order))
 
 
 def importers_of(index: CodeIndex, path: str) -> tuple[str, ...]:
@@ -120,14 +123,15 @@ def _import_stem(path: str) -> str:
     return pure.parent.name if pure.stem in _PACKAGE_ENTRY_STEMS else pure.stem
 
 
-def _whole_path(path: str) -> re.Pattern[str]:
-    """``path`` as a whole token: an optional ``./`` or ``/`` after a character no path holds, and no
-    path character or file extension after it. ``lib/web/a.js``, ``web/a.json`` and a URL ending in
-    ``/web/a.js`` do not name ``web/a.js``; neither do ``../web/a.js`` and ``$root/web/a.js``, whose
-    folder is relative or variable."""
+def _whole_path(path: str) -> str:
+    """``path`` as a whole token, in ripgrep's regular expressions, which have no lookaround: an
+    optional ``./`` or ``/`` after a character no path holds, and no path character or file extension
+    after it. ``lib/web/a.js``, ``web/a.json`` and a URL ending in ``/web/a.js`` do not name
+    ``web/a.js``; neither do ``../web/a.js`` and ``$root/web/a.js``, whose folder is relative or
+    variable."""
     before = rf"(?:^|[^{_PATH_CHARACTERS}./])(?:\./|/)?"
-    after = rf"(?![{_PATH_CHARACTERS}/]|\.[A-Za-z0-9])"
-    return re.compile(before + re.escape(path) + after)
+    after = rf"(?:$|[^{_PATH_CHARACTERS}/.]|\.(?:$|[^A-Za-z0-9]))"
+    return before + tools.literal_pattern(path) + after
 
 
 def _naming_order(hit: TextHit) -> tuple[bool, str]:
