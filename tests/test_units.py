@@ -720,6 +720,7 @@ class JevClient(Protocol):
     def flush(self) -> None:
         pass
 
+    @abstractmethod
     def reset(self) -> None:
         raise NotImplementedError
 
@@ -748,10 +749,10 @@ def test_a_stub_joins_its_files_top_level_code(protocol: CodeIndex) -> None:
 
     # Assert: methods whose body is only `...`, a docstring, `pass` or `raise NotImplementedError`,
     # alone or together, declare a shape and do nothing, so the Protocol is judged whole in the
-    # top-level code. A docstring before real code is no stub. The index still knows every stub as a
-    # function.
-    assert sorted(units) == ["app/client.py:21-23", "app/client.py:top"]
-    assert units["app/client.py:top"].ranges == ((1, 18),)
+    # top-level code, decorators included. A docstring before real code is no stub. The index still
+    # knows every stub as a function.
+    assert sorted(units) == ["app/client.py:22-24", "app/client.py:top"]
+    assert units["app/client.py:top"].ranges == ((1, 19),)
     assert _code_lines_in(units.values(), CLIENT_PROTOCOL) == _code_lines(CLIENT_PROTOCOL)
     assert [span.name for span in protocol.functions_in("app/client.py")] == [
         "ask",
