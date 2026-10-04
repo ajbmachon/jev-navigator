@@ -38,8 +38,10 @@ from jev_navigator.index.units import (
     unit_score,
     write_units,
 )
+from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS
+from jev_navigator.judgments.questions import serialized_chars
 
-JEV_BOX = 76_800
+JEV_BOX = JEV_INPUT_BOX_CHARS
 SMALL_BOX = 3_000
 
 ROUTES = """\
@@ -298,6 +300,23 @@ def test_a_unit_over_the_box_with_at_most_60_lines_is_one_piece_too_large_to_jud
     # Assert
     assert [(piece.start, piece.end, piece.too_large_to_judge) for piece in logo.pieces] == [(1, 2, True)]
     assert logo.judged_pieces == () and items_to_judge(logo) == ()
+
+
+def test_a_unit_is_measured_in_escaped_json_like_every_request(tmp_path: Path) -> None:
+    # Arrange: 1,600 Chinese characters are about 1,600 characters as text but 9,600 escaped.
+    greeting = 'def greet():\n    return "' + "你好" * 800 + '"\n'
+    root = tmp_path / "repo"
+    write_files(root, {"app/greet.py": greeting})
+    commit_all(root)
+    index = CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    greet = _units_by_id(index, ("app/greet.py",), SMALL_BOX)["app/greet.py:1-2"]
+
+    # Assert: the unit is over the box as a request spells it, so it is named too large to judge.
+    (piece,) = greet.pieces
+    assert piece.chars == serialized_chars(greeting.rstrip("\n")) > SMALL_BOX
+    assert piece.too_large_to_judge
 
 
 def test_a_long_function_that_fits_the_box_stays_one_unit(shop: CodeIndex) -> None:

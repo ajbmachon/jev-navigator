@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from typing import TextIO
 
+from ..judgments.questions import serialized_chars
 from .bindings import BindingStatus
 from .code_index import CodeIndex
 from .imports import import_lines, without_comments
@@ -389,7 +390,7 @@ class _SourceFile:
         nested_in: str | None = None,
     ) -> Unit:
         text = read_ranges(self._index, self._file, ranges)
-        pieces = self._pieces(ranges) if _request_chars(text) > self._box_chars else ()
+        pieces = self._pieces(ranges) if serialized_chars(text) > self._box_chars else ()
         return Unit(
             unit_id,
             self._file,
@@ -414,7 +415,7 @@ class _SourceFile:
 
     def _piece(self, number: int, start: int, end: int) -> Piece:
         text = read_ranges(self._index, self._file, ((start, end),))
-        chars = _request_chars(text)
+        chars = serialized_chars(text)
         return Piece(number, start, end, _sha256(text), chars, chars > self._box_chars)
 
 
@@ -534,11 +535,6 @@ def _names(qualified: str, symbol: str) -> bool:
 
 def _is_named(span: Span) -> bool:
     return bool(span.name) and not span.name.startswith("<")
-
-
-def _request_chars(text: str) -> int:
-    """The characters ``text`` takes in a request body, the measure the box is set in."""
-    return len(json.dumps(text, ensure_ascii=False))
 
 
 def _sha256(text: str) -> str:
