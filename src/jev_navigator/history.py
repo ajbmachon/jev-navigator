@@ -190,18 +190,23 @@ class History:
             raise UnknownSectionError(f"{name} is not a declared section")
         self.sections[name] = value
 
-    def state_for(self, names: Sequence[str]) -> dict:
+    def state_for(self, names: Sequence[str], shared: Mapping | None = None, question_chars: int = 0) -> dict:
         """Exactly the selected sections, each within its limit and all within the character budget;
-        ``self.evictions`` lists what this call trimmed."""
+        ``self.evictions`` lists what this call trimmed. The budget is also measured with the
+        ``shared`` state that travels next to the sections, and never exceeds what Jev's input box
+        leaves after the question of ``question_chars`` that reads them."""
         self._require_known(names)
+        limit = min(self.budget_chars, JEV_INPUT_BOX_CHARS - question_chars)
 
         def fits(steps: list[HistoryStep]) -> bool:
-            return self.size(self._build(names, steps)) <= self.budget_chars
+            return self.size({**(shared or {}), **self._build(names, steps)}) <= limit
 
         reads_code = bool(_SECTIONS_WITH_CODE & set(names))
         kept, self.evictions = self.evict(self.steps, fits) if reads_code else (self.steps, [])
         if not fits(kept):
-            raise HistoryTooLargeError(f"the selected sections need more than {self.budget_chars} characters")
+            raise HistoryTooLargeError(
+                f"the selected sections, the shared state and the question need more than {limit} characters"
+            )
         return self._build(names, kept)
 
     def size(self, state: Mapping) -> int:
@@ -358,7 +363,7 @@ def _grouped(history: History, checks: Mapping[str, HistoryCheck], shared: Mappi
     for name, entry in checks.items():
         by_sections.setdefault(entry.sections, {})[name] = entry.check
     return [
-        _Group(sections, _state(history, sections, shared), grouped)
+        _Group(sections, _state(history, sections, shared, grouped), grouped)
         for sections, grouped in by_sections.items()
     ]
 
@@ -388,12 +393,12 @@ def _judged(
     return results
 
 
-def _state(history: History, sections: tuple[str, ...], shared: Mapping) -> dict:
-    selected = history.state_for(sections)
-    overlap = set(selected) & set(shared)
+def _state(history: History, sections: tuple[str, ...], shared: Mapping, checks: Mapping[str, Check]) -> dict:
+    overlap = set(sections) & set(shared)
     if overlap:
         raise ValueError(f"shared state and history sections both use {sorted(overlap)}")
-    return {**shared, **selected}
+    longest_question = max(serialized_chars(check.to_question()) for check in checks.values())
+    return {**shared, **history.state_for(sections, shared, longest_question)}
 
 
 def _judgment(

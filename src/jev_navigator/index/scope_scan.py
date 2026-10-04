@@ -119,15 +119,21 @@ class _End(TypedDict):
     line: int
 
 
+class _ByteOffset(TypedDict):
+    start: int
+    end: int
+
+
 class _Range(TypedDict):
     start: _Start
     end: _End
+    byteOffset: _ByteOffset
 
 
 class ParserMatch(TypedDict):
     """The fields of one printed ast-grep match that ``_FileFound`` reads. Every other field (the
-    labels of related nodes, byte offsets, the other metavariables) is skipped while decoding instead
-    of becoming Python objects, which makes decoding a large scan's output several times faster."""
+    labels of related nodes, the other metavariables) is skipped while decoding instead of becoming
+    Python objects, which makes decoding a large scan's output several times faster."""
 
     ruleId: str
     file: str
@@ -183,7 +189,7 @@ class _FileFound:
     functions: set[Span] = field(default_factory=set)
     classes: set[Span] = field(default_factory=set)
     declarations: set[Span] = field(default_factory=set)
-    calls: list[tuple[int, int, CallMatch]] = field(default_factory=list)
+    calls: list[tuple[tuple[str, int, int], CallMatch]] = field(default_factory=list)
     receivers: dict[tuple[str, int, str, str], set[str | None]] = field(default_factory=dict)
     export_names: set[str] = field(default_factory=set)
     error_lines: list[tuple[int, int]] = field(default_factory=list)
@@ -210,7 +216,7 @@ class _FileFound:
             _ordered(functions | self.classes),
             tuple(sorted(self.declarations)),
         )
-        calls = tuple(call for *_, call in sorted(self.calls, key=_source_order))
+        calls = tuple(call for _, call in sorted(self.calls, key=lambda entry: entry[0]))
         return FileFacts(
             structure,
             calls,
@@ -244,7 +250,7 @@ class _FileFound:
         name = last_identifier(expression)
         if name:
             call = CallMatch(match["file"], _line_of(match), name, receiver_of(expression))
-            self.calls.append((call.line, match["range"]["start"]["column"], call))
+            self.calls.append((_outer_first(match), call))
 
     def _add_reference(self, match: dict) -> None:
         role, text = match["ruleId"], match["text"]
@@ -276,10 +282,10 @@ def _merged_stretches(ranges: list[tuple[int, int]]) -> tuple[tuple[int, int], .
     return tuple(stretches)
 
 
-def _source_order(positioned: tuple[int, int, CallMatch]) -> tuple[int, int, str, str]:
-    """Calls in the order they start in the source; two starting together (``a().b()``) by name."""
-    line, column, call = positioned
-    return line, column, call.name, call.receiver or ""
+def _outer_first(match: dict) -> tuple[str, int, int]:
+    """A match's place in its file, ordering the outer of two matches that start together first."""
+    offsets = match["range"]["byteOffset"]
+    return match["file"], offsets["start"], -offsets["end"]
 
 
 def _reference_name(role: str, text: str) -> str:
@@ -290,9 +296,23 @@ def _reference_receiver(role: str, text: str) -> str | None:
     return receiver_of(text) if role == "argument" else None
 
 
+OPAQUE_RECEIVER = "<expression>"
+
+
 def receiver_of(expression: str) -> str | None:
+    """What ``expression`` reads its last name from: a plain chain of names (``this.store``), the
+    placeholder ``OPAQUE_RECEIVER`` for anything else (a call, a subscript, a literal, a template),
+    or None when it reads it from nothing. Any other receiver text could quote a string literal, so
+    it is never kept."""
     head, dot, _ = expression.replace("?.", ".").rpartition(".")
-    return head if dot else None
+    if not dot:
+        return None
+    return head if _is_name_chain(head) else OPAQUE_RECEIVER
+
+
+def _is_name_chain(expression: str) -> bool:
+    """Names joined by dots, such as ``this.store``, ``self.items`` or ``super``, which quote no code."""
+    return all(part.removeprefix("#").replace("$", "_").isidentifier() for part in expression.split("."))
 
 
 def last_identifier(expression: str) -> str:
@@ -332,6 +352,18 @@ def _structure_rules(languages: Sequence[str]) -> str:
     return "\n---\n".join(documents)
 
 
+# A component rendered as `<Name ...>` or `<ns.Name ...>` is called by the code that renders it;
+# lower-case names are the platform's own elements (`<div>`), defined nowhere in scope.
+_JSX_CALL_RULE = """rule:
+  any:
+    - kind: jsx_opening_element
+    - kind: jsx_self_closing_element
+  has:
+    field: name
+    regex: "^[A-Z]|[.][A-Z][^.]*$"
+    pattern: $CALLEE"""
+
+
 def _call_rules(languages: Sequence[str]) -> str:
     documents = []
     for language in languages:
@@ -339,6 +371,8 @@ def _call_rules(languages: Sequence[str]) -> str:
         documents.append(f"id: call\nlanguage: {grammar}\nrule:\n  pattern: $CALLEE($$$)")
         if grammar != "python":
             documents.append(f"id: call\nlanguage: {grammar}\nrule:\n  pattern: new $CALLEE($$$)")
+        if grammar == "tsx":
+            documents.append(f"id: call\nlanguage: {grammar}\n{_JSX_CALL_RULE}")
     return "\n---\n".join(documents)
 
 

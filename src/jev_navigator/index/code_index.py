@@ -6,13 +6,12 @@ policy only; the index has no default refusal and never drops files from a reque
 
 from __future__ import annotations
 
-import hashlib
 import re
 import tempfile
 import threading
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
-from functools import cache, lru_cache
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
@@ -31,10 +30,11 @@ from .languages import (
     declares_type,
     declares_value,
     language_of,
-    split_lines,
 )
+from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
-from .scope_scan import FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
+from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
+from .source_files import DISAPPEARED, SourceFiles
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
@@ -51,6 +51,7 @@ CoChange = tuple[str, int]
 
 
 _NO_STRUCTURE = FileStructure((), (), ())
+_KIND_ORDER = {kind: rank for rank, kind in enumerate((*DEFINITION_KINDS, CALL, REFERENCE))}
 
 
 class RevisionMismatchError(ValueError):
@@ -79,6 +80,7 @@ class CodeIndex:
         binding_resolver: BindingResolver | None = None,
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
+        blob_ids: Mapping[str, str] | None = None,
     ) -> None:
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
@@ -95,18 +97,27 @@ class CodeIndex:
         _require_inside(self.root, self.files)
         self._scope = frozenset(self.files)
         self._code_files = tuple(path for path in self.files if language_of(path))
-        self._lines_of = lru_cache(maxsize=LINE_CACHE_FILES)(self._read_lines)
-        self._sha256: dict[str, str] = {}
+        self._unavailable: dict[str, str] = {}
+        self._refused: dict[str, str] = {}
+        self._sources = SourceFiles(self.root, self._unavailable, LINE_CACHE_FILES, self._standing_first_read)
         self._script_paths_in = cache(self._read_script_paths)
         self._packages = cache(self._read_packages)
         self._unparsed = Unparsed()
-        self._unavailable: dict[str, str] = {}
         self._facts: dict[str, FileFacts] = {}
-        self._fact_files_by_name: dict[str, set[str]] = {}
         self._facts_lock = threading.RLock()
         self._fact_cache = FactCache(fact_cache_dir)
-        self._files_for_name = cache(self._candidate_files)
-        self._discovered: dict[str, frozenset[str]] = {}
+        self._listed_blobs = {
+            file: blob for file, blob in (blob_ids or {}).items() if file not in self._changed
+        }
+        self._blobs: dict[str, str] = {}
+        self._name_table = NameTable()
+        self._unwritten: dict[str, FileFacts] = {}
+        self._entries: dict[str, FileEntry] | None = None
+        self._files_by_blob: dict[str, tuple[str, ...]] = {}
+        self._file_order: dict[str, int] = {}
+        self._reached: set[str] = set()
+        self._incomplete_in_table: frozenset[str] = frozenset()
+        self._named = cache(self._places_named)
         self._text_hits = cache(self._search_text)
         self._co_changes = cache(self._read_co_changes)
         self._calls_named = cache(self._calls_with_name)
@@ -115,6 +126,7 @@ class CodeIndex:
         self._top_level_in = cache(self._top_level_spans)
         self._names_imported = cache(self._read_imported_names)
         self._binding = cache(self._compute_binding)
+        self._nameable = cache(self._nameable_definitions)
         self._unread_names = cache(self._read_unread_names)
 
     @classmethod
@@ -131,18 +143,19 @@ class CodeIndex:
         """The tracked regular files under ``prefixes`` (every one when none are given). Symbolic links
         and submodules are left out: a link can point outside the scope, or at a directory."""
         root = Path(root)
-        listed = _regular_files(tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root))
+        blobs = _regular_blobs(tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root))
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
         changed = _changed_paths(tools.git(["status", "--porcelain", "-z", "--", *prefixes], root))
         return cls(
             root,
-            listed,
+            list(blobs),
             max_files=max_files,
             commit=commit,
             changed_files=changed,
             binding_resolver=binding_resolver,
             scan_observer=scan_observer,
             fact_cache_dir=fact_cache_dir,
+            blob_ids=blobs,
         )
 
     @classmethod
@@ -170,7 +183,7 @@ class CodeIndex:
             for file in tools.listed_files(root, prefixes)
             if not any((root / file).resolve().is_relative_to(path) for path in excluded)
         )
-        commit, changed = _working_git_metadata(root, prefixes)
+        commit, changed, blobs = _working_git_metadata(root, prefixes)
         return cls(
             root,
             files,
@@ -180,6 +193,7 @@ class CodeIndex:
             binding_resolver=binding_resolver,
             scan_observer=scan_observer,
             fact_cache_dir=fact_cache_dir,
+            blob_ids=blobs,
         )
 
     @classmethod
@@ -197,14 +211,17 @@ class CodeIndex:
         tsconfig files come along (outside the scope), so path aliases resolve."""
         repository = Path(repository)
         sha = tools.git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repository).strip()
-        listed = _regular_files(tools.git(["ls-tree", "-r", "-z", sha, "--", *prefixes], repository))
+        blobs = _regular_blobs(tools.git(["ls-tree", "-r", "-z", sha, "--", *prefixes], repository))
+        listed = list(blobs)
         if max_files is not None and len(listed) > max_files:
             raise ScopeTooWideError(
                 f"{len(listed)} files is wider than the limit of {max_files}; narrow the scope"
             )
         snapshot = tempfile.TemporaryDirectory(prefix=f"jev-navigator-{sha[:8]}-")
         tools.export_blobs(repository, _blobs_to_export(repository, sha, listed), Path(snapshot.name))
-        index = cls(snapshot.name, listed, max_files=max_files, commit=sha, git_root=repository)
+        index = cls(
+            snapshot.name, listed, max_files=max_files, commit=sha, git_root=repository, blob_ids=blobs
+        )
         index._snapshot = snapshot
         return index
 
@@ -223,23 +240,31 @@ class CodeIndex:
     @property
     def unparsed_files(self) -> frozenset[str]:
         """Files whose grammar reports ERROR nodes, after ensuring every available file has facts."""
-        self._ensure_facts(self._available_files(self._code_files))
+        available = self._available_files(self._code_files)
+        self._ensure_facts(available)
+        self._reached.update(available)
         return self._unparsed.files
 
     @property
     def observed_unparsed_files(self) -> frozenset[str]:
-        """Files found unparsed by scans that navigation actually needed.
+        """Files found only partly parsed among those navigation actually reached.
 
         Unlike ``unparsed_files``, this receipt never starts another repository-wide scan. Pair it
         with ``parser_scans_pending`` before making any claim about the whole scope.
         """
-        return self._unparsed.files
+        return self._known_unparsed() & self._reached
+
+    def _known_unparsed(self) -> frozenset[str]:
+        """Every file known to be only partly parsed: scanned so far, or recorded so in the table."""
+        return self._unparsed.files | self._incomplete_in_table
 
     @property
     def parsed_files(self) -> frozenset[str]:
-        """Files navigation has parsed so far, never one it refused to parse; reading it never starts a
-        scan."""
-        return frozenset(self._facts.keys() - self._unavailable.keys())
+        """Files navigation has reached so far, through their facts or their name rows, never one it
+        refused to parse; reading it never starts a scan. Covering the scope for the name table
+        reaches no file. A file that changed or vanished after it was reached still counts, since its
+        facts and rows come from the bytes first read, and it is listed in ``unavailable_files`` too."""
+        return frozenset(self._reached - self._refused.keys())
 
     @property
     def parser_scans_completed(self) -> tuple[str, ...]:
@@ -247,14 +272,22 @@ class CodeIndex:
 
     @property
     def parser_scans_pending(self) -> tuple[str, ...]:
+        """The fact scan is pending until navigation has reached every available code file, through its
+        facts, its name rows or the parser's refusal of it; covering the scope for the table reaches none."""
         available = set(self._available_files(self._code_files))
-        return () if available <= self._facts.keys() else ("facts",)
+        return () if available <= self._reached else ("facts",)
 
     @property
     def unavailable_files(self) -> dict[str, str]:
-        """Files this index cannot read facts from, each with the reason: an inventory entry that disappeared
-        after the index was created, or a file too large to parse safely."""
-        return dict(self._unavailable)
+        """Files this index has no facts for, each with the reason: an inventory entry that disappeared or
+        changed after the index first read it, or a file the parser refused (see ``refused_files``)."""
+        return {**self._unavailable, **self._refused}
+
+    @property
+    def refused_files(self) -> dict[str, str]:
+        """Readable files the fact scan never parsed, each with the reason, such as too large to parse.
+        Their text stays searchable; what they define is unknown, never absent."""
+        return dict(self._refused)
 
     @property
     def available_files(self) -> tuple[str, ...]:
@@ -287,11 +320,34 @@ class CodeIndex:
             self._require_in_scope(file)
         available = self._available_files(files)
         self._ensure_facts(tuple(file for file in available if language_of(file)))
+        self._reached.update(available)
         return tuple(span for file in available for span in self.functions_in(file))
+
+    def facts_in_files(self, files: Sequence[str]) -> dict[str, FileFacts]:
+        """The facts of ``files`` (scope code files), read with one batched fact scan for those not
+        yet cached; a file the index cannot read is left out."""
+        for file in files:
+            self._require_in_scope(file)
+        self._ensure_facts(files)
+        self._reached.update(files)
+        return {file: self._facts[file] for file in files if file in self._facts}
+
+    def definitions_in(self, file: str) -> tuple[Span, ...]:
+        """The named functions, classes and declarations in ``file``, from the name table, so a
+        warm index answers without loading the file's facts."""
+        self._require_in_scope(file)
+        if file not in self._cover_scope() or file in self._unavailable:
+            return ()
+        rows = self._name_table.definitions(self._blob_of(file) or "")
+        return tuple(dict.fromkeys(Span(file, row.start, row.end, name) for name, row in rows))
 
     def symbols_in(self, file: str) -> tuple[Span, ...]:
         """Functions and classes."""
         return self._file_structure(file).symbols
+
+    def top_level_symbols(self, file: str) -> tuple[Span, ...]:
+        """The functions and classes no other function or class of the file contains, in file order."""
+        return tuple(sorted(_outermost(self.symbols_in(file)), key=lambda span: (span.start, -span.end)))
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
         """Module-level constants, assignments, types, interfaces and enums."""
@@ -331,7 +387,6 @@ class CodeIndex:
             for call in self._facts_in(function.file).calls
             if function.start <= call.line <= function.end
         ]
-        self.prefetch_names(call.name for call in calls)
         edges: dict[str, CallEdge] = {}
         for call in calls:
             if call.name not in edges:
@@ -369,7 +424,6 @@ class CodeIndex:
 
     def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
         matches = sorted(set(matches))
-        self.prefetch_names(match.name for match in matches)
         return tuple(
             Reference(
                 match.name,
@@ -389,32 +443,39 @@ class CodeIndex:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
-        definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
+        definitions, top_level = self._nameable(name, role)
         facts = CallFacts(
             file,
             name,
             receiver,
             definitions,
-            tuple(span for span in definitions if span in self._top_level_in(span.file)),
+            top_level,
             self._imported_from(file, name),
             self._files_hiding(name),
         )
         return binding_from_facts(facts)
 
+    def _nameable_definitions(self, name: str, role: str | None) -> tuple[tuple[Span, ...], tuple[Span, ...]]:
+        """The definitions of ``name`` a use in ``role`` can name, and those of them at top level.
+        Neither depends on where the use sits, so every use of a name shares them."""
+        definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
+        return definitions, tuple(span for span in definitions if span in self._top_level_in(span.file))
+
     def _files_hiding(self, name: str) -> frozenset[str]:
-        """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed
-        file whose lines under an ERROR node mention the name. A definition names what it defines, so
+        """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed or
+        refused file whose unread lines mention the name. A definition names what it defines, so
         lines that never mention the name cannot hold one. Every file that mentions it has already
         been scanned to look for its definitions, so the answer does not depend on scan order."""
-        unparsed = (file for file in self.observed_unparsed_files if name in self._unread_names(file))
-        return frozenset(unparsed) | self.unavailable_files.keys()
+        unread = (*self._known_unparsed(), *self._refused)
+        mentioning = (file for file in unread if name in self._unread_names(file))
+        return frozenset(mentioning) | self._unavailable.keys()
 
     def _read_unread_names(self, file: str) -> frozenset[str]:
         """The words on the lines of ``file`` that its ERROR nodes span; the whole file's words while
-        its facts are still being recorded."""
+        its facts are still being recorded, or when the parser refused it."""
         lines = self._lines_of(file)
-        facts = self._facts.get(file)
-        stretches = facts.unparsed_lines if facts is not None else ((1, len(lines)),)
+        known = self._facts.get(file) or (self._entries or {}).get(file)
+        stretches = known.unparsed_lines if known is not None else ((1, len(lines)),)
         text = "\n".join(line for start, end in stretches for line in lines[start - 1 : end])
         return frozenset(_WORD.findall(text))
 
@@ -425,16 +486,9 @@ class CodeIndex:
         return self._facts_in(file).structure
 
     def _definitions_by_name(self, name: str) -> tuple[Span, ...]:
-        files = self._files_for_name(name)
-        self._ensure_facts(files)
         definitions = {
-            span: None
-            for file in files
-            for span in (
-                *self._facts_in(file).structure.symbols,
-                *self._facts_in(file).structure.declarations,
-            )
-            if span.name == name
+            Span(file, row.start, row.end, name): None
+            for file, row in self._readable_places(name, DEFINITION_KINDS)
         }
         return tuple(definitions)
 
@@ -448,99 +502,120 @@ class CodeIndex:
         first_line = self.read_slice(Span(span.file, span.start, span.start)).text
         return declares_type(first_line) if role == "type" else declares_value(first_line)
 
-    def _calls_with_name(self, name: str):
-        files = self._files_for_name(name)
-        self._ensure_facts(files)
-        return tuple(call for file in files for call in self._facts_in(file).calls if call.name == name)
-
-    def _references_with_name(self, name: str):
-        files = self._files_for_name(name)
-        self._ensure_facts(files)
+    def _calls_with_name(self, name: str) -> tuple[CallMatch, ...]:
         return tuple(
-            reference
-            for file in files
-            for reference in self._facts_in(file).references
-            if reference.name == name
+            CallMatch(file, row.start, name, row.receiver)
+            for file, row in self._readable_places(name, (CALL,))
         )
 
-    def prefetch_names(self, names: Iterable[str]) -> None:
-        """Finds the unparsed files that may mention each of ``names`` with one ripgrep, so the
-        lookups of these names that follow start no search of their own."""
-        self._discover(names)
+    def _references_with_name(self, name: str) -> tuple[ReferenceMatch, ...]:
+        return tuple(
+            ReferenceMatch(file, row.start, row.role or "", name, row.receiver)
+            for file, row in self._readable_places(name, (REFERENCE,))
+        )
 
-    def _candidate_files(self, name: str) -> tuple[str, ...]:
-        # Parsed facts already answer name membership. Only unparsed inventory needs text discovery.
-        self._discover((name,))
-        with self._facts_lock:
-            candidates = self._fact_files_by_name.get(name, set()) | self._discovered[name]
-        return tuple(file for file in self._code_files if file in candidates)
+    def _readable_places(self, name: str, kinds: Sequence[str]) -> Iterator[tuple[str, NameRow]]:
+        """The places of ``name`` of ``kinds`` in files still readable: a file that disappeared or
+        changed since the scope was covered answers nothing."""
+        for file, row in self._named(name):
+            if row.kind in kinds and file not in self._unavailable:
+                yield file, row
 
-    def _discover(self, names: Iterable[str]) -> None:
+    def _places_named(self, name: str) -> tuple[tuple[str, NameRow], ...]:
+        """Every place in scope ``name`` sits, as (file, row), in file order and then in the order of
+        the file's facts: definitions first, symbols before declarations."""
+        self._cover_scope()
+        places = [
+            (file, row)
+            for row in self._name_table.rows(name)
+            for file in self._files_by_blob.get(row.blob, ())
+        ]
+        self._reached.update(file for file, _ in places)
+        return tuple(sorted(places, key=self._place_order))
+
+    def _place_order(self, place: tuple[str, NameRow]) -> tuple[int, int, int]:
+        file, row = place
+        return self._file_order[file], _KIND_ORDER[row.kind], row.position
+
+    def _cover_scope(self) -> dict[str, FileEntry]:
+        """Every available code file's table entry, writing the rows of files the table lacks from
+        their cached or freshly parsed facts. Runs once per index; a file that cannot be read or is
+        refused by the parse guard has no entry."""
         with self._facts_lock:
-            new = [name for name in dict.fromkeys(names) if name not in self._discovered]
-            remaining = tuple(
-                file for file in self._code_files if file not in self._facts and file not in self._unavailable
+            if self._entries is not None:
+                return self._entries
+            files = self._available_files(self._code_files)
+            blobs = self._blobs_of(files)
+            held = self._name_table.entries(set(blobs.values()))
+            self._ensure_facts([file for file, blob in blobs.items() if blob not in held])
+            blobs = self._blobs_of(files)
+            held = self._name_table.entries(set(blobs.values()))
+            self._entries = {file: held[blob] for file, blob in blobs.items() if blob in held}
+            by_blob: dict[str, list[str]] = {}
+            for file in self._entries:
+                by_blob.setdefault(blobs[file], []).append(file)
+            self._files_by_blob = {blob: tuple(files) for blob, files in by_blob.items()}
+            self._file_order = {file: position for position, file in enumerate(self._entries)}
+            self._incomplete_in_table = frozenset(
+                file for file, entry in self._entries.items() if entry.incomplete
             )
-        if not new:
-            return
-        mentioning = self._on_available(remaining, lambda files: tools.ripgrep_files(new, files, self.root))
-        found = self._files_by_name(new, mentioning)
-        with self._facts_lock:
-            for name in new:
-                self._discovered.setdefault(name, found[name])
+            return self._entries
 
-    def _files_by_name(self, names: Sequence[str], files: Sequence[str]) -> dict[str, frozenset[str]]:
-        """Which of ``files`` (each known to hold one of ``names``) holds each name, reading each file
-        once."""
-        if len(names) == 1:
-            return {names[0]: frozenset(files)}
-        holding: dict[str, set[str]] = {name: set() for name in names}
-        patterns = [(name, name.encode()) for name in names]
-        for file in files:
-            content = self._read_bytes(file) or b""
-            for name, pattern in patterns:
-                if pattern in content:
-                    holding[name].add(file)
-        return {name: frozenset(found) for name, found in holding.items()}
+    def _blobs_of(self, files: Iterable[str]) -> dict[str, str]:
+        return {file: blob for file in files if (blob := self._blob_of(file)) is not None}
+
+    def _blob_of(self, file: str) -> str | None:
+        """The git blob id of ``file``'s content: from the Git listing for a clean tracked file,
+        otherwise hashed from the bytes the index read."""
+        if file in self._listed_blobs:
+            return self._listed_blobs[file]
+        if file not in self._blobs:
+            content = self._read_bytes(file)
+            if content is None:
+                return None
+            self._blobs[file] = git_blob_id(content)
+        return self._blobs[file]
 
     def _remember_facts(self, file: str, facts: FileFacts) -> None:
+        """Keeps ``file``'s facts in memory and queues its rows for the name table. A file the parse
+        guard refused never gets here, so it has no rows."""
         self._facts[file] = facts
-        names = {
-            item.name
-            for item in (
-                *facts.structure.symbols,
-                *facts.structure.declarations,
-                *facts.calls,
-                *facts.references,
-            )
-        }
-        for name in names:
-            self._fact_files_by_name.setdefault(name, set()).add(file)
+        blob = self._blob_of(file)
+        if blob is not None:
+            self._unwritten[blob] = facts
+
+    def _write_names(self) -> None:
+        if self._unwritten:
+            self._name_table.add(self._unwritten)
+            self._unwritten = {}
 
     def _facts_in(self, file: str) -> FileFacts:
         self._require_in_scope(file)
+        self._reached.add(file)
+        if (known := self._facts.get(file)) is not None:
+            return known
         self._ensure_facts((file,))
         return self._facts.get(file, FileFacts(_NO_STRUCTURE, (), ()))
 
     def _ensure_facts(self, files: Sequence[str]) -> None:
         with self._facts_lock:
             contents = self._load_cached_facts(files)
-            if not contents:
-                return
-            to_scan = tuple(contents)
-            scanned = self._run_scan(
-                "facts",
-                lambda: self._scan_available_facts(to_scan),
-                len(to_scan),
-            )
-            for file, facts in scanned.items():
-                if self._read_bytes(file) is None:
-                    continue
-                self._remember_facts(file, facts)
-                if facts.refusal is None:
-                    self._fact_cache.save(file, contents[file], facts)
-                else:
-                    self._unavailable[file] = facts.refusal
+            if contents:
+                self._parse(contents)
+            self._write_names()
+
+    def _parse(self, contents: Mapping[str, bytes]) -> None:
+        """Parses the files whose bytes are ``contents``; the caller holds the facts lock."""
+        to_scan = tuple(contents)
+        scanned = self._run_scan("facts", lambda: self._scan_available_facts(to_scan), len(to_scan))
+        for file, facts in scanned.items():
+            if self._read_bytes(file) is None:
+                continue
+            if facts.refusal is not None:
+                self._refused[file] = facts.refusal
+                continue
+            self._remember_facts(file, facts)
+            self._fact_cache.save(file, contents[file], facts)
 
     def _load_cached_facts(self, files: Sequence[str]) -> dict[str, bytes]:
         """Remembers the persisted facts of ``files``; returns the bytes of those still to parse.
@@ -548,7 +623,7 @@ class CodeIndex:
         The caller holds the facts lock."""
         to_parse: dict[str, bytes] = {}
         for file in files:
-            if language_of(file) is None or file in self._facts or file in self._unavailable:
+            if language_of(file) is None or file in self._facts or file in self._refused:
                 continue
             content = self._read_bytes(file)
             if content is None:
@@ -583,11 +658,7 @@ class CodeIndex:
         """Symbols and declarations of ``file`` that no class or other function contains. A function
         starting on a declaration's first line is the value it declares, not its container."""
         symbols = self.symbols_in(file)
-        top_symbols = (
-            span
-            for span in symbols
-            if not any(other != span and other.contains(span.start) for other in symbols)
-        )
+        top_symbols = _outermost(symbols)
         top_declarations = (
             span
             for span in self.declarations_in(file)
@@ -629,7 +700,8 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if name in self._facts_in(inherited.path).export_names:
+                exported = self._facts_in(inherited.path).export_names
+                if inherited.path in self._refused or name in exported:
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited
@@ -660,9 +732,9 @@ class CodeIndex:
         return self._text_hits(text, max_hits)
 
     def _search_text(self, text: str, max_hits: int) -> tuple[TextHit, ...]:
-        readable = tuple(file for file in self.files if file not in self._unavailable)
         found = self._on_available(
-            readable, lambda files: tools.ripgrep_fixed(text, files, self.root, max_hits)
+            self._available_files(self.files),
+            lambda files: tools.ripgrep_fixed(text, files, self.root, max_hits),
         )
         hits = sorted(hit for hit in found if hit.file in self._scope)
         return tuple(hits[:max_hits])
@@ -747,42 +819,53 @@ class CodeIndex:
         """The package.json files of the folders holding scope files, read once, on first use."""
         return Packages(self.root, self.files)
 
-    def _read_lines(self, file: str) -> tuple[str, ...]:
+    def _lines_of(self, file: str) -> tuple[str, ...]:
+        """The file's lines as the index first read it."""
         self._require_in_scope(file)
-        content = self._read_bytes(file)
-        return split_lines(content.decode(errors="replace")) if content is not None else ()
+        return self._sources.lines(file)
 
     def _file_sha256(self, file: str) -> str:
-        """The SHA-256 of the bytes the index first read from ``file``."""
         self._require_in_scope(file)
-        if file not in self._sha256:
-            self._read_bytes(file)
-        return self._sha256.get(file, "")
+        return self._sources.sha256(file)
 
     def _read_bytes(self, file: str) -> bytes | None:
-        """The file's bytes, every read checked against the first: once a file changes on disk, its
-        facts and lines no longer agree, so it is reported unavailable instead of read."""
-        try:
-            content = (self.root / file).read_bytes()
-        except FileNotFoundError:
-            self._unavailable[file] = "disappeared after inventory"
-            return None
-        digest = hashlib.sha256(content).hexdigest()
-        if self._sha256.setdefault(file, digest) != digest:
-            self._unavailable[file] = "changed on disk after the index first read it"
-            return None
+        """The file's bytes while they equal its first read, so facts and table rows are only built
+        from them."""
+        return self._sources.current(file)
+
+    def _standing_first_read(self, file: str, content: bytes | None) -> bytes | None:
+        """The bytes that stand as ``file``'s first read, given what the disk holds now (``None`` when
+        the file is gone). Once table rows of its listed blob were answered for the file, that blob is
+        what the index read, whatever the disk holds now. Otherwise the disk's bytes stand, and bytes
+        that differ from the listed blob (a checkout that converts line endings, or an edit since the
+        listing) are keyed by their own hash."""
+        listed = self._listed_blobs.get(file)
+        if listed is None:
+            return content
+        actual = git_blob_id(content) if content is not None else None
+        if actual == listed:
+            return content
+        if self._entries is not None and file in self._entries:
+            return tools.git_blob(self.root, listed)
+        if actual is not None:
+            del self._listed_blobs[file]
+            self._blobs[file] = actual
         return content
 
     def _available_files(self, files: Sequence[str]) -> tuple[str, ...]:
+        """The ``files`` still readable as the index first read them: neither reported unavailable
+        before nor gone from disk now."""
         available = []
         for file in files:
+            if file in self._unavailable:
+                continue
             try:
                 if (self.root / file).is_file():
                     available.append(file)
                 else:
-                    self._unavailable[file] = "disappeared after inventory"
+                    self._unavailable[file] = DISAPPEARED
             except FileNotFoundError:
-                self._unavailable[file] = "disappeared after inventory"
+                self._unavailable[file] = DISAPPEARED
         return tuple(available)
 
     def _require_in_scope(self, file: str) -> None:
@@ -793,19 +876,8 @@ class CodeIndex:
 def _blobs_to_export(repository: Path, commit: str, listed: Sequence[str]) -> dict[str, str]:
     """Object ids of the listed files and of every script config (tsconfig, jsconfig, package.json)
     in ``commit``, keyed by path."""
-    tree = _tree_blobs(tools.git(["ls-tree", "-r", "-z", commit], repository))
+    tree = _regular_blobs(tools.git(["ls-tree", "-r", "-z", commit], repository))
     return {path: tree[path] for path in [*listed, *_script_configs(tree)]}
-
-
-def _tree_blobs(listing: str) -> dict[str, str]:
-    """Object ids of the regular files in ``git ls-tree -r -z`` output, keyed by path."""
-    blobs = {}
-    for line in listing.split("\0"):
-        details, _, path = line.partition("\t")
-        mode, _, object_id = details.partition(" blob ")
-        if mode in _REGULAR_FILE_MODES:
-            blobs[path] = object_id
-    return blobs
 
 
 def _script_configs(paths: Iterable[str]) -> list[str]:
@@ -845,26 +917,37 @@ def _changed_paths(status: str) -> list[str]:
     return changed
 
 
-def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, list[str]]:
+def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, list[str], dict[str, str]]:
+    """The HEAD commit, the changed and untracked paths, and the index blob id of each tracked file;
+    all empty outside Git."""
     try:
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
         status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
+        listing = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
     except tools.ToolFailedError:
-        return "", []
-    return commit, _changed_paths(status)
+        return "", [], {}
+    return commit, _changed_paths(status), _regular_blobs(listing)
 
 
-def _regular_files(listing: str) -> list[str]:
-    """Paths from ``git ls-files --stage -z`` or ``git ls-tree -r -z`` output whose mode is a regular
-    file. NUL separation keeps names with non-ASCII characters exactly as they are on disk."""
-    files = []
+def _regular_blobs(listing: str) -> dict[str, str]:
+    """The blob id of each path in ``git ls-files --stage -z`` or ``git ls-tree -r -z`` output whose
+    mode is a regular file, in listing order. NUL separation keeps names with non-ASCII characters
+    exactly as they are on disk."""
+    blobs: dict[str, str] = {}
     for line in listing.split("\0"):
         details, _, path = line.partition("\t")
-        if details.split(" ", 1)[0] in _REGULAR_FILE_MODES:
-            files.append(path)
-    return list(dict.fromkeys(files))
+        fields = details.split(" ")
+        if fields[0] in _REGULAR_FILE_MODES:
+            blobs.setdefault(path, fields[1] if fields[1] != "blob" else fields[2])
+    return blobs
 
 
 def _commits(log: str) -> list[set[str]]:
     blocks = log.split(_COMMIT_MARK)
     return [{line.strip() for line in block.split("\n") if line.strip()} for block in blocks if block.strip()]
+
+
+def _outermost(symbols: Sequence[Span]) -> list[Span]:
+    return [
+        span for span in symbols if not any(other != span and other.contains(span.start) for other in symbols)
+    ]

@@ -47,7 +47,7 @@ QUESTION = "How does an order request become an HTTP result?"
 
 @pytest.mark.parametrize("json_mode", [False, True])
 def test_trace_command_writes_a_real_pack_with_default_output(
-    tmp_path: Path, monkeypatch, capsys, json_mode: bool
+    tmp_path: Path, monkeypatch, capsys, json_mode: bool, private_data_root: Path
 ) -> None:
     from jev_navigator import cli
 
@@ -71,7 +71,7 @@ def test_trace_command_writes_a_real_pack_with_default_output(
     )
     assert cli.main(argv) == 0
     output = capsys.readouterr()
-    packs = list((tmp_path / "jvn-results").glob("*/manifest.json"))
+    packs = list((private_data_root / "runs").glob("*/manifest.json"))
     assert len(packs) == 1
     manifest = json.loads(packs[0].read_text())
     assert manifest["trace"]["outcome"] == "completed"
@@ -219,6 +219,19 @@ def test_pack_counts_responses_that_reported_no_usage_instead_of_adding_zero_tok
     assert manifest["provider"]["calls"] > 0
     assert manifest["provider"]["responses_without_usage"] == manifest["provider"]["calls"]
     assert manifest["provider"]["input_tokens"] == 0
+
+
+def test_trace_report_shows_the_token_total_next_to_the_responses_without_usage(tmp_path: Path) -> None:
+    repository = _workflow_repository(tmp_path)
+    client = _evidence_client()
+    client.input_tokens_per_call = None
+
+    manifest = _pack(repository, tmp_path / "pack", client)
+
+    report = (tmp_path / "pack" / "report.md").read_text()
+    calls = manifest["provider"]["calls"]
+    assert f"- Responses without usage: {calls}\n- Requests without a response: 0\n" in report
+    assert "- Input tokens: at least 0 (not complete)" in report
 
 
 def test_pack_sums_the_input_tokens_the_provider_reported(tmp_path: Path) -> None:
@@ -400,3 +413,18 @@ def test_second_pack_replays_the_persisted_answers_from_the_store(tmp_path: Path
         for obligation in manifest["trace"]["obligations"]
         for evidence in obligation["evidence"]
     )
+
+
+def test_trace_names_each_file_the_parser_refused_with_its_reason(tmp_path: Path) -> None:
+    # Arrange: a one-line bundle mentioning respond is too large to parse
+    repository = _workflow_repository(tmp_path)
+    statement = "export function respond(){return 1};"
+    commit_files(repository, {"dist/bundle.js": (statement * 6_000)[:200_000]})
+
+    # Act
+    manifest = _pack(repository, tmp_path / "pack", _evidence_client())
+
+    # Assert
+    reason = manifest["trace"]["unavailable_files"]["dist/bundle.js"]
+    assert reason.startswith("too large to parse")
+    assert f"`dist/bundle.js`: {reason}" in (tmp_path / "pack" / "report.md").read_text()

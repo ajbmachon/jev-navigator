@@ -17,7 +17,7 @@ BASE_PEAK_MB = 25.0
 PEAK_MB_PER_SQUARED_THOUSAND_CHARACTERS = 0.05
 MAX_PARSE_PEAK_MB = 250.0
 """A file whose estimated parse peak exceeds this is never parsed. For a one-line file that is a line
-of about 70,000 characters. The largest parse measured under it peaked at 122 MB, and ast-grep scans
+of about 70,000 bytes. The largest parse measured under it peaked at 122 MB, and ast-grep scans
 files in parallel, so several can be in memory at once."""
 
 PARSEABLE_UP_TO_BYTES = int(
@@ -83,7 +83,7 @@ class FileShape:
             return None
         return (
             f"too large to parse: estimated parse peak {_peak_text(self.parse_peak_mb)}, "
-            f"longest line {self.longest_line:,} characters"
+            f"longest line {self.longest_line:,} bytes"
         )
 
 

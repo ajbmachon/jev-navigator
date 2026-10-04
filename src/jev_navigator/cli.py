@@ -18,23 +18,34 @@ from pathlib import Path
 from time import monotonic
 
 from .adapters.typesafe import TypeSafeJevClient
+from .cache_root import cache_root
+from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
-from .cli_trace import create_trace_evidence_pack
+from .cli_trace import create_trace_evidence_pack, unavailable_file_lines
+from .data_root import default_run_folder
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
 from .directives.places import Place, place_for_line
+from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
 from .index.code_index import CodeIndex
 from .index.languages import language_of
 from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
-from .judgments.store import SHARED_STORE_VARIABLE, default_shared_store, run_answer_store, shared_store_path
+from .judgments.store import (
+    SHARED_STORE_VARIABLE,
+    StoreInCacheFolderError,
+    default_shared_store,
+    run_answer_store,
+    shared_store_path,
+)
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
 from .run_files import place_label, source_shown, step_shown
+from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
@@ -46,6 +57,11 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
+OUT_HELP = (
+    "New or empty output directory, never pruned (default: a unique run under "
+    f"$XDG_DATA_HOME/jev-navigator/runs, pruned after {FINISHED_RUN_DAYS} days, {RESUMABLE_RUN_DAYS} "
+    "while resumable)"
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -57,8 +73,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser = _parser()
         (_command_parser(parser, args.topic) if args.topic else parser).print_help()
         return 0
-    if args.command == "stats":
-        return _run_statistics(args)
+    if args.command == "cache":
+        return run_cache_command(args.action)
+    status = _run_statistics(args) if args.command == "stats" else _run_search(args)
+    return 130 if tidy_after_run() else status
+
+
+def _run_search(args: argparse.Namespace) -> int:
     if args.command not in ("find", "findall", "trace"):
         raise AssertionError(f"unhandled command: {args.command}")
     budget = SearchBudget(
@@ -187,7 +208,7 @@ def _run_statistics(args: argparse.Namespace) -> int:
         index = CodeIndex.from_directory(
             repository,
             prefixes=tuple(args.prefix),
-            exclude_paths=(output, Path.cwd() / "jvn-results"),
+            exclude_paths=(output,),
             scan_observer=progress.scan,
         )
         pack = create_statistics_pack(
@@ -277,7 +298,7 @@ def create_evidence_pack(
     outcome = "failed"
     try:
         progress.phase("indexing files")
-        excluded = (output, Path.cwd() / "jvn-results")
+        excluded = (output,)
         if resume_from is not None:
             excluded += (resume_from.resolve(),)
         index = CodeIndex.from_directory(
@@ -395,6 +416,7 @@ def create_evidence_pack(
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
             input_total=judge.input_total,
+            unanswered_requests=judge.unanswered_requests,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
@@ -449,7 +471,7 @@ def _parser() -> argparse.ArgumentParser:
 
 For agents: jvn schema find prints the request's JSON Schema without making model calls.
 JSON mode writes results to stdout; progress goes to stderr. Ctrl-C cancels.
-Results default to ./jvn-results/<directory>-<timestamp> in the invocation directory.
+Results default to <directory>-<timestamp> under $XDG_DATA_HOME/jev-navigator/runs (~/.local/share).
 Credentials: process environment, then ~/.config/jvn/env (TYPESAFE_API_KEY / TYPESAFE_BASE_URL).
 Use jvn help find for options and examples. Exit codes: 0 completed, 1 failed, 2 invalid input, 130 cancelled.
 A completed search can have a non-found outcome; inspect search.outcome in JSON output.""",
@@ -485,7 +507,19 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         "topic", choices=("find", "findall", "trace", "stats"), help="command whose request schema to show"
     )
     help_command = commands.add_parser("help", help="show general or command-specific help")
-    help_command.add_argument("topic", nargs="?", choices=("find", "findall", "trace", "stats", "schema"))
+    help_command.add_argument(
+        "topic", nargs="?", choices=("find", "findall", "trace", "stats", "schema", "cache")
+    )
+    cache = commands.add_parser(
+        "cache",
+        help="show or prune what JVN keeps on disk (no model calls)",
+        description="Show what JVN's caches and run folders hold, or run the housekeeping rules now.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="jvn cache status\njvn cache prune\n"
+        "Every find, findall, trace and stats run also prunes, at most once a day.\n"
+        "Rules: README.md, section 'Where JVN keeps runs and caches'.",
+    )
+    cache.add_argument("action", choices=CACHE_ACTIONS, help="status shows, prune deletes now")
     _add_search_arguments(find)
     find.add_argument(
         "--resume",
@@ -526,7 +560,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     trace.add_argument("--repo", default=".", help="Source directory (default: current directory)")
     trace.add_argument("--prefix", action="append", default=[], help="Optional source scope; repeatable")
-    trace.add_argument("--out", help="New or empty output directory (default: ./jvn-results/<run>)")
+    trace.add_argument("--out", help=OUT_HELP)
     trace.add_argument("--max-depth", type=int, help="Optional maximum static relationship hops")
     trace.add_argument(
         "--max-calls", type=_count_or_none, help="Optional model-request cap; none is unlimited"
@@ -548,7 +582,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     stats.add_argument("--repo", default=".", help="Source directory (default: current directory)")
     stats.add_argument("--prefix", action="append", default=[], help="Source scope; repeatable")
-    stats.add_argument("--out", help="New or empty output directory (default: ./jvn-results/<run>)")
+    stats.add_argument("--out", help=OUT_HELP)
     stats.add_argument(
         "--operation",
         action="append",
@@ -571,9 +605,12 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
 
 
 def _answer_store(args: argparse.Namespace) -> Path:
-    """The shared store this run uses: ``--answer-store`` when given, else ``shared_store_path()``.
-    The run says which on stderr."""
-    path = Path(args.answer_store).expanduser().resolve() if args.answer_store else shared_store_path()
+    """The shared store this run uses (``shared_store_path``), which the run names on stderr. A named
+    store inside JVN's cache folder is a usage error."""
+    try:
+        path = shared_store_path(args.answer_store)
+    except StoreInCacheFolderError as error:
+        _parser().error(str(error))
     print(f"answer store: {path}", file=sys.stderr)
     return path
 
@@ -584,7 +621,8 @@ def _add_answer_store_argument(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help=(
             f"Shared answer store file (default: ${SHARED_STORE_VARIABLE}, else {default_shared_store()}); "
-            "a new file keeps this run from replaying another run's answers"
+            "a new file keeps this run from replaying another run's answers; it must lie outside "
+            f"JVN's cache folder {cache_root()}, which JVN prunes"
         ),
     )
 
@@ -609,10 +647,7 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         metavar="PATH:LINE",
         help="Known entry or caller line; repeatable. Without one, jvn chooses a narrow entry point.",
     )
-    scope.add_argument(
-        "--out",
-        help="New or empty output directory (default: a unique run under ./jvn-results)",
-    )
+    scope.add_argument("--out", help=OUT_HELP)
     _add_answer_store_argument(find)
     defaults = SearchBudget()
     limits.add_argument(
@@ -852,8 +887,7 @@ def _previous_pack(
 
 
 def _default_output(repository: Path) -> Path:
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    return Path.cwd() / "jvn-results" / f"{repository.name}-{stamp}"
+    return default_run_folder(repository, datetime.now(UTC))
 
 
 def _scope_warning(file_count: int) -> str | None:
@@ -866,8 +900,9 @@ def _load_typesafe_environment(
     environment: MutableMapping[str, str],
     path: Path | None = None,
 ) -> None:
-    """Load official TypeSafe SDK settings: process environment, then checkout `.env`,
-    then the legacy `~/.config/jvn/env`; a process value always takes precedence."""
+    """Load official TypeSafe SDK settings: process environment, then this tool's checkout `.env`
+    (never a repository under analysis), then the legacy `~/.config/jvn/env`; a process value always
+    takes precedence."""
     from .environment import load_typesafe_environment
 
     load_typesafe_environment(environment, legacy=path)
@@ -899,6 +934,7 @@ def _manifest(
     requested_model: str,
     served_model: str | None,
     input_total: TokenTotal,
+    unanswered_requests: int,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -931,7 +967,7 @@ def _manifest(
             "requested_model": requested_model,
             "served_model": served_model,
             "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
-            "responses_without_usage": _plus_known(_carried_unreported(previous), input_total.not_reported),
+            **usage_receipt(previous, input_total, unanswered_requests),
         },
         "search": {
             "outcome": result.outcome,
@@ -1070,27 +1106,16 @@ def _find_all_report(manifest: dict) -> str:
                 f"`{source['file']}:{source['lines'][0]}-{source['lines'][1]}` |"
             )
     lines += ["", "## Coverage gaps", ""]
-    for field in ("remaining_files", "unparsed_files", "unsupported_files", "unavailable_files"):
+    for field in ("remaining_files", "unparsed_files", "unsupported_files"):
         lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
+    lines.append("- unavailable_files:" if search["unavailable_files"] else "- unavailable_files: none")
+    lines += unavailable_file_lines(search["unavailable_files"])
     lines += ["", "## Matching bodies", ""]
     for value in search["found"]:
         source = value["source"]
         lines += [f"### {source['file']}:{source['lines'][0]}-{source['lines'][1]}", ""]
         lines += _code_block(value, "")
     return "\n".join(lines) + "\n"
-
-
-def _carried_unreported(previous: dict | None) -> int | None:
-    """The unreported-response count of an earlier receipt, ``None`` when it predates the field."""
-    return 0 if previous is None else previous["provider"].get("responses_without_usage")
-
-
-def _unreported_text(count: int | None) -> str:
-    return "not known (earlier receipt)" if count is None else str(count)
-
-
-def _plus_known(carried: int | None, added: int) -> int | None:
-    return None if carried is None else carried + added
 
 
 def _navigator_provenance() -> dict:
@@ -1189,6 +1214,7 @@ def _code_block(place: dict, language: str) -> list[str]:
 def _report(manifest: dict) -> str:
     source = manifest["source"]
     search = manifest["search"]
+    provider = manifest["provider"]
     lines = [
         "# Jev navigator evidence pack",
         "",
@@ -1201,16 +1227,16 @@ def _report(manifest: dict) -> str:
         f"- Outcome: **{_outcome_summary(search)}**",
         *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
-        f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
-        f"`{manifest['provider']['served_model']}`",
-        f"- Responses without usage: {_unreported_text(manifest['provider']['responses_without_usage'])}",
+        f"- Provider: requested `{provider['requested_model']}`, served `{provider['served_model']}`",
+        *usage_report_lines(provider),
         f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
         "(indexing and entry selection excluded)",
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "
         f"{len(search['unparsed_files'])} files failed a completed parser scan. "
         f"Pending parser scans: {', '.join(search['parser_scans']['pending']) or 'none'}.",
-        "- Files unavailable (disappeared or changed on disk, or too large to parse): "
+        "- Files unavailable (disappeared or changed on disk, or refused by the parser): "
         f"{len(search['unavailable_files'])}.",
+        *unavailable_file_lines(search["unavailable_files"]),
         "",
         "## Opened code",
         "",

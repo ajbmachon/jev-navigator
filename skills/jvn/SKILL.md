@@ -29,12 +29,12 @@ jvn trace 'how the source quote becomes an accepted or rejected claim' --start a
 ```
 
 Run in the source directory, or add `--repo /path/to/repo`. Dirty trees and non-Git directories work.
-Output defaults to a unique `./jvn-results/` directory. Trace starts must be repository-relative
+Output defaults to a unique run folder under `~/.local/share/jev-navigator/runs/` whose path the run prints; nothing is written into the project. Trace starts must be repository-relative
 `PATH:LINE` values inside a function or method, not a class declaration. Unknown entry? Find first,
 inspect the returned function, then trace it. Quote the entire natural-language argument once.
-Do not edit files in scope while a search runs: a file that changes is reported unavailable, and a
+Do not edit files in scope while a search runs: a file that changes is reported unavailable when the index reads it again, and a
 search that finds nothing then ends `scope_incomplete` instead of `nothing_left`. A file too large to
-parse safely (a one-line bundle of about 70,000 characters or more) is never parsed: it is reported
+parse safely (a one-line bundle of about 70,000 bytes or more) is never parsed: it is reported
 unavailable with the reason "too large to parse", and it ends a not-found search the same way.
 
 For agents and pipelines, discover the current contract with `jvn schema find`, `jvn schema findall`
@@ -73,11 +73,19 @@ Trace may leave a journal without a manifest; keep its output.
 
 Find All and Trace judge at most 16 functions per request and send their requests in parallel; a Find
 opening still asks about all its neighbours in one request. Every answer goes to one shared answer
-store, `$XDG_CACHE_HOME/jev-navigator/answers.sqlite` (`~/.cache` when unset), which holds hashes,
-locations and answers, never code. A later run at the same commit replays from it after one live
-request. Give each experiment or eval arm its own store with `--answer-store PATH` (or
-`JEV_NAVIGATOR_ANSWER_STORE`) so arms never reuse each other's answers; stderr names the store in
-use. `jvn trace` reports `replayed_answers` beside its live `calls`.
+store, `$XDG_CACHE_HOME/jev-navigator/answers-v2.sqlite` (`~/.cache` when unset or relative), which
+holds hashes, locations and answers, never code, and forgets a request no run reused for 30 days. A later run at the same commit replays from it after the
+requests that learn the served model: one for Find All and Trace, one per place a Find's first round
+opens. Give each experiment or eval arm its own store with `--answer-store PATH` (or
+`JEV_NAVIGATOR_ANSWER_STORE`) outside the cache folder so arms never reuse each other's answers;
+stderr names the store in use, and a store inside the cache folder is refused with exit status 2.
+`jvn trace` reports `replayed_answers` beside its live `calls`.
+
+The first search in a scope parses every file in it once and records each name and its lines in the
+name table under the same cache folder; later searches over unchanged files look names up there
+without searching or parsing. The table holds names and line numbers, never code or string literals.
+JVN prunes its own caches and run folders as runs end (rules: `docs/cli.md`, Disk use and
+housekeeping); `jvn cache status` shows disk use. Copy a run folder you want to keep, or use `--out`.
 
 Live searches send source to the configured provider: reuse the user's source and spend authorization,
 and never print credentials (environment or `~/.config/jvn/env`). Progress is stderr, JSON stdout.

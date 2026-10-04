@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -535,6 +536,7 @@ def test_sigint_returns_the_active_http_place_as_resumable(
     interrupter = threading.Thread(target=interrupt_when_sent)
     interrupter.start()
     try:
+        started = time.monotonic()
         result = find_code(
             index,
             Judge(client),
@@ -545,6 +547,7 @@ def test_sigint_returns_the_active_http_place_as_resumable(
             initial_candidates=[(place, 1.0) for place in places],
         )
 
+        assert time.monotonic() - started < 5, "the sent requests were left to the 30 s transport timeout"
         assert result.outcome == Outcome.CANCELLED
         assert {entry.place_key for entry in result.not_inspected} == {place.key for place in places}
         assert {entry.reason for entry in result.not_inspected} == {"cancelled"}

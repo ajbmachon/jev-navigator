@@ -33,6 +33,7 @@ from ..history import (
     HistoryJudgment,
     HistoryOutcome,
     HistoryStep,
+    HistoryTooLargeError,
     judge_history,
     judge_history_async,
 )
@@ -280,6 +281,9 @@ class _Search:
     cap_reached: bool = False
     replay_exhausted: bool = False
     counter: itertools.count = field(default_factory=itertools.count)
+    unmerged: list[_Opening] = field(default_factory=list)
+    """The places a round opened and has not merged yet; a caller interrupt returns them to the
+    frontier, wherever in the round it arrives."""
 
     def push(
         self,
@@ -357,11 +361,13 @@ def find_code(
             responses, cancelled = _ask_round(judge, search, opened)
             with _defer_keyboard_interrupts():
                 _merge_round(search, opened, responses)
+                search.unmerged = []
             if cancelled:
                 stop = Outcome.CANCELLED
                 break
             _apply_stop_rule(judge, search)
     except KeyboardInterrupt:
+        _restore_unmerged(search)
         stop = Outcome.CANCELLED
     assert stop is not None
     return _result(search, stop, judge, index)
@@ -458,6 +464,8 @@ def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Openin
             if opening := _open(index, search, item):
                 opened.append(opening)
             processed += 1
+        with _defer_keyboard_interrupts():
+            search.unmerged = opened
         return opened
     except BaseException:
         for opening in opened:
@@ -466,7 +474,15 @@ def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Openin
         for item in beam[processed:]:
             search.visited.discard(item.place.key)
             heapq.heappush(search.queue, item)
+        search.unmerged = []
         raise
+
+
+def _restore_unmerged(search: _Search) -> None:
+    for opening in search.unmerged:
+        _restore_opening(search, opening)
+        heapq.heappush(search.queue, opening.item)
+    search.unmerged = []
 
 
 def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[list, bool]:
@@ -479,17 +495,24 @@ def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[l
                 futures.append(pool.submit(_ask_within_cap, judge, search, opening))
             return [future.result() for future in futures], False
         except KeyboardInterrupt:
+            settled_before_cancel = {future for future in futures if future.done()}
             with _defer_keyboard_interrupts(re_raise=False):
                 judge.abort_sends(futures)
-                responses = [_settled_response(future) for future in futures]
+                responses = [_settled_response(future, future in settled_before_cancel) for future in futures]
             unsubmitted = len(opened) - len(futures)
             return [*responses, *[_Unanswered.CANCELLED] * unsubmitted], True
 
 
-def _settled_response(future: Future):
+def _settled_response(future: Future, settled_before_cancel: bool):
+    """The future's answer. An error that had already settled before the cancel is a real failure and
+    is raised; only a request that ended because of the cancel counts as cancelled."""
     try:
         return future.result()
-    except (Exception, KeyboardInterrupt):
+    except Exception:
+        if settled_before_cancel:
+            raise
+        return _Unanswered.CANCELLED
+    except KeyboardInterrupt:
         return _Unanswered.CANCELLED
 
 
@@ -563,6 +586,14 @@ class StopRule:
         return History(budget_chars=self.budget_chars, sections={SUBJECT: subject, **self.context})
 
 
+class StopRuleTooLargeError(RuntimeError):
+    """The stop rule's request cannot fit Jev's input box, so the search cannot judge whether to stop.
+    The caller sizes its rule (``budget_chars``, ``shared``, ``sections``); the search does not guess."""
+
+    def __init__(self, rule: StopRule, cause: Exception) -> None:
+        super().__init__(f"the stop rule {rule.check.name} cannot fit Jev's input: {cause}")
+
+
 def _apply_stop_rule(judge: Judge, search: _Search) -> None:
     rule = search.stop_rule
     if rule is None:
@@ -573,6 +604,8 @@ def _apply_stop_rule(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
+    except (HistoryTooLargeError, InputBudgetExceededError) as error:
+        raise StopRuleTooLargeError(rule, error) from error
 
 
 async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
@@ -585,6 +618,8 @@ async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
+    except (HistoryTooLargeError, InputBudgetExceededError) as error:
+        raise StopRuleTooLargeError(rule, error) from error
 
 
 def _restore(search: _Search, previous: FindResult) -> None:

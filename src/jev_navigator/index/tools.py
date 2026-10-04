@@ -4,21 +4,25 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
+from typing import IO
+
+import msgspec
 
 from .file_shape import refusal_of
 from .spans import TextHit
 
-logger = logging.getLogger(__name__)
-
 AST_GREP = "ast-grep"
 RIPGREP = "rg"
+# `--no-config` keeps ripgrep from reading `RIPGREP_CONFIG_PATH`: over an untrusted repository, a
+# config file could otherwise inject flags such as `--pre=<program>`, which runs an arbitrary
+# program. It also keeps a personal rg config from changing what the index sees.
+_RIPGREP_SAFE = (RIPGREP, "--no-config")
 _NO_MATCHES_EXIT = 1
 NEUTRAL_AST_GREP_CONFIG = "ruleDirs: []\n"
 """The smallest sgconfig ast-grep accepts. Passed with ``--config`` it replaces the discovery of the
@@ -75,7 +79,7 @@ def ast_grep_rules(
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
         for chunk in file_chunks(parseable):
-            yield from _json_lines([*command, "--json=stream", *chunk], cwd, decode)
+            yield from _json_lines([*command, "--json=stream", "--", *chunk], cwd, decode)
 
 
 def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], dict[str, str]]:
@@ -84,8 +88,8 @@ def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], di
     for file in files:
         try:
             reason = refusal_of(cwd, file)
-        except OSError:
-            reason = None
+        except OSError as error:
+            reason = f"could not be measured: {type(error).__name__}: {error}"
         if reason is None:
             parseable.append(file)
         else:
@@ -93,13 +97,16 @@ def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], di
     return parseable, refused
 
 
-def file_chunks(files: Sequence[str]) -> Iterator[Sequence[str]]:
-    """``files`` in order, split so no command gets more than ``MAX_FILES_PER_COMMAND`` paths or
-    ``MAX_ARGUMENT_BYTES`` of them, whatever the size of the scope."""
+def file_chunks(files: Sequence[str], *, bytes_only: bool = False) -> Iterator[Sequence[str]]:
+    """``files`` in order, split so no command gets more than ``MAX_ARGUMENT_BYTES`` of paths, and,
+    unless ``bytes_only``, no more than ``MAX_FILES_PER_COMMAND`` of them, which bounds what one
+    parser process holds. A text search holds no file, so only the argument limit applies to it."""
+    most_files = None if bytes_only else MAX_FILES_PER_COMMAND
     start, size = 0, 0
     for position, file in enumerate(files):
         length = len(file.encode()) + 1
-        full = position - start >= MAX_FILES_PER_COMMAND or size + length > MAX_ARGUMENT_BYTES
+        too_many = most_files is not None and position - start >= most_files
+        full = too_many or size + length > MAX_ARGUMENT_BYTES
         if position > start and full:
             yield files[start:position]
             start, size = position, 0
@@ -109,14 +116,16 @@ def file_chunks(files: Sequence[str]) -> Iterator[Sequence[str]]:
 
 
 def _json_lines(arguments: Sequence[str], cwd: Path, decode: Callable[[str], dict]) -> Iterator[dict]:
-    """Each line the command prints, parsed as JSON while it runs. stderr goes to a file, so a full
-    stderr pipe cannot stall the command; the process is killed if the reader stops early."""
+    """Each line the command prints, decoded with ``decode`` while it runs. stderr goes to a file, so a full
+    stderr pipe cannot stall the command; the process is killed if the reader stops early. A line
+    that is no JSON (the process died partway through it) fails with the process's exit code and
+    stderr, which say why it stopped."""
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen(list(arguments), cwd=cwd, stdout=subprocess.PIPE, stderr=errors, text=True)
         try:
             for line in process.stdout:
                 if line.strip():
-                    yield decode(line)
+                    yield _json_object(line, process, errors, arguments[0], decode)
         except BaseException:
             process.kill()
             raise
@@ -124,41 +133,38 @@ def _json_lines(arguments: Sequence[str], cwd: Path, decode: Callable[[str], dic
             process.stdout.close()
             returncode = process.wait()
         if returncode not in (0, _NO_MATCHES_EXIT):
-            errors.seek(0)
-            detail = errors.read().decode(errors="replace").strip()[:300]
-            raise ToolFailedError(f"{arguments[0]} exited {returncode}: {detail}")
+            raise _tool_failed(arguments[0], returncode, errors)
+
+
+def _json_object(
+    line: str, process: subprocess.Popen, errors: IO[bytes], tool: str, decode: Callable[[str], dict]
+) -> dict:
+    """A whole line the decoder rejects for a missing or mistyped field raises as it is: the tool
+    printed it in full, so the decoder's expectation, not the tool, is what failed."""
+    try:
+        return decode(line)
+    except msgspec.ValidationError:
+        raise
+    except ValueError as malformed:
+        process.kill()
+        raise _tool_failed(tool, process.wait(), errors) from malformed
+
+
+def _tool_failed(tool: str, returncode: int, errors: IO[bytes]) -> ToolFailedError:
+    errors.seek(0)
+    return ToolFailedError(f"{tool} exited {returncode}: {errors.read().decode(errors='replace').strip()}")
 
 
 def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
     """The lines holding ``text``. JSON events are split at newlines only, since a line of code may
     hold a Unicode line separator that ``str.splitlines`` would split."""
-    command = [RIPGREP, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
+    command = [*_RIPGREP_SAFE, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
     hits = []
-    for chunk in file_chunks(files):
+    for chunk in file_chunks(files, bytes_only=True):
         output = run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
         events = (json.loads(line) for line in output.split("\n") if line.strip())
         hits += [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
     return hits
-
-
-def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -> tuple[str, ...]:
-    """Every supplied file containing any of the exact ``texts``, without a result-count cutoff. The
-    texts go to ripgrep in a pattern file, one per line, so their number never meets the argument
-    limit."""
-    patterns = [texts] if isinstance(texts, str) else list(texts)
-    if not files or not patterns:
-        return ()
-    if any("\n" in pattern for pattern in patterns):
-        raise ValueError("a text searched for by file cannot hold a line break")
-    with tempfile.NamedTemporaryFile("w", prefix="jev-navigator-patterns-", suffix=".txt") as pattern_file:
-        pattern_file.write("".join(f"{pattern}\n" for pattern in patterns))
-        pattern_file.flush()
-        command = [RIPGREP, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_file.name]
-        found: list[str] = []
-        for chunk in file_chunks(files):
-            output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
-            found += [path.removeprefix("./") for path in output.split("\0") if path]
-    return tuple(found)
 
 
 def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
@@ -176,7 +182,7 @@ def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
     else:
         output = run_command(
             [
-                RIPGREP,
+                *_RIPGREP_SAFE,
                 "--files",
                 "--hidden",
                 "--null",
@@ -219,7 +225,19 @@ def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) 
     that would leave ``destination`` and an object git does not have both raise ``ToolFailedError``."""
     if not blobs:
         return
-    requests = "".join(f"{object_id}\n" for object_id in blobs.values()).encode()
+    for path, content in zip(blobs, _cat_file_batch(repository, blobs.values()), strict=True):
+        _write_inside(destination, path, content)
+
+
+def git_blob(repository: Path, object_id: str) -> bytes:
+    """The bytes of one blob, asked for by object id; an object git does not have raises
+    ``ToolFailedError``."""
+    (content,) = _cat_file_batch(repository, [object_id])
+    return content
+
+
+def _cat_file_batch(repository: Path, object_ids: Iterable[str]) -> list[bytes]:
+    requests = "".join(f"{object_id}\n" for object_id in object_ids).encode()
     completed = subprocess.run(
         ["git", "cat-file", "--batch"],
         cwd=repository,
@@ -230,8 +248,7 @@ def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) 
         raise ToolFailedError(
             f"git cat-file exited {completed.returncode}: {completed.stderr.decode()[:300]}"
         )
-    for path, content in zip(blobs, _batch_contents(completed.stdout), strict=True):
-        _write_inside(destination, path, content)
+    return _batch_contents(completed.stdout)
 
 
 def _batch_contents(output: bytes) -> list[bytes]:

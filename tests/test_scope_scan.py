@@ -13,7 +13,7 @@ from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
 from jev_navigator.index.languages import has_flow_pragma, language_of
-from jev_navigator.index.scope_scan import FileFacts, FileStructure, Unparsed, scan_facts
+from jev_navigator.index.scope_scan import OPAQUE_RECEIVER, FileFacts, FileStructure, Unparsed, scan_facts
 from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
@@ -318,6 +318,40 @@ def test_every_language_s_facts_load_back_from_the_fact_cache_as_they_were_scann
     assert loaded == scanned
 
 
+@pytest.mark.parametrize(
+    ("file", "declaration"),
+    [("module.ts", "const value{n} = {n};\n"), ("module.py", "value{n} = {n}\n")],
+)
+def test_a_module_declaration_is_printed_without_the_whole_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, declaration: str
+) -> None:
+    """ast-grep prints every node a rule's relations matched. A rule asking whether a declaration sits
+    in the program printed the whole file once per declaration, so the parser's output, and its
+    memory, grew with declarations times file size: 1.2 MB of ordinary code peaked over 2.5 GB. The
+    matches are recorded as printed, every field decoded, because the scan's own decoder skips the
+    related nodes the whole file was printed in."""
+    # Arrange
+    source = "".join(declaration.format(n=n) for n in range(400))
+    (tmp_path / file).write_text(source)
+    printed: list[dict] = []
+    original_rules = tools.ast_grep_rules
+
+    def recorded_rules(*arguments, **options):
+        for match in original_rules(*arguments, **options | {"decode": json.loads}):
+            printed.append(match)
+            yield match
+
+    monkeypatch.setattr(tools, "ast_grep_rules", recorded_rules)
+
+    # Act
+    facts = scan_facts([file], tmp_path, Unparsed())
+
+    # Assert
+    declarations = [match for match in printed if match["ruleId"] == "declaration"]
+    assert len(facts[file].structure.declarations) == len(declarations) == 400
+    assert all(len(json.dumps(match)) < len(source) for match in declarations)
+
+
 def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_path: Path) -> None:
     # Arrange
     index = committed(
@@ -330,6 +364,41 @@ def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_p
 
     # Assert
     assert site.binding.status == "resolved"
+
+
+def test_calls_on_one_line_keep_their_source_order_on_every_scan(tmp_path: Path) -> None:
+    """ast-grep runs its rules in parallel, so the matches of `new Date(...)` and of `merge(...)`
+    arrive in either order. Calls on one line are ordered as the source writes them, on every scan.
+    Of two calls starting at one place, such as `new Foo(a)` and `new Foo(a).bar(...)`, the outer
+    comes first, as one rule already orders `foo.bar().baz()`."""
+    # Arrange
+    source = (
+        "function f(a) {\n"
+        "  const d = new Date(merge(a), now());\n"
+        "  x = new Foo(a).bar(now());\n"
+        "  const t = new Date(merge(a), now()).getTime();\n"
+        "  return foo.bar().baz();\n"
+        "}\n"
+    )
+    (tmp_path / "order.js").write_text(source)
+    expected = {
+        2: ("Date", "merge", "now"),
+        3: ("bar", "Foo", "now"),
+        4: ("getTime", "Date", "merge", "now"),
+        5: ("baz", "bar"),
+    }
+
+    # Act
+    orders = {
+        tuple(
+            (call.line, call.name)
+            for call in scan_facts(["order.js"], tmp_path, Unparsed())["order.js"].calls
+        )
+        for _ in range(50)
+    }
+
+    # Assert
+    assert orders == {tuple((line, name) for line, names in expected.items() for name in names)}
 
 
 def test_the_flow_pragma_is_taken_from_leading_comments_not_from_strings_or_the_body() -> None:
@@ -782,3 +851,58 @@ def test_reading_the_parsed_files_receipt_parses_nothing(tmp_path: Path, ast_gre
     # Assert
     assert parsed == {"app/a.py"}
     assert len(ast_grep_runs) == runs_before
+
+
+RECEIVERS = {
+    "app/clients.ts": "export function load(client, cfg, store) {\n"
+    '  client("api-key-literal").fetch(1);\n'
+    '  cfg["token-literal"].get(2);\n'
+    "  `template-${store}`.trim();\n"
+    "  this.store.save(3);\n"
+    "  store?.rows.push(4);\n"
+    "  run(this.handler, cfg.read);\n"
+    "}\n",
+    "app/model.py": "class Model:\n    def save(self):\n        self.items.append(1)\n"
+    '        super().save()\n        open("secret-path").read()\n',
+}
+
+
+def test_a_receiver_is_kept_only_as_a_plain_chain_of_names(tmp_path: Path) -> None:
+    # Arrange
+    commit_files(tmp_path, RECEIVERS)
+
+    # Act
+    facts = scan_facts(sorted(RECEIVERS), tmp_path, Unparsed())
+
+    # Assert
+    calls = {(call.name, call.receiver) for fact in facts.values() for call in fact.calls}
+    references = {(ref.name, ref.receiver) for fact in facts.values() for ref in fact.references}
+    assert {
+        ("fetch", OPAQUE_RECEIVER),
+        ("get", OPAQUE_RECEIVER),
+        ("trim", OPAQUE_RECEIVER),
+        ("save", "this.store"),
+        ("push", "store.rows"),
+        ("append", "self.items"),
+        ("read", OPAQUE_RECEIVER),
+    } <= calls
+    assert {("handler", "this"), ("read", "cfg")} <= references
+    receivers = " ".join(str(call.receiver) for fact in facts.values() for call in fact.calls)
+    assert "literal" not in receivers and "secret" not in receivers and "template" not in receivers
+
+
+def test_a_parsed_file_that_vanished_still_counts_as_read_and_is_listed_unavailable(tmp_path: Path) -> None:
+    # Arrange: its facts come from the bytes read before it vanished, which slices keep
+    index = committed(
+        tmp_path, {"app/a.py": "def a():\n    return 1\n", "app/b.py": "def b():\n    return 2\n"}
+    )
+    index.functions_in("app/a.py")
+    (tmp_path / "app" / "a.py").unlink()
+
+    # Act
+    pending = index.parser_scans_pending
+
+    # Assert
+    assert pending == ("facts",)
+    assert "app/a.py" in index.parsed_files
+    assert "app/a.py" in index.unavailable_files

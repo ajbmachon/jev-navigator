@@ -905,3 +905,32 @@ def test_a_scope_path_that_leaves_the_root_is_refused(tmp_path: Path, scope_path
     # Act and assert
     with pytest.raises(UnsafePathError, match=scope_path.replace(".", r"\.")):
         CodeIndex(root, [scope_path])
+
+
+def test_top_level_symbols_are_the_functions_and_classes_no_other_symbol_contains(
+    sample_index: CodeIndex,
+) -> None:
+    top_level = [span.name for span in sample_index.top_level_symbols("app/orders.py")]
+
+    assert top_level == ["OrderService", "cancel"]
+    assert "place" in [span.name for span in sample_index.symbols_in("app/orders.py")]
+
+
+def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: Path) -> None:
+    (tmp_path / "notices.tsx").write_text("export function LoadFailed() {\n  return <p>Not loaded</p>;\n}\n")
+    (tmp_path / "basket.tsx").write_text(
+        'import { LoadFailed } from "./notices";\n'
+        "export function Basket() {\n"
+        "  return <div><LoadFailed /></div>;\n"
+        "}\n"
+        "export function Page() {\n"
+        "  return <ui.Frame><LoadFailed>x</LoadFailed></ui.Frame>;\n"
+        "}\n"
+    )
+    index = CodeIndex(tmp_path, ("notices.tsx", "basket.tsx"), fact_cache_dir=tmp_path / "cache")
+
+    calls = [(site.file, site.line, site.caller.name) for site in index.find_callers("LoadFailed")]
+
+    assert calls == [("basket.tsx", 3, "Basket"), ("basket.tsx", 6, "Page")]
+    assert [site.line for site in index.find_callers("Frame")] == [6]
+    assert index.find_callers("div") == ()

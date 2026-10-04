@@ -161,10 +161,10 @@ participate in text-based moves. Syntax operations return no symbols, calls or r
 they are never sent to ast-grep with an empty language rule. This does not claim their text was
 parsed as code.
 
-The CLI creates a unique run directory under `jvn-results/` in the invocation directory when `--out`
-is omitted. Each run retains its report, manifest and request journal. Generated result directories
-are excluded from the CLI's source inventory so repeated searches do not search their own evidence.
-Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
+The CLI creates a unique run folder under `$XDG_DATA_HOME/jev-navigator/runs/` when `--out` is
+omitted. Each run retains its report, manifest and request journal. An `--out` folder inside the
+searched directory is excluded from the CLI's source inventory so repeated searches do not search
+their own evidence. Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
 
 Agents can pass the same CLI request as JSON with `jvn --json request.json`, an inline JSON object,
 or `jvn --json -` for stdin. `jvn schema find` emits its JSON Schema without model calls. The CLI parser remains the single owner of options, types and defaults. `target` is
@@ -246,8 +246,16 @@ facts (`fact_cache._MODULES_THAT_READ_MATCHES`). Changing a rule or the code tha
 reparses existing cached results by itself; there is no version string to bump. A new module that
 shapes facts belongs in that tuple.
 
-Name lookups reuse an in-memory index of parsed definitions, calls and references, including facts
-loaded from the persistent cache. Text discovery searches only files without facts. A bidirectional
+Name lookups read `name_table.NameTable`: one SQLite file per `table_identity()`, which hashes
+`fact_cache.facts_identity()` (the parser version and every language's rules) with the source of
+`name_table.py`. Rows are written only from facts, at `CodeIndex._remember_facts`, keyed by the git
+blob id of the file content, and hold names, kinds, lines, roles and receivers as the facts hold them:
+`scope_scan.receiver_of` keeps a receiver only as a plain chain of names and records anything else,
+which could quote a string literal, as `OPAQUE_RECEIVER`. `CodeIndex` records the files navigation
+reaches apart from the table's coverage, and `parsed_files`, `parser_scans_pending` and
+`observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
+linked into place (`shared_database.open_shared_database`), and each content's rows are written in
+one transaction. A bidirectional
 trace prepares the scoped fact inventory in one batch before walking incoming and outgoing links;
 it does not launch one repository search for every encountered name.
 

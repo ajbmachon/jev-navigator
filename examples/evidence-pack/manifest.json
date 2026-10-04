@@ -1,73 +1,346 @@
 {
-  "schema_version": "jev-navigator.evidence-pack/v1",
-  "generated_at": "2026-09-28T18:00:00+00:00",
+  "budget": {
+    "beam_width": 1,
+    "max_calls": 3,
+    "max_depth": 2,
+    "max_line_chars": 240,
+    "max_slice_chars": 12000,
+    "max_steps": 3,
+    "neighbours_per_kind": null,
+    "preview_lines": 8
+  },
+  "entry_selection": null,
+  "generated_at": "2026-10-04T12:00:00+00:00",
   "navigator": {
     "package_version": "0.1.0",
-    "source_revision": "0000000000000000000000000000000000000000",
     "source_dirty": false,
+    "source_revision": "0000000000000000000000000000000000000000",
     "source_tree_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
   },
+  "provider": {
+    "input_tokens": 200,
+    "input_tokens_complete": true,
+    "requested_model": "jev-scripted",
+    "responses_without_usage": 0,
+    "served_model": "jev-scripted",
+    "unanswered_requests": 0
+  },
+  "requested_starts": [
+    "app/orders.py:4"
+  ],
+  "resume_from": null,
+  "schema_version": "jev-navigator.evidence-pack/v1",
+  "search": {
+    "calls": 2,
+    "calls_this_invocation": 2,
+    "code_files": 2,
+    "duration_seconds": 0.043,
+    "entry_calls": 0,
+    "entry_selection_pending": false,
+    "files_judged": 2,
+    "files_read": 2,
+    "found": [
+      {
+        "path": [
+          "app/orders.py:3-4",
+          "app/policy.py:1-2"
+        ],
+        "place": "app/policy.py:1-2",
+        "probability": 0.96,
+        "source": {
+          "commit": "1111111111111111111111111111111111111111",
+          "file": "app/policy.py",
+          "file_sha256": "0cc97f96d3638debcef4ae177e8c0e18dd8f5ba14f67c6c4658cd8cf49171fd7",
+          "lines": [
+            1,
+            2
+          ],
+          "reached_by": "called by handle"
+        },
+        "verdict": "yes"
+      }
+    ],
+    "history": [
+      {
+        "arguments": {
+          "chosen": [
+            {
+              "depth": 0,
+              "place": "app/orders.py:3-4",
+              "priority": 1.0,
+              "reason": "start"
+            }
+          ],
+          "still_queued": 0
+        },
+        "decision": "open 1 of the best-scored places",
+        "fetched": [],
+        "judgments": {},
+        "operation": "choose_next"
+      },
+      {
+        "arguments": {
+          "depth": 0,
+          "path": [
+            "app/orders.py:3-4"
+          ],
+          "place": "app/orders.py:3-4"
+        },
+        "decision": "start judged no",
+        "fetched": [
+          {
+            "commit": "1111111111111111111111111111111111111111",
+            "file": "app/orders.py",
+            "file_sha256": "789bf14167bf0bc24aa600a358b9fb1183e752d1fca41108fbd16c9493b31243",
+            "lines": [
+              3,
+              4
+            ],
+            "reached_by": "caller-provided start"
+          }
+        ],
+        "judgments": {
+          "contains_target": {
+            "probability": 0.04,
+            "verdict": "no"
+          },
+          "could_contain": [
+            {
+              "place": "app/policy.py:1-2",
+              "probability": 0.04,
+              "relationship": {
+                "binding": {
+                  "proven": true,
+                  "reason": "imported from app/policy.py",
+                  "status": "resolved",
+                  "target": {
+                    "end": 2,
+                    "file": "app/policy.py",
+                    "name": "admit",
+                    "start": 1
+                  }
+                },
+                "move": "callees",
+                "relation": "called by handle"
+              },
+              "signature": "app/policy.py:1 admit",
+              "verdict": "no"
+            },
+            {
+              "place": "app/orders.py:1-2",
+              "probability": 0.04,
+              "relationship": {
+                "move": "lines_before",
+                "relation": "the lines before app/orders.py:3-4"
+              },
+              "signature": "app/orders.py:1",
+              "verdict": "no"
+            }
+          ],
+          "open_first": {
+            "choice": "app/policy.py:1-2",
+            "confidence": 1.0,
+            "used": true
+          }
+        },
+        "operation": "open"
+      },
+      {
+        "arguments": {
+          "chosen": [
+            {
+              "depth": 1,
+              "place": "app/policy.py:1-2",
+              "priority": 0.04,
+              "reason": "open_first"
+            }
+          ],
+          "still_queued": 1
+        },
+        "decision": "open 1 of the best-scored places",
+        "fetched": [],
+        "judgments": {},
+        "operation": "choose_next"
+      },
+      {
+        "arguments": {
+          "depth": 1,
+          "path": [
+            "app/orders.py:3-4",
+            "app/policy.py:1-2"
+          ],
+          "place": "app/policy.py:1-2"
+        },
+        "decision": "found",
+        "fetched": [
+          {
+            "commit": "1111111111111111111111111111111111111111",
+            "file": "app/policy.py",
+            "file_sha256": "0cc97f96d3638debcef4ae177e8c0e18dd8f5ba14f67c6c4658cd8cf49171fd7",
+            "lines": [
+              1,
+              2
+            ],
+            "reached_by": "called by handle"
+          }
+        ],
+        "judgments": {
+          "contains_target": {
+            "probability": 0.96,
+            "verdict": "yes"
+          },
+          "could_contain": [
+            {
+              "place": "app/orders.py:1-4",
+              "probability": 0.96,
+              "relationship": {
+                "move": "co_changed",
+                "relation": "start of a file committed with app/policy.py 1 times"
+              },
+              "signature": "app/orders.py:1",
+              "verdict": "yes"
+            }
+          ]
+        },
+        "operation": "open"
+      },
+      {
+        "arguments": {
+          "moves": [
+            "callers",
+            "callees",
+            "referenced_by",
+            "passed_on",
+            "imported",
+            "same_file",
+            "keys_mentioned",
+            "co_changed",
+            "lines_before",
+            "rest_of_file"
+          ],
+          "outcome": "found"
+        },
+        "decision": "stopped: found",
+        "fetched": [],
+        "judgments": {
+          "not_inspected": [
+            {
+              "place": "app/orders.py:1-4",
+              "priority": 0.96,
+              "reason": "target_found",
+              "relationship": {
+                "move": "co_changed",
+                "relation": "start of a file committed with app/policy.py 1 times"
+              }
+            },
+            {
+              "place": "app/orders.py:1-2",
+              "priority": 0.04,
+              "reason": "deprioritized",
+              "relationship": {
+                "move": "lines_before",
+                "relation": "the lines before app/orders.py:3-4"
+              }
+            }
+          ],
+          "parser_scans": {
+            "completed": [
+              "facts"
+            ],
+            "pending": []
+          }
+        },
+        "operation": "stop"
+      }
+    ],
+    "moves": [
+      "callers",
+      "callees",
+      "referenced_by",
+      "passed_on",
+      "imported",
+      "same_file",
+      "keys_mentioned",
+      "co_changed",
+      "lines_before",
+      "rest_of_file"
+    ],
+    "navigation_calls": 2,
+    "not_inspected": [
+      {
+        "depth": 2,
+        "included_in_opened_span": null,
+        "path": [
+          "app/orders.py:3-4",
+          "app/policy.py:1-2",
+          "app/orders.py:1-4"
+        ],
+        "place": "app/orders.py:1-4",
+        "priority": 0.96,
+        "reason": "target_found",
+        "signature": "app/orders.py:1",
+        "tier": "move"
+      },
+      {
+        "depth": 1,
+        "included_in_opened_span": null,
+        "path": [
+          "app/orders.py:3-4",
+          "app/orders.py:1-2"
+        ],
+        "place": "app/orders.py:1-2",
+        "priority": 0.04,
+        "reason": "deprioritized",
+        "signature": "app/orders.py:1",
+        "tier": "move"
+      }
+    ],
+    "outcome": "found",
+    "parser_scans": {
+      "completed": [
+        "facts"
+      ],
+      "pending": []
+    },
+    "searched": [],
+    "starts": [
+      {
+        "path": [
+          "app/orders.py:3-4"
+        ],
+        "place": "app/orders.py:3-4",
+        "probability": 0.04,
+        "source": {
+          "commit": "1111111111111111111111111111111111111111",
+          "file": "app/orders.py",
+          "file_sha256": "789bf14167bf0bc24aa600a358b9fb1183e752d1fca41108fbd16c9493b31243",
+          "lines": [
+            3,
+            4
+          ],
+          "reached_by": "caller-provided start"
+        },
+        "verdict": "no"
+      }
+    ],
+    "steps": 2,
+    "unavailable_files": {},
+    "unparsed_files": [],
+    "unsure": []
+  },
   "source": {
+    "prefixes": [
+      "app/"
+    ],
     "repository": "https://github.com/example/orders",
     "revision": "1111111111111111111111111111111111111111",
-    "prefixes": ["app/"],
     "tracked_files": 2
   },
   "target": "the check that limits how many items an order may have",
-  "requested_starts": ["app/orders.py:4"],
-  "budget": {
-    "max_depth": 2,
-    "max_steps": 3,
-    "max_calls": 3,
-    "beam_width": 1,
-    "neighbours_per_kind": 8,
-    "preview_lines": 8,
-    "max_slice_chars": 12000,
-    "max_line_chars": 240
-  },
   "thresholds": {
     "choice_min_confidence": 0.7,
-    "noul_yes_at": 0.8,
-    "noul_no_at": 0.2
+    "noul_no_at": 0.2,
+    "noul_yes_at": 0.8
   },
-  "provider": {
-    "requested_model": "jev-latest",
-    "served_model": "jev-example-version",
-    "input_tokens": 120
-  },
-  "search": {
-    "outcome": "found",
-    "steps": 2,
-    "calls": 2,
-    "duration_seconds": 1.25,
-    "moves": ["callees"],
-    "found": [
-      {
-        "place": "app/policy.py:1-2",
-        "source": {
-          "file": "app/policy.py",
-          "lines": [1, 2],
-          "commit": "1111111111111111111111111111111111111111",
-          "reached_by": "called by handle"
-        },
-        "probability": 0.96,
-        "verdict": "yes",
-        "path": ["app/orders.py:3-4", "app/policy.py:1-2"]
-      }
-    ],
-    "starts": [],
-    "searched": [],
-    "unsure": [],
-    "not_inspected": [],
-    "unparsed_files": [],
-    "history": [
-      {
-        "operation": "stop",
-        "arguments": {"outcome": "found", "moves": ["callees"]},
-        "fetched": [],
-        "judgments": {"not_inspected": []},
-        "decision": "stopped: found"
-      }
-    ]
-  }
+  "workflow": "find"
 }

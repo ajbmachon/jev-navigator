@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import signal
+import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -105,10 +107,11 @@ def test_an_empty_search_counts_files_judged_apart_from_files_only_read_to_list_
     # Act
     result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
 
-    # Assert
+    # Assert: files count as read only when a looked-up name occurs in them, never because the name
+    # table covered the scope
     assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert {visit.code.span.file for visit in result.starts} == {"app/orders.py"}
-    assert (result.files_judged, result.files_read_only, result.files_never_reached) == (1, 4, 2)
+    assert (result.files_judged, result.files_read_only, result.files_never_reached) == (1, 2, 4)
     assert result.code_files == 7
 
 
@@ -1027,7 +1030,7 @@ def test_interrupt_while_popping_a_beam_restores_it_for_resume(
     assert resumed.found[0].place_key == target.key
 
 
-def test_interrupt_while_submitting_a_round_cancels_the_requests_already_sent(
+def test_interrupt_while_submitting_a_round_accounts_for_every_place_of_the_beam(
     sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange
@@ -1401,3 +1404,118 @@ def test_a_long_signature_is_cut_the_same_way_in_the_candidate_and_the_pick_opti
     configure = next(signature for signature in signatures if "def configure(" in signature)
     assert len(configure) == 240 + len(" [line cut]") and configure.endswith(" [line cut]")
     assert [pick["criteria"][str(slot)] for slot in range(len(signatures))] == signatures
+
+
+def _interrupted_search_then_resume(index: CodeIndex, interrupt_round) -> tuple:
+    """A search whose round is interrupted by ``interrupt_round(real_ask_round)``, and the resume of it."""
+    from jev_navigator.directives import find_code as find_code_module
+
+    target = function_place(index, index.find_definition("check_limits")[0])
+    real_ask_round = find_code_module._ask_round
+    interrupted = []
+
+    def ask_round(judge, search, opened):
+        if interrupted:
+            return real_ask_round(judge, search, opened)
+        interrupted.append(True)
+        return interrupt_round(real_ask_round, judge, search, opened)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(find_code_module, "_ask_round", ask_round)
+        cancelled = find_code(
+            index,
+            Judge(ScriptedJevClient()),
+            TARGET,
+            [],
+            budget=SearchBudget(beam_width=1),
+            moves={},
+            initial_candidates=[(target, 1.0)],
+        )
+    resumed = find_code(
+        index,
+        Judge(ScriptedJevClient(nouls={"contains_target": 0.95})),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        resume=cancelled,
+    )
+    return target, cancelled, resumed
+
+
+def test_an_interrupt_after_a_beam_is_opened_and_before_it_is_asked_keeps_its_places_for_resume(
+    sample_index: CodeIndex,
+) -> None:
+    def interrupt_before_asking(real_ask_round, judge, search, opened):
+        raise KeyboardInterrupt
+
+    target, cancelled, resumed = _interrupted_search_then_resume(sample_index, interrupt_before_asking)
+
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [entry.place_key for entry in cancelled.not_inspected] == [target.key]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.found[0].place_key == target.key
+
+
+def test_an_interrupt_after_a_beam_is_asked_and_before_it_is_merged_keeps_its_places_for_resume(
+    sample_index: CodeIndex,
+) -> None:
+    def interrupt_after_asking(real_ask_round, judge, search, opened):
+        real_ask_round(judge, search, opened)
+        raise KeyboardInterrupt
+
+    target, cancelled, resumed = _interrupted_search_then_resume(sample_index, interrupt_after_asking)
+
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [entry.place_key for entry in cancelled.not_inspected] == [target.key]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.found[0].place_key == target.key
+
+
+def test_a_real_error_that_settled_before_the_interrupt_is_raised_not_labelled_cancelled(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange: the second place's request fails at once while the search waits for the first, which
+    # is still in flight when the interrupt arrives and ends with a connection error because the
+    # client was cancelled.
+    failed = threading.Event()
+    cancelled = threading.Event()
+
+    class OneFailsOneHangs(ScriptedJevClient):
+        def send(self, state, questions):
+            if "def check_limits" in state["slice"]["code"]:
+                failed.set()
+                raise OSError("disk full")
+            cancelled.wait(10)
+            raise ConnectionError("cancelled")
+
+        def cancel(self) -> None:
+            cancelled.set()
+
+    def interrupt_once_the_error_settled() -> None:
+        failed.wait(10)
+        time.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    places = [
+        function_place(sample_index, sample_index.find_definition(name)[0])
+        for name in ("validate_order", "check_limits")
+    ]
+    interrupter = threading.Thread(target=interrupt_once_the_error_settled)
+    interrupter.start()
+
+    # Act and Assert
+    try:
+        with pytest.raises(OSError, match="disk full"):
+            find_code(
+                sample_index,
+                Judge(OneFailsOneHangs()),
+                TARGET,
+                [],
+                budget=SearchBudget(beam_width=2),
+                moves={},
+                initial_candidates=[(place, 1.0) for place in places],
+            )
+    finally:
+        cancelled.set()
+        interrupter.join()

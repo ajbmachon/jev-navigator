@@ -17,10 +17,17 @@ MAX_TOKENS_MARKER = "max_tokens_exceeded"
 """The provider's error_type when a request's input exceeds the model's input budget."""
 
 REQUEST_CHARS_PER_TOKEN = 2.4
-"""Serialized characters per input token, the same value and meaning as the Engine's
-``REQUEST_CHARS_PER_TOKEN`` (analysis-engine ``enginepy/host/system_one.py``). Jev's input measured
-about 265 fixed tokens per request plus 0.23 tokens per state byte and 0.31 per question byte on 3,096
-real requests (03.10.2026), so a limit in tokens becomes a box in characters without a tokenizer."""
+"""ASCII-escaped characters (``serialized_chars``) per input token, the same value and meaning as the
+Engine's ``REQUEST_CHARS_PER_TOKEN`` (analysis-engine ``enginepy/host/system_one.py``). A limit in
+tokens becomes a box in characters with ``chars_for_tokens``, never with a second ratio: route boxes
+(Drex's 8,192 tokens is 19,660 characters) use it too.
+
+The fit and its data are in ``jvn-eval-2026-10-03/census/request-size-fit`` (``fit-table-request-size.md``).
+On 3,096 real requests (03.10.2026) Jev's input is 263 tokens plus 0.22 per state character and 0.29
+per question character. The 264 requests of 2,000 tokens or more cost at most 0.38 tokens per
+character (2.63 characters per token), so 2.4 (0.417) keeps a 1.10 margin. The data reaches only 11,652
+tokens; the limit itself rests on the Engine's measurement of the edge (32,883 pass, about 33,200
+refused)."""
 
 
 def chars_for_tokens(tokens: int) -> int:
@@ -66,6 +73,10 @@ class AsyncJevClient(Protocol):
 
 class MissingAnswerError(LookupError):
     """Replay found no stored answer for a request."""
+
+
+class UnansweredQuestionError(RuntimeError):
+    """The provider's response left out the answer to a question the request asked."""
 
 
 class InputBudgetExceededError(RuntimeError):

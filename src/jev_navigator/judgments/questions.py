@@ -115,8 +115,12 @@ def request_body(state: Mapping, questions: Mapping) -> bytes:
 
 
 def serialized_chars(value: object) -> int:
-    """The size of a value as the request body spells it, the one measure of every size box."""
-    return len(json.dumps(value, ensure_ascii=False, default=str))
+    """The size of a value in ASCII-escaped JSON, the one measure of every size box and of packing.
+
+    The Engine measures the escaped form (analysis-engine ``evidence_router.py``), and the fit behind
+    ``REQUEST_CHARS_PER_TOKEN`` counts per byte of it, so a non-ASCII character costs its whole escape
+    here: Chinese comments of 72,043 characters are about 200,000 bytes, over Jev's 32,000 tokens."""
+    return len(json.dumps(value, default=str))
 
 
 def content_hash(value: object) -> str:

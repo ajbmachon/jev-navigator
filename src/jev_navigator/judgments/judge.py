@@ -11,10 +11,10 @@ import asyncio
 import base64
 import copy
 import inspect
-import logging
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
+from collections.abc import AsyncIterator, Callable, Generator, Iterator, Mapping, Sequence
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed, wait
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
@@ -24,6 +24,7 @@ from .client import (
     AsyncJevClient,
     InputBudgetExceededError,
     JevClient,
+    UnansweredQuestionError,
 )
 from .journal import AttemptJournalCallbackError, Journal, JournalRequest, RawResponse
 from .questions import (
@@ -50,8 +51,6 @@ from .secrets import (
 from .store import AnswerRecord, AnswerStore
 from .thresholds import NoulVerdict, Thresholds
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_ITEMS_PER_REQUEST = 16
 """How many items one batched request carries at most (André, 03.10.2026: measured on the code-index
 set, 16 per request kept accuracy and cost about half the tokens of one per request)."""
@@ -60,7 +59,12 @@ BATCHING_RULE = "unit-place-order-count-and-box-v1"
 character box. Recorded on every stored answer; the batch membership hash in the item key already
 tells two batches apart."""
 DEFAULT_MAX_CONCURRENCY = 16
-"""How many batches of one synchronous judging call are in flight at once."""
+"""How many requests one judge, together with all of its scopes, has in flight at once, on the
+sync and the async path."""
+SEND_SLOT_POLL_SECONDS = 0.01
+"""How often an async send waiting for a free slot looks again. The slots are a thread semaphore,
+shared with sync sends; waiting on one from the event loop by polling never blocks the loop and
+never takes an executor thread that a sync client's send needs to finish."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
@@ -161,7 +165,10 @@ class Judge:
     single search, its own counter on the same client, store and journal; every scope adds its calls
     to its parent, and ``max_calls`` caps a judge together with all of its scopes.
     ``items_per_request`` caps the items of one batched request, and ``max_concurrency`` bounds how
-    many batches of one synchronous judging call are in flight."""
+    many requests this judge and all of its scopes have in flight, sync or async, whichever callers
+    send them: a search's beam, its nested batches and history checks draw on the same slots. A slot
+    is held only around the client's send, never around an opening or a whole batched call, so a
+    caller holding none can always wait on its own nested requests."""
 
     def __init__(
         self,
@@ -185,13 +192,14 @@ class Judge:
         self.served_model = served_model
         self.journal = journal
         self.max_calls = max_calls
-        self.items_per_request = items_per_request
-        self.max_concurrency = max_concurrency
+        self.items_per_request = _at_least_one("items_per_request", items_per_request)
+        self.max_concurrency = _at_least_one("max_concurrency", max_concurrency)
         self.calls = 0
         self.replayed_answers = 0
         self.input_total = TokenTotal()
         self._parent: Judge | None = None
         self._bookkeeping = threading.Lock()
+        self._send_slots = threading.BoundedSemaphore(self.max_concurrency)
 
     def scope(self) -> Judge:
         child = copy.copy(self)
@@ -200,7 +208,13 @@ class Judge:
         child.replayed_answers = 0
         child.input_total = TokenTotal()
         child._parent = self
+        child._send_slots = self._send_slots
         return child
+
+    @property
+    def unanswered_requests(self) -> int:
+        """The requests sent whose response never arrived, so whose token usage is unknown."""
+        return self.calls - self.input_total.responses
 
     def calls_left(self) -> int | None:
         """The calls this judge may still send under its own and its parents' caps; None when uncapped."""
@@ -264,7 +278,8 @@ class Judge:
         each carrying every check for every item in it, instead of one round trip per check over the
         whole list. Batches hold at most ``items_per_request`` items and form in a stable item order,
         so the same items always form the same batches; an item's stored answer is reused only
-        with the same batch mates. Batches are sent concurrently, up to ``max_concurrency`` at once.
+        with the same batch mates. Batches are sent concurrently, within the judge-wide
+        ``max_concurrency``.
         A batch the provider would refuse for its input size is split by item and the halves
         measured again, so every request sent fits the measured input budget. Items already judged
         by the same question and model, in the same batch, come from the store.
@@ -349,29 +364,58 @@ class Judge:
         list_name: str = "items",
         thresholds: Thresholds | None = None,
     ) -> Mapping[str, list[CheckResult]]:
-        """``check_every`` with its batches sent concurrently, at most ``max_concurrency`` at once and,
+        """``check_every`` with its batches sent concurrently, at most ``max_concurrency`` at once (the
+        judge-wide send slots bound them together with every other caller), and,
         under a call cap, in waves no larger than the calls left, as the sync path does. When the
         served model is still unknown and an answer store is present, the first batch pins the model
-        before the remaining batches look in the store."""
+        before the remaining batches look in the store. A batch refused for its size comes back as
+        its halves, which are sent one per wave before any other batch, as on the sync path. A failed
+        batch stops the batches still waiting for a slot of this call; one already waiting for a
+        judge-wide send slot still sends. The wave settles whole before its failure is raised, so no
+        request of the call is still running when the error comes out."""
         plan = self._check_plan(checks, items, shared, list_name, thresholds)
-        batches = plan.batches
-        if batches and self._must_learn_model_first():
-            for sub_batch, response in await self._send_positions_async(plan, _positions(batches[0])):
-                plan.answer(sub_batch, response)
-            batches = batches[1:]
+        queue = _WaveQueue(list(plan.batches))
         slots = asyncio.Semaphore(self.max_concurrency)
-        while batches:
-            size = self._wave_size(len(batches))
-            wave, batches = batches[:size], batches[size:]
-            await asyncio.gather(*(self._answer_batch_async(plan, batch, slots) for batch in wave))
+        halted = asyncio.Event()
+        while queue:
+            wave = queue.next_wave(self._next_wave_size)
+            settled = await asyncio.gather(
+                *(self._answer_batch_async(plan, batch, slots, halted) for batch in wave),
+                return_exceptions=True,
+            )
+            failure = _wave_failure([outcome for outcome in settled if isinstance(outcome, BaseException)])
+            if failure is not None:
+                raise failure
+            queue.put_halves([half for halves in settled for half in halves])
         return plan.answers()
 
-    async def _answer_batch_async(self, plan: _CheckPlan, batch: _Batch, slots: asyncio.Semaphore) -> None:
-        """Send one packed batch once a slot is free, splitting it when the provider refuses its size."""
+    async def _answer_batch_async(
+        self, plan: _CheckPlan, batch: _Batch, slots: asyncio.Semaphore, halted: asyncio.Event
+    ) -> list[_Batch]:
+        """Send one packed batch once a slot is free and apply its answers; a size refusal returns
+        its halves instead. After a sibling failed, a batch still waiting for a slot is not sent."""
         async with slots:
-            answered = await self._send_positions_async(plan, _positions(batch))
-        for sub_batch, response in answered:
-            plan.answer(sub_batch, response)
+            if halted.is_set():
+                return []
+            try:
+                response = await self.ask_async(
+                    batch.state,
+                    batch.questions,
+                    thresholds=plan.thresholds,
+                    masked=plan.hidden,
+                    **batch.extras,
+                )
+            except InputBudgetExceededError:
+                halves = self._halves(plan, batch)
+                if halves is None:
+                    halted.set()
+                    raise
+                return halves
+            except Exception:
+                halted.set()
+                raise
+        plan.answer(batch, response)
+        return []
 
     def ask_all(
         self,
@@ -516,8 +560,8 @@ class Judge:
             state, questions, masked = self._masked_request(state, questions)
         refuse_if_secret(state, questions, self.scanner, masked)
         request_hash = request_sha256(state, questions)
-        stored = self.store.by_request(request_hash) if self.store else None
-        accepted = stored.response() if stored is not None and self._accepts(stored.model) else None
+        stored = self._stored_request(request_hash)
+        accepted = stored.response() if stored is not None else None
         return _Prepared(state, questions, request_hash, request_body(state, questions), accepted)
 
     def _masked_request(self, state: Mapping, questions: Mapping) -> tuple[Mapping, Mapping, frozenset[str]]:
@@ -537,13 +581,21 @@ class Judge:
     ) -> JevResponse:
         response = dispatched.response
         with self._bookkeeping:
-            for judge in self._chain():
-                judge.served_model = response.model
-                judge.input_total.add(response.input_tokens)
             self._record(
                 prepared, dispatched, thresholds, item_keys or {}, sources or {}, skeleton or {}, batch or {}
             )
         return JevResponse(response.answers, response.model, response.input_tokens, prepared.request_hash)
+
+    def _accepted(self, prepared: _Prepared, dispatched: _Dispatched) -> _Dispatched:
+        """Counts the served model and the tokens a parsed response cost, then refuses one that left
+        out an asked answer, so the send's failure handling journals it like any failed response."""
+        response = dispatched.response
+        with self._bookkeeping:
+            for judge in self._chain():
+                judge.served_model = response.model
+                judge.input_total.add(response.input_tokens)
+        _refuse_unanswered(prepared.questions, response)
+        return dispatched
 
     def _count_replayed(self, answers: int) -> None:
         with self._bookkeeping:
@@ -570,12 +622,15 @@ class Judge:
         raw: RawResponse | None = None
         try:
             if hasattr(self.client, "send"):
-                raw = self._send_with_attempt_callback(prepared, request_id)
+                with self._send_slots:
+                    raw = self._send_with_attempt_callback(prepared, request_id)
                 self._journal_response(request_id, raw)
-                return _Dispatched.from_raw(self.client.parse(raw), raw, prepared)
-            response = self.client.ask(prepared.state, prepared.questions)
-            self._journal_response(request_id, RawResponse.from_decoded(response_to_raw(response)))
-            return _Dispatched(response, prepared.body, sent_exact=False)
+                return self._accepted(prepared, _Dispatched.from_raw(self.client.parse(raw), raw, prepared))
+            with self._send_slots:
+                response = self.client.ask(prepared.state, prepared.questions)
+            raw = RawResponse.from_decoded(response_to_raw(response))
+            self._journal_response(request_id, raw)
+            return self._accepted(prepared, _Dispatched(response, prepared.body, sent_exact=False))
         except Exception as error:
             if isinstance(error, AttemptJournalCallbackError):
                 self._propagate_attempt_journal_error(request_id, error, raw)
@@ -591,21 +646,34 @@ class Judge:
             if hasattr(self.client, "send"):
                 sender = getattr(self.client, "send_with_attempts", None)
                 callback = self._attempt_callback(request_id)
-                if callable(sender) and callback is not None:
-                    raw = await _awaited(sender, prepared.state, prepared.questions, on_attempt=callback)
-                else:
-                    raw = await _awaited(self.client.send, prepared.state, prepared.questions)
+                async with self._send_slot_async():
+                    if callable(sender) and callback is not None:
+                        raw = await _awaited(sender, prepared.state, prepared.questions, on_attempt=callback)
+                    else:
+                        raw = await _awaited(self.client.send, prepared.state, prepared.questions)
                 self._journal_response(request_id, raw)
-                return _Dispatched.from_raw(self.client.parse(raw), raw, prepared)
-            response = await _awaited(self.client.ask, prepared.state, prepared.questions)
-            self._journal_response(request_id, RawResponse.from_decoded(response_to_raw(response)))
-            return _Dispatched(response, prepared.body, sent_exact=False)
+                return self._accepted(prepared, _Dispatched.from_raw(self.client.parse(raw), raw, prepared))
+            async with self._send_slot_async():
+                response = await _awaited(self.client.ask, prepared.state, prepared.questions)
+            raw = RawResponse.from_decoded(response_to_raw(response))
+            self._journal_response(request_id, raw)
+            return self._accepted(prepared, _Dispatched(response, prepared.body, sent_exact=False))
         except Exception as error:
             if isinstance(error, AttemptJournalCallbackError):
                 self._propagate_attempt_journal_error(request_id, error, raw)
             self._journal_failure(request_id, error, raw)
             self._record_refusal(prepared, error)
             raise
+
+    @asynccontextmanager
+    async def _send_slot_async(self) -> AsyncIterator[None]:
+        """One of the judge-wide send slots, awaited without blocking the event loop."""
+        while not self._send_slots.acquire(blocking=False):
+            await asyncio.sleep(SEND_SLOT_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            self._send_slots.release()
 
     def _must_learn_model_first(self) -> bool:
         """Without a served model the store cannot prove model-version identity, so every lookup
@@ -616,27 +684,27 @@ class Judge:
         self, plan: _CheckPlan, cancelled: Callable[[], bool] | None = None
     ) -> Iterator[tuple[_Batch, JevResponse]]:
         """Every request of the plan's batches with its answer, a batch at a time as batches complete,
-        with at most ``max_concurrency`` batches in flight. Answers are applied by the caller, on its
+        with at most ``max_concurrency`` worker threads; their sends share the judge-wide send slots.
+        Answers are applied by the caller, on its
         own thread. Under a call cap, batches go in waves no larger than the calls left, in their
-        stable order, so a capped call always answers the same batches. The first failure stops
-        every request not yet sent and raises after every batch already sending has yielded what it
-        answered."""
-        batches = list(plan.batches)
-        if batches and self._must_learn_model_first():
-            yield from self._send_positions(plan, _positions(batches.pop(0)), cancelled)
-        if not batches:
+        stable order, so a capped call always answers the same batches. A batch refused for its size
+        comes back as its halves, which are sent one per wave before any other batch (see
+        ``_WaveQueue``), so they never take a call from their own wave. The first failure stops
+        every batch that has not started, and raises after every batch already started has yielded
+        what it answered. A batch that started and is still waiting for a judge-wide send slot when
+        the failure comes still sends."""
+        queue = _WaveQueue(list(plan.batches))
+        if not queue:
             return
         stop = _BatchStop(cancelled)
-        pool = ThreadPoolExecutor(max_workers=min(self.max_concurrency, len(batches)))
+        pool = ThreadPoolExecutor(max_workers=min(self.max_concurrency, len(plan.batches)))
         futures: list[Future] = []
         try:
-            while batches and not stop.requested():
-                size = self._wave_size(len(batches))
-                wave, batches = batches[:size], batches[size:]
+            while queue and not stop.requested():
                 futures = []
-                for batch in wave:
+                for batch in queue.next_wave(self._next_wave_size):
                     futures.append(pool.submit(self._send_batch, plan, batch, stop))
-                yield from _completed_batches(futures)
+                queue.put_halves((yield from _completed_wave(futures)))
         except KeyboardInterrupt:
             stop.halted.set()
             self.abort_sends(futures)
@@ -645,100 +713,46 @@ class Judge:
             stop.halted.set()
             pool.shutdown(wait=True, cancel_futures=True)
 
-    def _wave_size(self, waiting: int) -> int:
-        """Every waiting batch when uncapped; else as many as calls are left, at least one, since a
-        batch the store answers needs no call."""
+    def _next_wave_size(self, waiting: int) -> int:
+        """One batch alone while the served model is still to be learned; else every waiting batch
+        when uncapped, else as many as calls are left, at least one, since a batch the store answers
+        needs no call."""
+        if self._must_learn_model_first():
+            return 1
         left = self.calls_left()
         return waiting if left is None else max(1, min(left, waiting))
 
     def _send_batch(self, plan: _CheckPlan, batch: _Batch, stop: _BatchStop) -> _SentBatch:
-        """One batch's requests on a worker thread; a failure stops the other batches' unsent
-        requests and is kept with the requests answered before it, so the caller yields those first."""
-        answered: list[tuple[_Batch, JevResponse]] = []
+        """One batch's request on a worker thread. A size refusal returns the batch's halves for a
+        later wave; any other failure stops the other batches' unsent requests and is kept for the
+        caller to raise."""
+        if stop.requested():
+            return _SentBatch([], None, [])
         try:
-            answered.extend(self._send_positions(plan, _positions(batch), stop.requested))
-        except Exception as error:
-            stop.halted.set()
-            return _SentBatch(answered, error)
-        return _SentBatch(answered, None)
-
-    def _send_positions(
-        self,
-        plan: _CheckPlan,
-        positions: Sequence[int],
-        cancelled: Callable[[], bool] | None = None,
-    ) -> Iterator[tuple[_Batch, JevResponse]]:
-        """Send one packed batch of item positions, splitting it when the provider refuses its size.
-
-        Packing already keeps every batch within ``request_exceeds_input_budget``, so a batch is sent
-        as packed. A provider refusal that names an exceeded input budget (``max_tokens_exceeded``)
-        splits it by item and sends the halves. One position whose own request is refused has no
-        smaller honest request - its questions name an item path that a partial state would change -
-        so its error propagates and the journal keeps the provider's report. Every sub-batch keys
-        each item by its own batch mates, so replay and resume accounting stay exact.
-        """
-        if not positions:
-            return
-        batch = self._batch(plan, list(positions))
-        if batch is None:
-            return
-        splittable = len(positions) > 1
-        try:
-            if cancelled is not None and cancelled():
-                return
-            yield (
-                batch,
-                self.ask(
-                    batch.state,
-                    batch.questions,
-                    thresholds=plan.thresholds,
-                    masked=plan.hidden,
-                    **batch.extras,
-                ),
-            )
-        except InputBudgetExceededError:
-            if not splittable:
-                raise
-            yield from self._split_positions(plan, positions, cancelled)
-
-    def _split_positions(
-        self,
-        plan: _CheckPlan,
-        positions: Sequence[int],
-        cancelled: Callable[[], bool] | None = None,
-    ) -> Iterator[tuple[_Batch, JevResponse]]:
-        middle = len(positions) // 2
-        yield from self._send_positions(plan, positions[:middle], cancelled)
-        yield from self._send_positions(plan, positions[middle:], cancelled)
-
-    async def _send_positions_async(
-        self, plan: _CheckPlan, positions: Sequence[int]
-    ) -> list[tuple[_Batch, JevResponse]]:
-        """The async form of ``_send_positions``; halves recurse sequentially so a refusal cannot
-        leave an orphaned half running inside a cancelled gather."""
-        if not positions:
-            return []
-        batch = self._batch(plan, list(positions))
-        if batch is None:
-            return []
-        splittable = len(positions) > 1
-        try:
-            response = await self.ask_async(
+            response = self.ask(
                 batch.state, batch.questions, thresholds=plan.thresholds, masked=plan.hidden, **batch.extras
             )
-        except InputBudgetExceededError:
-            if not splittable:
-                raise
-            return await self._split_positions_async(plan, positions)
-        return [(batch, response)]
+        except InputBudgetExceededError as error:
+            halves = self._halves(plan, batch)
+            if halves is None:
+                stop.halted.set()
+                return _SentBatch([], error, [])
+            return _SentBatch([], None, halves)
+        except Exception as error:
+            stop.halted.set()
+            return _SentBatch([], error, [])
+        return _SentBatch([(batch, response)], None, [])
 
-    async def _split_positions_async(
-        self, plan: _CheckPlan, positions: Sequence[int]
-    ) -> list[tuple[_Batch, JevResponse]]:
-        middle = len(positions) // 2
-        left = await self._send_positions_async(plan, positions[:middle])
-        right = await self._send_positions_async(plan, positions[middle:])
-        return [*left, *right]
+    def _halves(self, plan: _CheckPlan, batch: _Batch) -> list[_Batch] | None:
+        """The two requests a refused batch splits into, by item, without the halves that have no
+        open question; None for a one-item batch, whose request has no smaller honest form - its
+        questions name an item path that a partial state would change."""
+        members = list(batch.members)
+        if len(members) < 2:
+            return None
+        middle = len(members) // 2
+        built = (self._batch(plan, members[:middle]), self._batch(plan, members[middle:]))
+        return [half for half in built if half is not None]
 
     def _journal_request(self, prepared: _Prepared) -> str | None:
         if self.journal is None:
@@ -754,7 +768,7 @@ class Judge:
 
     def _journal_failure(self, request_id: str | None, error: Exception, raw: RawResponse | None) -> None:
         if self.journal is not None and request_id is not None:
-            self.journal.record_failure(request_id, f"{type(error).__name__}: {error}", raw)
+            self.journal.record_failure(request_id, _failure_text(error), raw)
 
     def _propagate_attempt_journal_error(
         self, request_id: str | None, error: AttemptJournalCallbackError, raw: RawResponse | None
@@ -793,13 +807,15 @@ class Judge:
         thresholds: Thresholds | None,
     ) -> _CheckPlan:
         """Mask the whole candidate set once, before packing, so copied secret values stay hidden
-        across batches; the final scan before each send still runs. Batches form over every item,
+        across batches. A value found in any check's wording is hidden in the items and shared state
+        too, where it may stand without the context that marks it as secret. The final scan before
+        each send still runs. Batches form over every item,
         answered or not, so they do not depend on the store. Each per-item store key includes its
         masked item, the shared state, the question and the batch it was asked in.
         """
         if len({check.name for check in checks}) != len(checks):
             raise ValueError("independent checks require unique names for their result lists")
-        hidden = masked_values([*items, shared or {}], self.masker) if self.masker else frozenset()
+        hidden = self._hidden_values(checks, items, shared or {})
         *items, shared = self._masked_together([*items, shared or {}], hidden)
         plan = _CheckPlan(
             list_name,
@@ -819,6 +835,14 @@ class Judge:
             batch for batch in (self._batch(plan, members) for members in groups) if batch is not None
         ]
         return plan
+
+    def _hidden_values(
+        self, checks: Sequence[Check], items: Sequence[Mapping], shared: Mapping
+    ) -> frozenset[str]:
+        if not self.masker:
+            return frozenset()
+        wordings = [check.to_question() for check in checks]
+        return masked_values([*items, shared, *wordings], self.masker)
 
     def _look_up_batch(self, plan: _CheckPlan, members: list[int]) -> None:
         """Every question about every member is answered from the store or left open."""
@@ -918,8 +942,12 @@ class Judge:
         the batch the item was asked in."""
         return f"{content_hash(item)}|{content_hash(shared)}|{check.question_id}|{mates}"
 
-    def _accepts(self, stored_model: str) -> bool:
-        return self._knows_model() and self._model_filter() in (None, stored_model)
+    def _stored_request(self, request_hash: str) -> AnswerRecord | None:
+        """The stored record this judge may replay for one request: none while its served model is
+        unknown, else one from that model, or from any model for a replay-only client."""
+        if self.store is None or not self._knows_model():
+            return None
+        return self.store.by_request(request_hash, self._model_filter())
 
     def _knows_model(self) -> bool:
         return self._replays_any_model() or self.served_model is not None
@@ -960,6 +988,12 @@ class Judge:
                 sent_exact=dispatched.sent_exact,
             )
         )
+
+
+def _refuse_unanswered(questions: Mapping, response: JevResponse) -> None:
+    unanswered = [question_id for question_id in questions if question_id not in response.answers]
+    if unanswered:
+        raise UnansweredQuestionError(f"{response.model} returned no answer for {', '.join(unanswered)}")
 
 
 @dataclass(frozen=True)
@@ -1008,10 +1042,38 @@ class _BatchStop:
         return self.halted.is_set() or (self.cancelled is not None and self.cancelled())
 
 
+class _WaveQueue:
+    """The batches still to send, in stable order. The halves of a batch refused for its size are
+    sent one per wave, before any other batch and depth first, as a sequential split would send
+    them: so they never share a wave, and a call cap, with other batches, and a half that no split
+    can answer stops its sibling from being sent."""
+
+    def __init__(self, batches: list[_Batch]) -> None:
+        self._batches = batches
+        self._halves: list[_Batch] = []
+
+    def __bool__(self) -> bool:
+        return bool(self._halves or self._batches)
+
+    def next_wave(self, size_for: Callable[[int], int]) -> list[_Batch]:
+        if self._halves:
+            return [self._halves.pop(0)]
+        size = size_for(len(self._batches))
+        wave, self._batches = self._batches[:size], self._batches[size:]
+        return wave
+
+    def put_halves(self, halves: list[_Batch]) -> None:
+        self._halves = halves + self._halves
+
+
 @dataclass(frozen=True)
 class _SentBatch:
+    """What one batch's worker brought back: its answer, the failure to raise, or the halves a size
+    refusal split it into."""
+
     answered: list[tuple[_Batch, JevResponse]]
     error: Exception | None
+    halves: list[_Batch]
 
 
 @dataclass(frozen=True)
@@ -1062,7 +1124,7 @@ class _CheckPlan:
         caller gave them in, and a new commit does not reorder them."""
         return sorted(
             range(len(self.items)),
-            key=lambda position: (*_unit_place(self.items[position]), self.item_ids[position], position),
+            key=lambda position: (*unit_place(self.items[position]), self.item_ids[position], position),
         )
 
     def question(self, check: Check, slot: int) -> dict:
@@ -1143,19 +1205,36 @@ class _CallRequest:
         return CallDecision(chosen.name, argument_result.choice, route_result, argument_result)
 
 
-def _positions(batch: _Batch) -> list[int]:
-    """The item positions a batch carries, in their place in the request."""
-    return list(batch.members)
+def _at_least_one(setting: str, value: int) -> int:
+    if value < 1:
+        raise ValueError(f"{setting} must be at least 1, got {value}")
+    return value
 
 
-def _completed_batches(futures: list[Future]) -> Iterator[tuple[_Batch, JevResponse]]:
-    failure: Exception | None = None
+def _completed_wave(futures: list[Future]) -> Generator[tuple[_Batch, JevResponse], None, list[_Batch]]:
+    """Yield a wave's answers as its batches complete, then return the halves its refused batches
+    split into, in the wave's stable order; after every batch settled, ``_wave_failure`` decides
+    what is raised."""
     for future in as_completed(futures):
-        sent = future.result()
-        yield from sent.answered
-        failure = failure or sent.error
+        yield from future.result().answered
+    sent = [future.result() for future in futures]
+    failure = _wave_failure([batch.error for batch in sent if batch.error is not None])
     if failure is not None:
         raise failure
+    return [half for batch in sent for half in batch.halves]
+
+
+def _wave_failure(failures: Sequence[BaseException]) -> BaseException | None:
+    """The failure a settled wave raises: its first real failure, ahead of a call cap that only
+    stopped a sibling, so a provider error is never reported as a spent budget. Every other failure
+    of the wave is added to it as a note, so none is lost."""
+    if not failures:
+        return None
+    primary = next((error for error in failures if not isinstance(error, CallCapReachedError)), failures[0])
+    for other in failures:
+        if other is not primary:
+            primary.add_note(f"Also in this wave: {type(other).__name__}: {other}")
+    return primary
 
 
 def _is_async(client: object) -> bool:
@@ -1193,8 +1272,9 @@ def _skeleton(list_name: str, questions: Mapping, items: list[Mapping], shared: 
     }
 
 
-def _unit_place(item: Mapping) -> tuple[str, int, int]:
-    """The unit's file and line range, or empty when the item names none."""
+def unit_place(item: Mapping) -> tuple[str, int, int]:
+    """The unit's file and line range, or empty when the item names none: the one order of judged
+    units, which batches are packed in and results are listed in."""
     lines = item.get("lines")
     if not isinstance(lines, list | tuple) or len(lines) != 2:
         return str(item.get("file", "")), 0, 0
@@ -1219,6 +1299,12 @@ def _pick_result(response: JevResponse, question_id: str, thresholds: Thresholds
 
 def _argument_id(operation: str, offer: CallOffer) -> str:
     return f"{operation}.{offer.argument.question_id}"
+
+
+def _failure_text(error: Exception) -> str:
+    if isinstance(error, CancelledError) and not str(error):
+        return f"{type(error).__name__}: the request was cancelled after it was sent"
+    return f"{type(error).__name__}: {error}"
 
 
 def _batches(plan: _CheckPlan) -> list[list[int]]:

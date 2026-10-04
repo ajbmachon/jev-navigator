@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from jev_navigator.directives.find_code import Outcome, SearchBudget, StopRule, find_code
+from jev_navigator.directives.find_code import (
+    Outcome,
+    SearchBudget,
+    StopRule,
+    StopRuleTooLargeError,
+    find_code,
+)
 from jev_navigator.directives.places import place_for_line
 from jev_navigator.history import (
     FetchedSpan,
@@ -22,10 +28,10 @@ from jev_navigator.history import (
     judge_sections,
 )
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS
+from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS, InputBudgetExceededError
 from jev_navigator.judgments.journal import JsonlJournal
-from jev_navigator.judgments.judge import Judge
-from jev_navigator.judgments.questions import Check, Criterion
+from jev_navigator.judgments.judge import Judge, request_exceeds_input_budget
+from jev_navigator.judgments.questions import Check, Criterion, serialized_chars
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
@@ -154,16 +160,66 @@ def test_a_check_that_reads_no_code_never_evicts_code() -> None:
     assert history.evictions == []
 
 
-def test_the_budget_is_capped_at_jevs_state_limit_and_overflow_raises() -> None:
-    # Arrange
-    capped = History(budget_chars=10**6)
-    tiny = History(budget_chars=5)
-    tiny.append(step(1))
+def test_the_budget_is_capped_at_jevs_state_limit() -> None:
+    assert History(budget_chars=10**6).budget_chars == JEV_INPUT_BOX_CHARS
+
+
+def test_sections_that_do_not_fit_even_without_code_raise_and_evict_nothing() -> None:
+    # Arrange: the decisions alone need more than the budget, and no code is read to evict.
+    history = History(budget_chars=100)
+    for number in range(3):
+        history.append(step(number, "y" * 300, decision="opened " + "z" * 100))
 
     # Act and Assert
-    assert capped.budget_chars == JEV_INPUT_BOX_CHARS
     with pytest.raises(HistoryTooLargeError):
-        tiny.state_for(["fetched"])
+        history.state_for(["decisions"])
+    assert history.evictions == []
+
+
+def test_code_is_evicted_before_the_history_is_declared_too_large() -> None:
+    # Arrange: the stubs fit the budget, the code does not.
+    history = History(budget_chars=900)
+    for number in range(3):
+        history.append(step(number, "y" * 600))
+
+    # Act
+    state = history.state_for(["fetched"])
+
+    # Assert
+    assert [entry["code"] for entry in state["fetched"]] == ["[evicted]"] * 2 + ["y" * 600]
+    assert len(history.evictions) == 2
+
+
+def test_the_shared_state_counts_against_the_history_budget() -> None:
+    history = History(budget_chars=2_500)
+    history.append(step(1, "y" * 1_500))
+    client = ScriptedJevClient()
+
+    judge_history(Judge(client), history, FETCHED_HOLDS_LIMIT, {"pad": "x" * 1_200})
+
+    state, _ = client.requests[0]
+    assert serialized_chars(state) <= 2_500
+    assert state["fetched"][0]["code"] == "[evicted]"
+    assert [eviction["file"] for eviction in history.evictions] == ["f1.py"]
+
+
+def test_the_history_leaves_room_for_the_question_that_reads_it() -> None:
+    history = History(budget_chars=10**6)
+    for number in range(100):
+        history.append(step(number, "y" * 1_000))
+    long_question = Check(
+        "long_question",
+        "Does `fetched` contain code that compares the number of items with a limit? " + "z" * 3_000,
+        Criterion("A code body in `fetched` compares an item count with a limit."),
+        Criterion("No code body in `fetched` makes that comparison."),
+    )
+    client = ScriptedJevClient()
+
+    judge_history(Judge(client), history, long_question)
+
+    state, questions = client.requests[0]
+    assert not request_exceeds_input_budget(state, questions)
+    assert history.evictions
 
 
 def test_every_appended_step_is_journaled(tmp_path: Path) -> None:
@@ -289,6 +345,50 @@ def test_find_code_can_stop_on_the_callers_history_check(sample_index: CodeIndex
         entry.fetched[0].source["file"] for entry in result.history.steps if entry.operation == "open"
     ]
     assert opened_files[0] == "app/orders.py" and "app/validation.py" in opened_files
+
+
+def test_a_stop_rule_whose_history_cannot_fit_stops_the_search_with_a_named_error(
+    sample_index: CodeIndex,
+) -> None:
+    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
+    rule = StopRule(HOLDS_LIMIT, sections=("decisions",), budget_chars=5)
+
+    with pytest.raises(StopRuleTooLargeError, match="holds_limit_check") as raised:
+        find_code(
+            sample_index,
+            Judge(ScriptedJevClient()),
+            "the item limit check",
+            start,
+            budget=SearchBudget(beam_width=1),
+            stop_rule=rule,
+        )
+
+    assert isinstance(raised.value.__cause__, HistoryTooLargeError)
+
+
+def test_a_stop_rule_the_provider_refuses_for_size_stops_the_search_with_the_same_named_error(
+    sample_index: CodeIndex,
+) -> None:
+    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
+    rule = StopRule(FETCHED_HOLDS_LIMIT)
+
+    class RefusesTheStopRequest(ScriptedJevClient):
+        def send(self, state, questions):
+            if "fetched" in state:
+                raise InputBudgetExceededError("max_tokens_exceeded")
+            return super().send(state, questions)
+
+    with pytest.raises(StopRuleTooLargeError, match="fetched_holds_limit_check") as raised:
+        find_code(
+            sample_index,
+            Judge(RefusesTheStopRequest()),
+            "the item limit check",
+            start,
+            budget=SearchBudget(beam_width=1),
+            stop_rule=rule,
+        )
+
+    assert isinstance(raised.value.__cause__, InputBudgetExceededError)
 
 
 def test_the_ceiling_curve_reports_probability_against_history_size() -> None:

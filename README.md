@@ -30,7 +30,7 @@ jvn help trace
 ```
 
 Trace follows static relationships and batches atomic evidence judgments. It preserves uncertain
-bindings, partial coverage and request evidence in `./jvn-results/`. A positive judgment is evidence,
+bindings, partial coverage and request evidence in its [run folder](#where-jvn-keeps-runs-and-caches). A positive judgment is evidence,
 not proof of a complete path. Use `find` first if the starting function is unknown.
 See [trace options and outputs](docs/cli.md#workflow-trace).
 
@@ -46,10 +46,10 @@ jvn schema findall
 `find` locates an implementation; `findall` finds a seed, examines related functions, then checks
 remaining function bodies for disconnected implementations. It uses batched Jev judgments and
 defaults to 48 live model calls (twice `find`); `--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
-`./jvn-results/` directory. `functions_examined` describes coverage of function bodies, not a proof
+[run folder](#where-jvn-keeps-runs-and-caches). `functions_examined` describes coverage of function bodies, not a proof
 of semantic equivalence or completeness across arbitrary code fragments. Uncertain answers and
 unreadable or unsupported source stay visible. At a call stop, the terminal offers another allowance.
-For a later invocation or an agent pipeline, pass `--resume ./jvn-results/previous-pack` with the same
+For a later invocation or an agent pipeline, pass `--resume` with the folder the earlier run printed, and the same
 Find All query and scope. Completed judgments and the seed are retained; only unfinished work spends
 new model calls.
 
@@ -84,8 +84,9 @@ jvn find "the check that limits how many items an order may have"
 In a terminal, reaching the call budget offers another allowance without losing the saved search.
 JSON and piped commands return partial results without prompting; continue them with `--resume`.
 
-That is enough. `jvn` chooses an entry point and creates a unique evidence pack under
-`./jvn-results/`. It works with uncommitted changes and ordinary directories outside Git.
+That is enough. `jvn` chooses an entry point and creates a unique evidence pack in its
+[run folder](#where-jvn-keeps-runs-and-caches), never inside your project. It works with uncommitted
+changes and ordinary directories outside Git.
 `find` follows code relationships to locate a match; it does not promise every matching function
 or a complete end-to-end trace.
 
@@ -96,9 +97,17 @@ jvn find "where do we reject evidence quotes that are absent from the source?" -
 ```
 
 Explicit `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` process values win independently. Otherwise
-`jvn` reads those settings from `~/.config/jvn/env` with a dotenv parser; it does not execute that
-file or print the values. `TYPESAFE_BASE_URL` is the API root before `/v1/systemone`, such as
-`http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
+`jvn` reads those settings from `~/.config/jvn/env`, a file in dotenv syntax that it parses itself;
+it does not execute that file or print the values. `TYPESAFE_BASE_URL` is the API root before
+`/v1/systemone`, such as `http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
+
+When its code runs from a jev-navigator source checkout (`uv run jvn` there, or an editable
+install), `jvn` first fills what is missing from that checkout's `.env` (see `.env.example`). Any
+install into site-packages (`uv tool install`, `pipx`, a non-editable `pip install`) reads no
+`.env`, and when the directory it runs in holds one, it says on stderr that it did not read it. It
+never reads a `.env` from the directory or repository it searches. A settings file can set only
+`jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
+other name it ignores, never its value.
 
 ### JSON input for agents and pipelines
 
@@ -122,8 +131,8 @@ Or send the same request on stdin:
 printf '%s\n' '{"target":"the check that limits how many items an order may have"}' | jvn --json -
 ```
 
-`command` defaults to `find`, `repo` defaults to the current directory, and output goes to
-`./jvn-results/` unless you supply `out`. JSON mode prints one result object on stdout with
+`command` defaults to `find`, `repo` defaults to the current directory, and output goes to a new
+[run folder](#where-jvn-keeps-runs-and-caches) unless you supply `out`. JSON mode prints one result object on stdout with
 `output_directory`, `manifest`, `report`, `search` and `provider`. Progress and errors stay on stderr.
 For example, pipe the command's output to `jq '.search.found'` to read the matching source spans.
 The report and manifest paths refer to the saved evidence pack. Failed invocations return a nonzero
@@ -182,9 +191,10 @@ An explicitly selected output directory must be new or empty. Each evidence pack
 - `report.md`: a readable outcome, source table, found locations, and coverage caveat.
 - `journal.jsonl`: request hashes and exact provider responses as the run progresses.
 - `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
-  written to the machine's shared answer store (`$XDG_CACHE_HOME/jev-navigator/answers.sqlite`,
-  `~/.cache` when the variable is unset, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
-  same questions replays from it after one live request that learns the served model (Find All and
+  written to the machine's shared answer store (`$XDG_CACHE_HOME/jev-navigator/answers-v2.sqlite`,
+  `~/.cache` when the variable is unset or relative, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
+  same questions replays from it after the live requests that learn the served model (one for Find
+  All and Trace, one per place a Find's first round opens, up to `--beam-width`; Find All and
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
   `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
@@ -196,6 +206,38 @@ hashes; a relation that quotes a mentioned key reads `mentions a key (path:line)
 signatures in the manifest and report and the exact request text in the journal; use it only for
 your own or open-source code. The repository includes only a small public-format sample under
 [`examples/evidence-pack`](examples/evidence-pack).
+
+### Where JVN keeps runs and caches
+
+JVN never writes into the project it searches or the directory you start it in, unless you name a
+folder with `--out`. Without `--out`, a run's evidence pack goes to its own run folder,
+`$XDG_DATA_HOME/jev-navigator/runs/<directory>-<timestamp>` (`~/.local/share` when the variable is
+unset), and the run prints that path.
+
+Caches live in `$XDG_CACHE_HOME/jev-navigator` (`~/.cache` when unset): the fact cache (`facts/`), the
+name table (`names/`) and the shared answer store (`answers-v2.sqlite`). Caches are the data JVN
+values most, but only while they represent real files, so JVN cleans up after itself:
+
+- Facts or a name table another JVN version wrote, which this version can never read, go once no
+  JVN version has used them for 3 days. Versions in use side by side keep theirs. A default answer
+  store in an older layout holds paid-for answers, so it stays until unused for 30 days.
+- A cached file's facts or names go once no run has met that exact file content for 30 days.
+- An answer in the default shared store goes once no run has reused it for 30 days, with its item
+  answers and refusals. A store you name with `--answer-store` or `JEV_NAVIGATOR_ANSWER_STORE` keeps
+  every answer and is never touched; it must lie outside the cache folder, so a run naming a store
+  inside it stops with exit status 2.
+- A run folder goes 14 days after its run started, or 30 days while it can still be resumed (it holds
+  `resume.json`). A folder you name with `--out` is never touched.
+- Above the disk budget, 5 GB unless `JEV_NAVIGATOR_DISK_BUDGET` says otherwise (`750MB`, `20GB` or
+  plain bytes), the oldest run folders go first, then other versions' facts and name tables, then the
+  least recently confirmed facts and names, and answers last, older layouts first.
+
+Every `find`, `findall`, `trace` and `stats` run applies these rules as it ends, at most once a day,
+deleting at most 2,000 files per run; a failure to clean up is a notice on stderr and never fails the
+run, and Ctrl-C during the cleanup, which starts only once the run has ended, stops it with one
+notice and exit status 130. Nothing outside these two folders is ever deleted, and links are never followed.
+`jvn cache status` shows what each store holds and what each rule would remove; `jvn cache prune`
+applies every rule now.
 
 ## Layer 1: index, operations and comments (no model)
 
@@ -277,17 +319,36 @@ out of the root (through a linked directory or `..`), raises `UnsafePathError` w
 before any tool reads it.
 
 The index extracts symbols, declarations, calls and non-call references together in one ast-grep
-pass over the files a lookup actually needs. The pass runs a few hundred files per ast-grep process
+pass. The pass runs a few hundred files per ast-grep process
 and turns each match into its fact as ast-grep prints it, so memory holds the facts, never the
-parser's output, and no command line outgrows the system's argument limit. Facts that start on the
-same line are ordered by their position in the line, so every run returns them in the same order.
-Exact-name lookups first use ripgrep to narrow the candidate files, and `prefetch_names` narrows
-several names with one ripgrep; opening a known span parses its file directly. The resulting
+parser's output, and no command line outgrows the system's argument limit. Calls are ordered by
+where they start in the file, and of two calls starting at one place (`new Foo(a).bar()` and
+`new Foo(a)`) the outer comes first, so every run returns them in the same order; symbols spanning
+the same lines are ordered by name.
+Exact-name lookups (definitions, callers, call counts and references) read the persistent name table
+in `$XDG_CACHE_HOME/jev-navigator/names`, which ties every name to the lines it sits on in each file
+content. A file's content is identified by its git blob id, taken from the Git listing for a clean
+tracked file and hashed from its bytes otherwise (also when its bytes differ from the listed blob, as
+on a checkout that converts line endings), so a new index maps its files to table rows without
+reading them, and a warm lookup starts no text search and parses no file. The first name lookup of an
+index covers its whole scope: each file the table lacks is read from the fact cache, or parsed, and
+its rows are written. A changed file gets new rows under its new content, a file deleted before the
+first lookup answers none, one deleted later is reported unavailable and proves nothing, and a change
+to the parser or to any language's rules starts a new table. `definitions_in(file)` reads one file's
+definitions from the table. The table holds names and line numbers, never code. A file counts as read
+in a Find's counts only when navigation reached it, never because the table covered it. A call's or
+argument's receiver, in the table and in the cached facts alike, is kept only when it is a plain chain
+of names such as `this.store`; any other receiver (`client("k").fetch`, `cfg["token"].get`) is
+recorded as `<expression>`, so no string literal is ever stored. Opening a known span parses its file directly. ripgrep, which
+`search_text` runs, always runs with `--no-config`, so a `RIPGREP_CONFIG_PATH` file can neither
+change what the index sees nor run a preprocessor over the searched repository. The resulting
 per-file facts are cached by source bytes, language, ast-grep version, the rule text and the source
-of the code that reads the matches, in `$XDG_CACHE_HOME/jev-navigator/facts` (`~/.cache` when the
-variable is unset), so a new index can reuse facts without treating changed source or changed
+of the code that runs ast-grep and reads its matches, in `$XDG_CACHE_HOME/jev-navigator/facts` (`~/.cache` when the
+variable is unset or relative), so a new index can reuse facts without treating changed source or changed
 parser rules as current. A file that changes on disk after the index first read it is
-reported as unavailable rather than read in its new form. Each call
+reported as unavailable when the index reads it again, and its code still reads as the text the
+index first read, the text its SHA-256 names, never in its new form. The index keeps each file's
+first read compressed for the run, about 2 MB per 1,000 files of Heedvane's web app. Each call
 site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
 per argument for the life of the index. The index keeps the lines of a bounded number of recently
 read files (`LINE_CACHE_FILES`). There is no default file-count refusal or parser timeout, and no requested file is silently
@@ -309,13 +370,17 @@ lines mention can be hidden there: a call to such a name has status `unknown`, w
 reason, unless a definition in another file, not imported from one of them, settles it. A completed
 search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
 fact scans completed and which remain pending. A file that disappears after the working-directory
-inventory was built is reported separately as unavailable. So is a file too large to parse safely:
+inventory was built, or changes after the index first read it, is reported separately as
+unavailable. So is a file too large to parse safely:
 `tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
 estimated parse peak (from the length of each line, `index/file_shape.py`) is over 250 MB, about
-70,000 characters on one line, and `unavailable_files` gives the estimated peak and the longest line.
-The file keeps its path in import relations, a name that may be defined in it binds `unknown`, and
-`find_comments` lists it in `refused_files`. Any ast-grep or ripgrep failure other
-than that verified disappearance still fails the lookup that triggered it.
+70,000 bytes on one line. A large file that cannot be read to measure it is refused too, with the
+error. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
+peak and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
+searchable as text, it keeps its path in import relations (also as a re-export target), a name its
+bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
+`refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
+lookup that triggered it.
 
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
 `Binding(status, reason, target)`: `resolved` when a module-level definition in the same file, or one
@@ -392,12 +457,12 @@ Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all
 `send`), such as a host's own orchestrator; a sync client also works there and runs in a worker
 thread. Both paths share one core: masking, the secret scan, the hash, the store lookup, the call
 budget, the journal and the recording are the same steps, and only the send differs (a direct call,
-or an awaited one). Batches of `check_each_async` and the places of each `find_code_async` round are
-sent with `asyncio.gather` — except that the first batch of a `check_each_async` whose served model
-is still unknown and which has an answer store goes out alone. Its live answer pins the served model,
-so the remaining batches can replay from the store. The sync `check_each`, `check_every` and their
-`iter_` forms send their batches on a thread pool, at most `Judge(max_concurrency=N)` at once
-(default 16), with the same first-batch rule; the `iter_` forms yield each batch as it completes. The
+or an awaited one). Batches of `check_each_async` go out concurrently, at most
+`Judge(max_concurrency=N)` at once (default 16), and the places of each `find_code_async` round are
+sent with `asyncio.gather`; the first batch of a `check_each_async` whose served model is still
+unknown and which has an answer store goes out alone. Its live answer pins the served model, so the
+remaining batches can replay from the store. The sync `check_each`, `check_every` and their `iter_`
+forms send their batches on a thread pool under the same `max_concurrency` and first-batch rule; the `iter_` forms yield each batch as it completes. The
 call cap stays exact under concurrency, and after a failure or cancellation no batch sends a new
 request, while answers already received still yield. A sync method given an async client raises
 `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
@@ -437,19 +502,22 @@ on its own scope, so searches sharing one judge never use up each other's budget
   unknown counts as a miss (or pass `served_model=`); with a store, a first `check_each_async` then sends its
   first batch alone, and the batches after that answer replay as usual. `ReplayOnlyClient` replays
   from the store and never calls Jev.
-  `JsonlAnswerStore` is one run's pack. `SqliteAnswerStore(path)` is one insert-only store shared by
-  every run on a machine, so a repeated run at the same commit asks nothing again but the request
-  that learns the served model. It never holds
+  `JsonlAnswerStore` is one run's pack. `SqliteAnswerStore(path)` is one store shared by
+  every run on a machine, so a repeated run at the same commit asks nothing again but the requests
+  that learn the served model (one batch, or the places of a Find's first round). It never holds
   code, state or question text: only hashes, unit locations, batch member ids, the batching rule and
-  size, the model, raw answers and timestamps. Its location and retention (no expiry) are provisional;
+  size, the model, raw answers and timestamps. Each request records the day a run last stored or reused
+  it; the default store forgets a request unused for 30 days, and a store at a path you name keeps every
+  answer ([housekeeping](#where-jvn-keeps-runs-and-caches)).
   `LayeredAnswerStore(pack, shared)` reads the pack first, copies every answer it finds only in the
   shared store into the pack, and writes new answers to both, so the pack alone still replays the run.
 - **Journal, separate from the store.** Pass `journal=` (any object with `record_request(request) ->
   request_id`, `record_response(request_id, response)` and `record_failure(request_id, error,
   response)`). The judge records the masked request before dispatch and the raw response before
   parsing, as a `RawResponse(body, status, content_type, decoded)`: the body bytes as received, the HTTP
-  status, the content type and `input_tokens`, the count the provider reported or the text
-  `not reported`; a missing count is never written as 0. Transport errors and responses that fail to
+  status, the content type and `input_tokens`, the count the provider reported or `null`; a missing
+  count is never written as 0, and the count is on the response line only. A replay from the store
+  sends nothing, is marked `from_store` and carries no count. Transport errors and responses that fail to
   parse are recorded as failures. Clients that offer `send` and `parse` return that `RawResponse`; the TypeSafe adapter
   captures the exact bytes from its HTTP transport. A client that only parses is journaled with its
   decoded JSON and `exact=False`. `request_sha256` never includes the model; cache reuse checks the
@@ -464,9 +532,11 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `record.sent_request()`, with a judge that has no store. `JsonlJournal(keep_request_text=True)`
   likewise keeps the body as handed to the client (`body_base64`) and the wire bytes when captured
   (`sent_body_base64`), and `export_for_review` keeps the order the request is sent in. By default the store keeps
-  hashes, question wording, and each item's file, lines and commit, so
-  `rebuild_request(record, CodeIndex.at_commit(...), shared)` can rebuild the exact request and prove
-  it matches, or name the part that differs.
+  hashes, question wording, and each item's ids, file, lines, commit and names, so
+  `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from the code at
+  that commit and proves it matches, or names the part that differs. A request whose items carried a
+  field that can quote code, such as a Trace link line or a Find signature, keeps that field withheld,
+  so it does not rebuild exactly; the mismatch then names the withheld fields first.
 
 ## Layer 3: directives
 
@@ -667,7 +737,7 @@ registration = RoundRegistration(
     rule={"yes_at": 0.9},
     library_commit="",  # Supply the verified navigator revision when known; empty means unknown.
 )
-round_dir = Path("jvn-results/order-limit-round")
+round_dir = Path("rounds/order-limit")
 freeze(round_dir, registration)  # Creates the directory; refuses to overwrite a frozen round.
 verify(round_dir, registration)  # Call before scoring stored answers.
 request_hash = registered_request_sha256(registration, {"code": "..."})

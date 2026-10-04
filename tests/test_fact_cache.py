@@ -1,19 +1,23 @@
 import json
+import os
+import stat
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
 
 import pytest
+from git_repos import commit_files
 
-from jev_navigator.index import fact_cache, languages, spans
+from jev_navigator.confirmation import day_of, today
+from jev_navigator.index import fact_cache, imports, languages, scope_scan, spans, tools
+from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
-from jev_navigator.index.scope_scan import Unparsed, scan_facts
+from jev_navigator.index.scope_scan import FileFacts, FileStructure, Unparsed, scan_facts
+from jev_navigator.index.spans import Span
 
 
 def test_new_index_reuses_facts_and_changed_content_is_reparsed(tmp_path, monkeypatch):
-    from jev_navigator.index import tools
-    from jev_navigator.index.code_index import CodeIndex
-
     repository = tmp_path / "repo"
     repository.mkdir()
     source = repository / "module.py"
@@ -22,9 +26,9 @@ def test_new_index_reuses_facts_and_changed_content_is_reparsed(tmp_path, monkey
     scans = []
     actual_scan = tools.ast_grep_rules
 
-    def observe_scan(rules, files, root, *arguments, **options):
+    def observe_scan(rules, files, *arguments, **options):
         scans.append(tuple(files))
-        return actual_scan(rules, files, root, *arguments, **options)
+        return actual_scan(rules, files, *arguments, **options)
 
     monkeypatch.setattr(tools, "ast_grep_rules", observe_scan)
     first = CodeIndex.from_directory(repository, fact_cache_dir=cache)
@@ -45,7 +49,6 @@ def test_new_index_reuses_facts_and_changed_content_is_reparsed(tmp_path, monkey
 
 
 def test_warm_index_preserves_incomplete_parser_coverage(tmp_path):
-    from jev_navigator.index.code_index import CodeIndex
 
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -149,9 +152,6 @@ def test_concurrent_writers_publish_one_complete_entry(tmp_path, example, monkey
 
 
 def test_facts_cached_under_other_rules_are_parsed_again(tmp_path, monkeypatch, rule_identity_reset):
-    from jev_navigator.index.code_index import CodeIndex
-    from jev_navigator.index.scope_scan import FileFacts, FileStructure
-    from jev_navigator.index.spans import Span
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -177,21 +177,156 @@ def test_facts_cached_under_other_rules_are_parsed_again(tmp_path, monkeypatch, 
     assert any(event[1] == "started" for event in scans)
 
 
-def test_a_change_to_the_code_that_reads_matches_is_a_cache_miss(tmp_path, example, monkeypatch, request):
+@pytest.mark.parametrize(
+    "module",
+    [scope_scan, languages, imports, spans, tools],
+    ids=["scope_scan", "languages", "imports", "spans", "tools"],
+)
+def test_a_change_to_the_code_that_runs_the_parser_or_reads_its_matches_is_a_cache_miss(
+    module, tmp_path, example, monkeypatch, request
+):
     # Arrange
     content, facts = example
     cache = FactCache(tmp_path / "cache")
     cache.save("module.py", content, facts)
-    edited = tmp_path / "spans.py"
-    edited.write_text(Path(spans.__file__).read_text() + "\n# an edit to how matches become facts\n")
+    edited = tmp_path / Path(module.__file__).name
+    edited.write_text(Path(module.__file__).read_text() + "\n# an edit to how matches become facts\n")
     request.addfinalizer(fact_cache._match_reader_source.cache_clear)
     request.addfinalizer(fact_cache._rules_identity.cache_clear)
 
     # Act
-    monkeypatch.setattr(spans, "__file__", str(edited))
+    monkeypatch.setattr(module, "__file__", str(edited))
     fact_cache._match_reader_source.cache_clear()
     fact_cache._rules_identity.cache_clear()
     reused = cache.load("module.py", content)
 
     # Assert
     assert reused is None
+
+
+def test_the_fact_cache_never_writes_a_literal_quoted_by_a_receiver(tmp_path, private_cache_root):
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/client.ts": 'export function load(client, cfg) {\n  client("api-key-literal").fetch(1);\n'
+            '  return cfg["token-literal"].get(2);\n}\n'
+        },
+    )
+
+    # Act
+    CodeIndex.from_git(repository).find_callers("fetch")
+
+    # Assert
+    written = " ".join(path.read_text() for path in (private_cache_root / "facts").rglob("*.json"))
+    assert '"fetch"' in written
+    assert "literal" not in written
+
+
+def _days_ago(path: Path, days: int) -> None:
+    stamp = time.time() - days * 86_400
+    os.utime(path, (stamp, stamp))
+
+
+def test_a_rule_change_puts_entries_in_another_identity_folder_and_retires_the_old_one(
+    tmp_path, example, monkeypatch, rule_identity_reset
+):
+    # Arrange
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    [before] = cache.current_folders()
+
+    # Act
+    monkeypatch.setitem(languages.FUNCTION_KINDS, "python", ("function_definition", "lambda"))
+    fact_cache._rules_identity.cache_clear()
+    cache.save("module.py", content, facts)
+
+    # Assert
+    [after] = cache.current_folders()
+    assert after != before and after.parent == before.parent == cache.root / "python"
+    assert cache.retired() == [before]
+    assert [path.parent for path in cache.root.rglob("*.json")] in ([before, after], [after, before])
+
+
+def test_an_entry_in_the_layout_before_identity_folders_is_retired(tmp_path, example):
+    # Arrange
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    flat = cache.root / "python" / f"{'0' * 64}.json"
+    flat.write_text("{}")
+
+    # Act
+    retired = cache.retired()
+
+    # Assert
+    assert retired == [flat]
+
+
+def test_loading_an_entry_confirms_it_today(tmp_path, example):
+    # Arrange
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    [entry] = cache.root.rglob("*.json")
+    _days_ago(entry, 40)
+
+    # Act
+    loaded = FactCache(tmp_path / "cache").load("module.py", content)
+
+    # Assert
+    assert loaded == facts
+    assert day_of(entry.stat().st_mtime) == today()
+
+
+def test_a_corrupt_entry_is_never_confirmed(tmp_path, example):
+    # Arrange
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    [entry] = cache.root.rglob("*.json")
+    entry.write_text("{")
+    _days_ago(entry, 40)
+
+    # Act
+    loaded = cache.load("module.py", content)
+
+    # Assert
+    assert loaded is None
+    assert day_of(entry.stat().st_mtime) == today() - 40
+
+
+def test_a_load_marks_its_identity_folder_used_even_when_it_misses(tmp_path, example):
+    # Arrange
+    content, facts = example
+    FactCache(tmp_path / "cache").save("module.py", content, facts)
+    [folder] = FactCache(tmp_path / "cache").current_folders()
+    _days_ago(folder, 10)
+
+    # Act
+    FactCache(tmp_path / "cache").load("other.py", b"x = 1\n")
+
+    # Assert
+    assert day_of(folder.stat().st_mtime) == today()
+
+
+@pytest.mark.skipif(not hasattr(os, "chflags"), reason="needs BSD file flags to refuse a stamp to its owner")
+def test_a_cache_that_refuses_stamps_still_serves_its_facts(tmp_path, example, request):
+    # Arrange: the entry and its identity folder are immutable, so neither can be stamped
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    [entry] = cache.root.rglob("*.json")
+    _days_ago(entry, 40)
+    for path in (entry, entry.parent):
+        os.chflags(path, stat.UF_IMMUTABLE)
+        request.addfinalizer(lambda path=path: os.chflags(path, 0))
+
+    # Act
+    loaded = FactCache(tmp_path / "cache").load("module.py", content)
+
+    # Assert
+    assert loaded == facts
+    assert day_of(entry.stat().st_mtime) == today() - 40

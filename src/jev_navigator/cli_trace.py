@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from .judgments.judge import CheckResult, Judge
 from .judgments.store import run_answer_store
 from .judgments.thresholds import Thresholds
 from .progress import ProgressJournal, TerminalProgress
+from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.trace-evidence-pack/v1"
 
@@ -93,7 +94,7 @@ def create_trace_evidence_pack(
         index = CodeIndex.from_directory(
             repository,
             prefixes=prefixes,
-            exclude_paths=(output, Path.cwd() / "jvn-results"),
+            exclude_paths=(output,),
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
@@ -173,7 +174,7 @@ def _manifest(
             "calls": judge.calls,
             "replayed_answers": judge.replayed_answers,
             "input_tokens": judge.input_total.reported,
-            "responses_without_usage": judge.input_total.not_reported,
+            **usage_receipt(None, judge.input_total, judge.unanswered_requests),
         },
         "trace": {
             "outcome": _outcome(result),
@@ -186,6 +187,7 @@ def _manifest(
             "included": [_span_json(span) for span in result.included],
             "excluded": [_span_json(span) for span in result.excluded],
             "unresolved_links": [_link_json(link) for link in result.unresolved_links],
+            "unavailable_files": index.unavailable_files,
         },
     }
 
@@ -253,6 +255,11 @@ def _link_json(link) -> dict:
     }
 
 
+def unavailable_file_lines(files: Mapping[str, str]) -> list[str]:
+    """One report line per file the index has no facts for, with the reason."""
+    return [f"- `{file}`: {reason}" for file, reason in sorted(files.items())]
+
+
 def _report(manifest: dict) -> str:
     trace = manifest["trace"]
     lines = [
@@ -265,6 +272,7 @@ def _report(manifest: dict) -> str:
         f"- Outcome: **{trace['outcome']}** (static walk: {trace['graph_stop']})",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
         f"`{manifest['provider']['served_model']}`, {manifest['provider']['calls']} live calls",
+        *usage_report_lines(manifest["provider"]),
         "",
         "Connectivity is the index's static view. It is not proof of a correct handoff: only the "
         "obligations below carry source-identified Jev evidence, and uncertain or missing static "
@@ -301,6 +309,8 @@ def _report(manifest: dict) -> str:
                 f"- `{source['file']}:{source['lines'][0]}-{source['lines'][1]}` "
                 f"P(yes) {evidence['probability']:.3f} ({evidence['verdict']})"
             ]
+    if trace["unavailable_files"]:
+        lines += ["", "## Files without facts", "", *unavailable_file_lines(trace["unavailable_files"])]
     lines += ["", "## Unresolved static links", ""]
     if not trace["unresolved_links"]:
         lines.append("Every static link in the walked component is resolved.")

@@ -358,7 +358,7 @@ def test_a_file_that_could_not_be_measured_stays_a_gap_and_not_a_zero(tmp_path: 
     assert pack["scope"]["skipped"] == ["docs/notes.md"]
     assert pack["scope"]["unparsed"] == ["ops/broken.ts"]
     assert pack["coverage"]["complete"] is False
-    assert "could not be read" in pack["coverage"]["statement"]
+    assert "were never scanned" in pack["coverage"]["statement"]
     assert "unknown, not absent" in pack["coverage"]["statement"]
     assert "`ops/gone.ts`" in document and "`ops/broken.ts`" in document
     assert "never scanned" in document and "partly parsed" in document

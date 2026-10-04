@@ -463,6 +463,34 @@ def test_callees_called_from_few_places_come_first(tmp_path: Path) -> None:
     assert len(callees) == 10
 
 
+def test_a_callee_with_no_definition_is_never_counted_when_callees_are_ranked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: handle calls one defined helper and one name defined nowhere in scope
+    index = committed_index(
+        tmp_path,
+        {
+            "helpers.py": "def save_event(event):\n    return event\n",
+            "handler.py": "def handle(event):\n    undefined_logger(event)\n    return save_event(event)\n",
+        },
+    )
+    counted: list[str] = []
+    real_count = index.call_site_count
+
+    def recorded_count(name: str) -> int:
+        counted.append(name)
+        return real_count(name)
+
+    monkeypatch.setattr(index, "call_site_count", recorded_count)
+
+    # Act
+    offered = neighbour_signatures(index, "handle")
+
+    # Assert: it yields no place, so counting its call sites is wasted work
+    assert any("def save_event(event):" in signature for signature in offered.values())
+    assert "undefined_logger" not in counted
+
+
 def test_an_anonymous_handler_offers_proven_callees_before_test_only_candidates(
     tmp_path: Path,
 ) -> None:

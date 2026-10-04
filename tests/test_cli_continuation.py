@@ -6,13 +6,13 @@ import json
 import os
 import pty
 import subprocess
-import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 
 import pytest
 from git_repos import commit_files
+from isolated_jvn import JVN
 
 from jev_navigator.cli_resume import load_resume, save_resume
 from jev_navigator.directives.find_code import SearchBudget, find_code
@@ -134,12 +134,7 @@ def test_search_continues_only_with_terminal_consent(tmp_path: Path, answer: str
     server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     serving = Thread(target=server.serve_forever)
     serving.start()
-    command = [
-        sys.executable,
-        "-c",
-        "from jev_navigator.cli import main; raise SystemExit(main())",
-        *arguments,
-    ]
+    command = [*JVN, *arguments]
     env = {
         **os.environ,
         "TYPESAFE_API_KEY": "local-test-key",

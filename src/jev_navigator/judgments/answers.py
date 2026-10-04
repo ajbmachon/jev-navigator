@@ -60,12 +60,16 @@ class ScoreAnswer:
 Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer
 
 
+NOT_REPORTED_TEXT = "not reported"
+"""How a missing token count (``None``) reads in text for people; data keeps ``None``/``null``."""
+
+
 @dataclass(frozen=True)
 class JevResponse:
     """``input_tokens`` is what the provider reported for the request, ``None`` when it reported
-    nothing; a missing count is never 0. It is ``None`` too for an answer replayed from a store
-    (``from_store``), which sent no request in this run, and for a response composed from several
-    requests; totals count only requests sent."""
+    nothing; a missing count is never 0. ``from_store`` marks a replay: it sent nothing and carries
+    no count. A response composed from several requests carries none either; totals count only
+    requests sent."""
 
     answers: Mapping[str, Answer]
     model: str
@@ -147,12 +151,14 @@ def response_to_raw(response: JevResponse) -> dict:
 
 @dataclass
 class TokenTotal:
-    """The tokens responses reported, and how many responses reported none."""
+    """The tokens responses reported, how many responses there were, and how many reported none."""
 
     reported: int = 0
     not_reported: int = 0
+    responses: int = 0
 
     def add(self, tokens: int | None) -> None:
+        self.responses += 1
         if tokens is None:
             self.not_reported += 1
         else:

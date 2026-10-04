@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,10 +13,14 @@ from conftest import BudgetedClient
 from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import (
     JEV_INPUT_BOX_CHARS,
+    JEV_REQUEST_TOKEN_LIMIT,
+    JEV_STATE_TOKEN_LIMIT,
     MAX_REQUEST_CHARS,
     InputBudgetExceededError,
     MissingAnswerError,
     ReplayOnlyClient,
+    UnansweredQuestionError,
+    chars_for_tokens,
 )
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import (
@@ -23,11 +29,11 @@ from jev_navigator.judgments.judge import (
     Judge,
     request_exceeds_input_budget,
 )
-from jev_navigator.judgments.questions import Check, Criterion, Pick
+from jev_navigator.judgments.questions import Check, Criterion, Pick, serialized_chars
 from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
-from jev_navigator.testing import ScriptedJevClient
+from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 
 def _asked_item(question_id: str, state: dict) -> str:
@@ -613,6 +619,7 @@ def test_a_response_without_usage_is_reported_as_not_reported_and_never_added_as
     assert [response.input_tokens for response in answered] == [10, None, 0]
     assert judge.input_total.reported == 10
     assert judge.input_total.not_reported == 1
+    assert judge.unanswered_requests == 0
 
 
 def test_a_reported_zero_counts_as_reported_not_missing() -> None:
@@ -634,6 +641,53 @@ def test_a_scoped_judge_adds_unreported_responses_to_its_parent() -> None:
     scoped.ask({"s": 1}, {"q": {"type": "noul"}}, thresholds=Thresholds())
 
     assert (scoped.input_total.not_reported, judge.input_total.not_reported) == (1, 1)
+
+
+class _DropsAnAnswer(ScriptedJevClient):
+    """A provider whose response leaves out the answer to the question about the second item."""
+
+    def _answer_all(self, state: Mapping, questions: Mapping) -> JevResponse:
+        answered = super()._answer_all(state, questions)
+        kept = {
+            question_id: answer
+            for question_id, answer in answered.answers.items()
+            if not question_id.endswith("#1")
+        }
+        return replace(answered, answers=kept)
+
+
+def test_a_response_missing_an_asked_answer_is_refused_and_leaves_the_run_pack_readable(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+    client = _DropsAnAnswer(default_noul=0.9)
+    judge = Judge(client, store=JsonlAnswerStore(path))
+
+    # Act
+    with pytest.raises(UnansweredQuestionError) as refused:
+        judge.check_each(DESCRIBES, [{"code": "x = 1"}, {"code": "y = 2"}], {"doc": {"sentence": "s"}})
+
+    # Assert: the refusal names the unanswered question, the paid response still counts, and the
+    # pack a later run opens holds nothing it cannot read
+    unanswered = list(client.requests[0][1])[1]
+    assert unanswered in str(refused.value)
+    assert judge.input_total.reported == 100
+    assert JsonlAnswerStore(path).records() == ()
+
+
+def test_a_store_replay_is_marked_replayed_and_reports_no_token_count(tmp_path: Path) -> None:
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    state, questions = {"slice": {"code": "x = 1"}}, {"q": {"type": "noul", "instructions": "Is it?"}}
+    Judge(ScriptedJevClient(), store=store).ask(state, questions, thresholds=Thresholds())
+    replaying = Judge(ScriptedJevClient(), store=store, served_model="jev-scripted")
+
+    replayed = replaying.ask(state, questions, thresholds=Thresholds())
+
+    assert replayed.from_store is True
+    assert replayed.input_tokens is None
+    assert replaying.input_total.responses == 0
+    assert replaying.calls == 0
 
 
 def test_every_result_carries_the_hash_of_the_masked_request_that_answered_it(tmp_path: Path) -> None:
@@ -716,7 +770,7 @@ def test_items_that_would_overflow_one_request_are_packed_so_no_request_exceeds_
     assert len(client.requests) == 2
     judged_files: list[str] = []
     for state, questions in client.requests:
-        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        body = serialized_chars({"state": state, "questions": questions})
         assert body <= MAX_REQUEST_CHARS
         assert len(questions) == len(state["parts"]), "one atomic question per item and slot"
         judged_files.extend(item["file"] for item in state["parts"])
@@ -777,6 +831,24 @@ def test_a_body_over_the_request_box_is_over_budget_although_state_and_question_
     assert not request_exceeds_input_budget(state, dict(list(questions.items())[:100]))
 
 
+def test_non_ascii_state_is_measured_as_the_escaped_body_the_engine_measures() -> None:
+    chinese_comments = "\u4e2d" * 20_000
+    state = {"parts": [{"code": chinese_comments}]}
+
+    assert len(json.dumps(state, ensure_ascii=False)) < JEV_INPUT_BOX_CHARS
+    assert request_exceeds_input_budget(state, {"q": {"ask": "x"}})
+
+
+def test_every_box_derives_from_the_one_characters_per_token_constant() -> None:
+    assert chars_for_tokens(JEV_STATE_TOKEN_LIMIT) == JEV_INPUT_BOX_CHARS == 76_800
+    assert chars_for_tokens(JEV_REQUEST_TOKEN_LIMIT) == MAX_REQUEST_CHARS == 153_600
+    assert chars_for_tokens(8_192) == 19_660
+
+
+def test_serialized_chars_counts_every_escaped_character() -> None:
+    assert serialized_chars({"a": "\u4e2d" * 10}) == len('{"a": "' + "\\u4e2d" * 10 + '"}')
+
+
 def test_provider_max_tokens_error_splits_the_batch_and_keeps_every_question_identity() -> None:
     client = BudgetedClient(34_000)  # stricter than the measured packing budget
     judge = Judge(client)
@@ -788,7 +860,7 @@ def test_provider_max_tokens_error_splits_the_batch_and_keeps_every_question_ide
     assert client.refusals == 1, "the first over-budget request is the provider's own evidence"
     assert len(client.requests) == 2
     for state, questions in client.requests:
-        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        body = serialized_chars({"state": state, "questions": questions})
         assert body <= 34_000
     # Each item keeps its own store identity across the split: every item is judged exactly once.
     keys = [result.item["file"] for result in results["describes"]]
@@ -859,6 +931,41 @@ def test_input_budget_error_is_typed_from_the_provider_report_without_the_sdk() 
     assert isinstance(input_budget_error(ProviderError()), InputBudgetExceededError)
     assert input_budget_error(OtherProviderError()) is None
     assert input_budget_error(TypeError("no status at all")) is None
+
+
+WORDING_ONLY_SECRET = "Zq9xW2pL7vB4mNc8"
+"""A value the masker recognises only in a check's wording, where ``api_key = "..."`` marks it."""
+
+
+def _judged_with_wording_secret(path: str, judge: Judge, check: Check, items: list[dict]) -> None:
+    shared = {"doc": {"sentence": "s"}}
+    if path == "check_each":
+        judge.check_each(check, items, shared)
+    elif path == "check_every":
+        judge.check_every([check], items, shared)
+    else:
+        asyncio.run(judge.check_each_async(check, items, shared))
+
+
+@pytest.mark.parametrize("path", ["check_each", "check_every", "check_each_async"])
+def test_a_value_masked_in_check_wording_is_masked_in_the_batch_state_too(path: str) -> None:
+    # Arrange
+    check = Check(
+        "uses_key",
+        f'Does `{{item}}.code` call the service configured with api_key = "{WORDING_ONLY_SECRET}"?',
+        Criterion("yes"),
+        Criterion("no"),
+    )
+    items = [{"file": "a.py", "code": f'client.connect("{WORDING_ONLY_SECRET}")'}]
+    client = AsyncScriptedJevClient() if path == "check_each_async" else ScriptedJevClient()
+
+    # Act
+    _judged_with_wording_secret(path, Judge(client), check, items)
+
+    # Assert
+    [(state, questions)] = client.requests
+    assert WORDING_ONLY_SECRET not in json.dumps(questions)
+    assert WORDING_ONLY_SECRET not in json.dumps(state)
 
 
 def test_a_secret_in_check_wording_is_masked_once_per_plan_and_the_request_still_goes(tmp_path: Path) -> None:

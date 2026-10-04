@@ -2,8 +2,9 @@
 
 The judge records the exact (masked) request before dispatch and the raw response before parsing:
 the body bytes as received, the HTTP status, the content type and the input tokens the provider
-reported (or ``not reported``), with the decoded form optional. A
-transport error or a response that fails to parse is recorded as a failure. Hosts inject their
+reported (``null`` when it reported none, never 0), with the decoded form optional. The tokens are
+on the ``response`` line only, once per logical request. A transport error, a response that fails
+to parse and one that leaves out an asked answer are recorded as failures. Hosts inject their
 own journal (their runtime's, an evaluation journal); ``JsonlJournal`` is a simple local one.
 
 A request holds code, and the library cannot know whose code it is. So by default ``JsonlJournal``
@@ -109,7 +110,9 @@ class JsonlJournal:
         return request_id
 
     def record_response(self, request_id: str, response: RawResponse) -> None:
-        self._append({"kind": "response", "request_id": request_id, **self._response_fields(response)})
+        fields = self._response_fields(response)
+        tokens = {"input_tokens": _reported_input_tokens(response.body)}
+        self._append({"kind": "response", "request_id": request_id, **fields, **tokens})
 
     def record_attempt(self, request_id: str, attempt: RawAttempt) -> None:
         fields = {
@@ -165,21 +168,16 @@ def _response_fields(response: RawResponse) -> dict:
         "status": response.status,
         "content_type": response.content_type,
         "exact": response.exact,
-        "input_tokens": _reported_input_tokens(response.body),
     }
 
 
-NOT_REPORTED = "not reported"
-
-
-def _reported_input_tokens(body: bytes) -> int | str:
-    """The provider's ``usage.input_tokens``, or ``NOT_REPORTED`` when the body has none."""
+def _reported_input_tokens(body: bytes) -> int | None:
+    """The provider's ``usage.input_tokens``, or ``None`` when the body has none."""
     try:
         raw = json.loads(body)
     except ValueError:
-        return NOT_REPORTED
-    reported = reported_input_tokens(raw) if isinstance(raw, Mapping) else None
-    return NOT_REPORTED if reported is None else reported
+        return None
+    return reported_input_tokens(raw) if isinstance(raw, Mapping) else None
 
 
 def _request_with_text(request: JournalRequest) -> dict:

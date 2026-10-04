@@ -67,7 +67,7 @@ def test_the_bound_sits_between_a_20000_and_a_70000_character_single_line() -> N
 def test_the_refusal_names_the_estimated_peak_and_the_longest_line() -> None:
     reason = measure(_one_line(668_777)).refusal
 
-    assert reason == "too large to parse: estimated parse peak 22 GB, longest line 668,777 characters"
+    assert reason == "too large to parse: estimated parse peak 22 GB, longest line 668,777 bytes"
     assert measure(_one_line(20_000)).refusal is None
 
 
@@ -176,3 +176,11 @@ def test_a_small_file_is_cleared_from_its_size_without_reading_it(
 
 def test_line_lengths_are_measured_in_bytes_so_multibyte_text_errs_on_the_safe_side() -> None:
     assert measure(("é" * 1_000).encode()).longest_line == 2_000
+
+
+def test_a_refusal_counts_the_longest_line_in_bytes_as_measured() -> None:
+    line = ("名();" * 12_000).encode()
+
+    reason = measure(line).refusal
+
+    assert reason is not None and reason.endswith("longest line 72,000 bytes")

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 
-from .judgments.answers import TokenTotal, reported_input_tokens, reported_output_tokens
+from .judgments.answers import NOT_REPORTED_TEXT, TokenTotal, reported_input_tokens, reported_output_tokens
 from .judgments.journal import JournalRequest, JsonlJournal, RawResponse
 from .run_files import place_location, step_shown
 
@@ -180,13 +180,13 @@ def _usage(response: RawResponse) -> tuple[int | None, int | None]:
 
 
 def _added(tokens: int | None) -> str:
-    return "not reported" if tokens is None else f"+{tokens}"
+    return NOT_REPORTED_TEXT if tokens is None else f"+{tokens}"
 
 
 def _summary(total: TokenTotal) -> str:
     if total.not_reported == 0:
         return str(total.reported)
-    return f"{total.reported} ({total.not_reported} not reported)"
+    return f"{total.reported} ({total.not_reported} {NOT_REPORTED_TEXT})"
 
 
 def _model(response: RawResponse) -> str:
