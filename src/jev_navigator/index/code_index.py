@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable, Sequence
 from functools import cache
 from pathlib import Path, PurePosixPath
 
-from ..errors import UsageError
+from ..errors import JvnRefusal, UsageError
 from . import tools
 from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
 from .fact_cache import FactCache
@@ -49,15 +49,15 @@ ScanObserver = Callable[[str, str, int], None]
 _NO_STRUCTURE = FileStructure((), (), ())
 
 
-class RevisionMismatchError(ValueError):
+class RevisionMismatchError(JvnRefusal, ValueError):
     """A directive asked for a revision the index does not hold."""
 
 
-class ScopeTooWideError(ValueError):
+class ScopeTooWideError(JvnRefusal, ValueError):
     """The index was asked to cover more files than its limit."""
 
 
-class UnsafePathError(ValueError):
+class UnsafePathError(JvnRefusal, ValueError):
     """A scope path is a symbolic link or resolves outside the index root, so reading it could leave
     the root."""
 

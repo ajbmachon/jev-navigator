@@ -12,6 +12,7 @@ from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
 
+from ..errors import JvnRefusal
 from .spans import TextHit
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ RIPGREP = "rg"
 _NO_MATCHES_EXIT = 1
 
 
-class ToolFailedError(RuntimeError):
+class ToolFailedError(JvnRefusal, RuntimeError):
     """A command-line tool failed for a reason other than finding nothing."""
 
 

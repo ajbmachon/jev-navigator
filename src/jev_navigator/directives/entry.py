@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from ..errors import UsageError
+from ..errors import JvnRefusal, UsageError
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import Span
@@ -39,7 +39,7 @@ CHOOSE_SPAN = Pick(
 )
 
 
-class NoSafeEntryError(RuntimeError):
+class NoSafeEntryError(JvnRefusal, RuntimeError):
     """Jev chose no path or span confidently enough to start the search there."""
 
 

@@ -20,17 +20,15 @@ from .adapters.typesafe import TypeSafeJevClient, provider_errors
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
 from .cli_trace import create_trace_evidence_pack
-from .directives.entry import EntrySelection, NoSafeEntryError, choose_initial_candidates
+from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
 from .directives.places import Place, place_for_line
-from .errors import UsageError
-from .index.code_index import CodeIndex, RevisionMismatchError, ScopeTooWideError, UnsafePathError
+from .errors import JvnRefusal, UsageError
+from .index.code_index import CodeIndex, RevisionMismatchError
 from .index.languages import language_of
-from .index.tools import ToolFailedError
-from .judgments.client import InputBudgetExceededError, JevClient, MissingAnswerError
+from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
-from .judgments.secrets import SecretInRequestError
 from .judgments.store import JsonlAnswerStore
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
@@ -43,23 +41,9 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
 # The failures a command reports in one line: files, git and other subprocesses, a missing extra,
-# a refused request, and JVN's own named refusals. Anything else, a bare ValueError or KeyError
-# included, is a bug and keeps its traceback, the only copy of its cause.
-EXPECTED_ERRORS: tuple[type[Exception], ...] = (
-    OSError,
-    subprocess.SubprocessError,
-    ImportError,
-    UsageError,
-    RevisionMismatchError,
-    ScopeTooWideError,
-    UnsafePathError,
-    ToolFailedError,
-    NoSafeEntryError,
-    CallCapReachedError,
-    InputBudgetExceededError,
-    MissingAnswerError,
-    SecretInRequestError,
-)
+# and JVN's own refusals. Anything else, a bare ValueError or KeyError included, is a bug and keeps
+# its traceback, the only copy of its cause.
+EXPECTED_ERRORS: tuple[type[Exception], ...] = (OSError, subprocess.SubprocessError, ImportError, JvnRefusal)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

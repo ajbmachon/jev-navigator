@@ -13,12 +13,14 @@ import tempfile
 import urllib.request
 from collections.abc import Callable, Sequence
 
+from .errors import JvnRefusal
+
 PROMPT_PLACEHOLDER = "{prompt}"
 DEFAULT_TIMEOUT_SECONDS = 180
 HERMES = "hermes"
 
 
-class ConnectorError(RuntimeError):
+class ConnectorError(JvnRefusal, RuntimeError):
     pass
 
 

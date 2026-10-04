@@ -24,6 +24,7 @@ from jev_navigator.cli import (
 )
 from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.errors import UsageError
+from jev_navigator.history import HistoryTooLargeError
 from jev_navigator.index.code_index import RevisionMismatchError
 from jev_navigator.testing import ScriptedJevClient
 
@@ -432,12 +433,13 @@ def _provider_refusal() -> Exception:
     [
         lambda: UsageError("output directory is not empty: out"),
         lambda: RevisionMismatchError("repository revision changed since the evidence pack"),
+        lambda: HistoryTooLargeError("the selected sections need more than 4000 tokens"),
         lambda: FileNotFoundError("no such repository"),
         lambda: subprocess.CalledProcessError(128, ["git", "rev-parse", "HEAD"]),
         lambda: ModuleNotFoundError("No module named 'typesafe_sdk'"),
         _provider_refusal,
     ],
-    ids=["usage", "revision", "file", "git", "missing-extra", "provider-refusal"],
+    ids=["usage", "revision", "history-too-large", "file", "git", "missing-extra", "provider-refusal"],
 )
 def test_an_expected_failure_is_one_line_and_exit_status_one(
     tmp_path: Path, offline_main: dict, capsys: pytest.CaptureFixture[str], error

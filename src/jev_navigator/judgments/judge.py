@@ -17,6 +17,7 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
+from ..errors import JvnRefusal
 from .answers import JevResponse, NoulAnswer, response_to_raw
 from .client import (
     JEV_STATE_TOKEN_LIMIT,
@@ -58,7 +59,7 @@ _DEFAULT_MASKER = SecretMasker()
 _DEFAULT_SCANNER = SecretScanner()
 
 
-class CallCapReachedError(RuntimeError):
+class CallCapReachedError(JvnRefusal, RuntimeError):
     """A call would exceed the ``max_calls`` cap of this judge or of a judge it was scoped from."""
 
 
