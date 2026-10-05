@@ -17,18 +17,9 @@ from jev_navigator.directives.entry import _file_description, _preview
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
 from jev_navigator.judgments.client import InputLimits
-from jev_navigator.judgments.judge import Judge, masked_request_fits
-from jev_navigator.judgments.questions import Check, Criterion
-from jev_navigator.judgments.secrets import DEFAULT_MASKER, MASK, SecretMasker
+from jev_navigator.judgments.judge import masked_request_fits
+from jev_navigator.judgments.secrets import DEFAULT_MASKER, MASK
 from jev_navigator.operations import TraceLink
-from jev_navigator.testing import ScriptedJevClient
-
-SHOWN_CHECK = Check(
-    name="shown",
-    instructions="Does `{item}` send an order?",
-    yes=Criterion("it calls post"),
-    no=Criterion("it does not call post"),
-)
 
 
 def _index(tmp_path: Path, files: dict[str, str]) -> CodeIndex:
@@ -224,43 +215,6 @@ def test_an_index_built_with_a_hosts_masker_masks_its_slices_with_it(tmp_path: P
 
     # Assert
     assert index.read_slice(Span("app/a.py", 1, 2)).text == f'def send():\n    return "{MASK}"'
-
-
-@dataclass(frozen=True)
-class _EngineShapedMasker:
-    """A host masker of its own, as the Engine passes its Judge: the built-in rules behind another object."""
-
-    def mask(self, text: str, path: str | None = None) -> str:
-        return SecretMasker().mask(text, path)
-
-    def masked_values(self, text: str, path: str | None = None) -> list[str]:
-        return SecretMasker().masked_values(text, path)
-
-
-@pytest.mark.parametrize("masker", [None, _EngineShapedMasker()], ids=["judge-default", "judge-own-masker"])
-def test_a_copy_in_one_file_of_a_value_keyed_in_another_is_hidden_in_the_sent_request(
-    tmp_path: Path, masker
-) -> None:
-    # Arrange: the index masks settings.py as a whole, so the request never sees the keyed value raw
-    index = _index(
-        tmp_path,
-        {
-            "app/settings.py": f'WEBHOOK_TOKEN = "{COPY_VALUE}"\n',
-            "app/hooks.py": f'def send(order):\n    return post("{COPY_VALUE}", order)\n',
-        },
-    )
-    items = [
-        {"file": file, "code": index.read_slice(Span(file, 1, last)).text}
-        for file, last in (("app/settings.py", 1), ("app/hooks.py", 2))
-    ]
-    client = ScriptedJevClient()
-    judge = Judge(client) if masker is None else Judge(client, masker=masker)
-
-    # Act
-    judge.check_each(SHOWN_CHECK, items)
-
-    # Assert
-    assert [request for request in client.requests if COPY_VALUE[:12] in str(request)] == []
 
 
 # units-builder's fixtures (05.10.2026), measured on #110's head with the real masker.

@@ -674,11 +674,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `secrets.DEFAULT_MASKER`, with no "off") masks each file once, line count kept, and `index.lines`,
   `read_slice` and `read_window` cut from that text. So a slice, window, preview or line cut never holds
   a value masked anywhere in its file, even when the cut leaves the key out. `index.plain_lines` is for
-  analysis only. Each index keeps the values it hid, and while it lives every request hides their
-  copies too, whatever masker that request uses, so a copy in one file of a value keyed in another
-  stays hidden even though the keyed file reached the request already masked. The values go when
-  their index goes, and they cover only files the index has already read; a key in a file it never
-  read cannot hide a copy elsewhere. Copies are found in one pass however many values are kept.
+  analysis only. A copy is hidden when its file, or another string of the same request, keys the
+  value; a key that only another file holds does not hide it. Copies are found in one pass however
+  many values a request masks.
 - **Batches.** A batched request carries at most `Judge(items_per_request=N)` items (default 16)
   and closes early when the next item would not fit the size budget. Batches form over every item in
   an order fixed by each unit's file and lines (by content for an item without them), so the same

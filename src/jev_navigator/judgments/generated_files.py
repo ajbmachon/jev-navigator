@@ -160,7 +160,7 @@ def _naming_order(hit: TextHit) -> tuple[bool, str]:
 def _masked_namer_lines(index: CodeIndex, file: str) -> tuple[str, ...]:
     """A naming file's lines, masked as one text by the index's masker; it may lie outside the scope."""
     source = (index.root / file).read_bytes().decode(errors="replace")
-    return masked_lines(source.split("\n"), file, index.masker, index.hidden)
+    return masked_lines(source.split("\n"), file, index.masker)
 
 
 def _naming_entry(lines: Sequence[str], hit: TextHit, path: str) -> dict | None:

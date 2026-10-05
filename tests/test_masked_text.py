@@ -2,24 +2,16 @@
 
 from __future__ import annotations
 
-import gc
 import time
-from pathlib import Path
 
 import pytest
-from git_repos import write_files
 from secret_shapes import COPY_VALUE, SECRET_SHAPES, pieces
 
-from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.index.spans import Span
 from jev_navigator.judgments.masked_text import masked_lines
 from jev_navigator.judgments.secrets import (
     MASK,
     Copies,
     SecretMasker,
-    hidden_scope,
-    mask_request,
-    masked_values,
 )
 
 
@@ -29,7 +21,7 @@ def test_a_keyed_value_of_any_shape_leaves_no_piece_in_the_masked_lines(value: s
     lines = ["{", f'  "token": "{value}",', '  "output": "web/gen.js"', "}"]
 
     # Act
-    masked = masked_lines(lines, "app/build.json", SecretMasker(), hidden_scope())
+    masked = masked_lines(lines, "app/build.json", SecretMasker())
 
     # Assert
     assert [piece for piece in pieces(value) if piece in "\n".join(masked)] == []
@@ -41,7 +33,7 @@ def test_a_value_found_anywhere_is_masked_on_every_line_that_copies_it() -> None
     lines = [f'API_TOKEN = "{COPY_VALUE}"', "", f'post("{COPY_VALUE}", order)']
 
     # Act
-    masked = masked_lines(lines, "app/client.py", SecretMasker(), hidden_scope())
+    masked = masked_lines(lines, "app/client.py", SecretMasker())
 
     # Assert
     assert masked == ('API_TOKEN = "[MASKED]"', "", 'post("[MASKED]", order)')
@@ -52,7 +44,7 @@ def test_a_short_value_is_masked_only_as_a_whole_word() -> None:
     lines = ['password = "hunter2"', 'print("hunter2", "hunter2x")']
 
     # Act
-    masked = masked_lines(lines, "app/a.py", SecretMasker(), hidden_scope())
+    masked = masked_lines(lines, "app/a.py", SecretMasker())
 
     # Assert
     assert masked[1] == f'print("{MASK}", "hunter2x")'
@@ -64,7 +56,7 @@ def test_a_value_spanning_lines_keeps_the_line_count() -> None:
     lines = ["before", "-----BEGIN RSA PRIVATE KEY-----", *body, "-----END RSA PRIVATE KEY----- after", "end"]
 
     # Act
-    masked = masked_lines(lines, "deploy/key.txt", SecretMasker(), hidden_scope())
+    masked = masked_lines(lines, "deploy/key.txt", SecretMasker())
 
     # Assert
     assert masked == ("before", MASK, "", "", "", " after", "end")
@@ -85,28 +77,16 @@ def test_finding_copies_of_ten_thousand_remembered_values_stays_in_milliseconds(
     assert elapsed < 0.1
 
 
-def test_a_request_hides_the_copy_of_a_value_a_live_scope_remembers() -> None:
+def test_a_short_value_glued_after_a_long_values_copy_is_masked_in_the_masked_lines() -> None:
     # Arrange
-    scope = hidden_scope()
-    scope.add([COPY_VALUE])
+    lines = [
+        'password = "hunter2"',
+        'api_key = "sk_abcdefghijklmnop"',
+        "joined = sk_abcdefghijklmnophunter2 end",
+    ]
 
     # Act
-    masked, _, _ = mask_request({"code": f'post("{COPY_VALUE}")'}, {}, SecretMasker())
+    masked = masked_lines(lines, "app/a.py", SecretMasker())
 
     # Assert
-    assert masked == {"code": f'post("{MASK}")'}
-
-
-def test_a_files_hidden_values_go_away_with_its_index(tmp_path: Path) -> None:
-    # Arrange
-    write_files(tmp_path, {"app/settings.py": f'API_TOKEN = "{COPY_VALUE}"\n'})
-    index = CodeIndex(tmp_path, ["app/settings.py"], fact_cache_dir=tmp_path / "cache")
-    index.read_slice(Span("app/settings.py", 1, 1))
-    remembered_while_open = COPY_VALUE in masked_values({}, SecretMasker())
-
-    # Act
-    del index
-    gc.collect()
-
-    # Assert
-    assert remembered_while_open and COPY_VALUE not in masked_values({}, SecretMasker())
+    assert masked[2] == f"joined = {MASK}{MASK} end"

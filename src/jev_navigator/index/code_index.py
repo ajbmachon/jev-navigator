@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
 from ..judgments.masked_text import masked_lines
-from ..judgments.secrets import DEFAULT_MASKER, Masker, hidden_scope
+from ..judgments.secrets import DEFAULT_MASKER, Masker
 from . import listing, tools
 from .bindings import (
     Binding,
@@ -123,12 +123,11 @@ class CodeIndex:
         self._refused: dict[str, str] = {}
         self._not_indexed = dict(not_indexed or {})
         self.masker = masker
-        self.hidden = hidden = hidden_scope()
         self._sources = SourceFiles(
             self.root,
             self._unavailable,
             LINE_CACHE_FILES,
-            lambda file, lines: masked_lines(lines, file, masker, hidden),
+            lambda file, lines: masked_lines(lines, file, masker),
             _held_weakly(self._standing_first_read),
         )
         self._unparsed = Unparsed()

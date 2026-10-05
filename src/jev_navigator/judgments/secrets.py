@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import math
 import re
-import threading
-import weakref
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -204,53 +202,12 @@ def mask_by_content(value: object, masker: Masker) -> object:
 
 
 def masked_values(value: object, masker: Masker) -> frozenset[str]:
-    """Every value the masker hides anywhere inside nested JSON-like data, keys included, and every
-    value this process already hid in a file it read (``remember_hidden``), whatever masker hid it."""
-    found = frozenset(
+    """Every value the masker hides anywhere inside nested JSON-like data, keys included."""
+    return frozenset(
         found
         for text in dict.fromkeys(_strings(value))
         for found in masker.masked_values(text.text, text.path)
     )
-    return found.union(*(scope.values() for scope in list(_LIVE_SCOPES)))
-
-
-class HiddenValues:
-    """The values hidden from files before any cut, kept for as long as their owner (a ``CodeIndex``)
-    lives: every request masked meanwhile hides their copies too, whatever masker it uses, because a
-    file masked whole no longer shows a request the value its other slices copy."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._values: set[str] = set()
-
-    def add(self, values: Iterable[str]) -> None:
-        kept = {value for value in values if value and value != MASK}
-        with self._lock:
-            self._values.update(kept)
-
-    def values(self) -> frozenset[str]:
-        with self._lock:
-            return frozenset(self._values)
-
-    def clear(self) -> None:
-        with self._lock:
-            self._values.clear()
-
-
-_LIVE_SCOPES: weakref.WeakSet[HiddenValues] = weakref.WeakSet()
-
-
-def hidden_scope() -> HiddenValues:
-    """A new set of hidden values that request masking adds until nothing holds it any more."""
-    scope = HiddenValues()
-    _LIVE_SCOPES.add(scope)
-    return scope
-
-
-def forget_hidden() -> None:
-    """Empties every live set of hidden values; for tests, so none depends on what an earlier one read."""
-    for scope in list(_LIVE_SCOPES):
-        scope.clear()
 
 
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str], questions: bool = False) -> object:
@@ -281,8 +238,13 @@ def refuse_if_secret(
     ``"false"`` equals JVN's own keys), and question wording, which keeps its words, never counts."""
     texts = _strings(state) + _strings(questions, questions=True)
     copies = copies_of(masked)
-    if any(_holds_copy(text, value) for text in texts for value in copies.found(text.text)):
-        raise SecretInRequestError("a masked value is still in the request, in a key; nothing was sent")
+    holding = next(
+        (text for text in texts if any(_holds_copy(text, value) for value in copies.found(text.text))), None
+    )
+    if holding is not None:
+        raise SecretInRequestError(
+            f"a masked value is still in the request, in a {holding.role}; nothing was sent"
+        )
     if scanner is None:
         return
     for text in texts:
@@ -303,10 +265,11 @@ class Copies:
     value of ``BY_CONTENT_MIN_CHARS`` or more characters is looked up by its first that many
     characters, a shorter one by itself at a word start, and every candidate is confirmed by
     ``copy_pattern``, which alone decides where a copy stands. Overlapping copies yield the leftmost,
-    then the longest."""
+    then the longest. A value found inside ``MASK`` itself is left out: masking its copy would
+    make a new one."""
 
     def __init__(self, values: Iterable[str]) -> None:
-        kept = sorted({value for value in values if value and value != MASK}, key=len, reverse=True)
+        kept = sorted({value for value in values if value and value not in MASK}, key=len, reverse=True)
         self._patterns: dict[str, re.Pattern[str]] = {}
         self._long: dict[str, list[str]] = {}
         self._short: dict[int, set[str]] = {}
@@ -323,12 +286,13 @@ class Copies:
     def found(self, text: str) -> list[str]:
         return [value for _, _, value in self._copies(text)]
 
-    def sub(self, text: str) -> str:
-        parts, position = [], 0
-        for start, end, _ in self._copies(text):
-            parts += [text[position:start], MASK]
-            position = end
-        return "".join([*parts, text[position:]])
+    def sub(self, text: str, keep_lines: bool = False) -> str:
+        """``text`` with every copy replaced by ``MASK``, again until none is left: masking one copy
+        can leave a short value glued after it at a word start. With ``keep_lines`` each line break a
+        copy covered stays after its mask, so the text keeps its line count."""
+        while copies := self.spans(text):
+            text = _copies_replaced(text, copies, keep_lines)
+        return text
 
     def _copies(self, text: str) -> list[tuple[int, int, str]]:
         word_starts = self._word_starts(text)
@@ -368,6 +332,15 @@ class Copies:
             for length in self._short_lengths
             if text[position : position + length] in self._short[length]
         ]
+
+
+def _copies_replaced(text: str, spans: list[tuple[int, int]], keep_lines: bool) -> str:
+    parts, position = [], 0
+    for start, end in spans:
+        line_breaks = "\n" * text.count("\n", start, end) if keep_lines else ""
+        parts += [text[position:start], MASK + line_breaks]
+        position = end
+    return "".join([*parts, text[position:]])
 
 
 @lru_cache(maxsize=16)

@@ -23,16 +23,6 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
 from jev_navigator.judgments.questions import serialized_chars
-from jev_navigator.judgments.secrets import forget_hidden
-
-
-@pytest.fixture(autouse=True)
-def no_remembered_secrets():
-    """Request masking adds every value the process already hid in a file it read; each test starts
-    and ends with none, so no outcome depends on which test ran before it."""
-    forget_hidden()
-    yield
-    forget_hidden()
 
 
 @pytest.fixture(autouse=True)
