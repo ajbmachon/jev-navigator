@@ -26,21 +26,28 @@ from jev_navigator.testing import ScriptedJevClient
 TARGET = "the check that limits how many items an order may have"
 HELPERS = "\n\n".join(f"def h{index}(order):\n    return {index}" for index in range(4)) + "\n"
 SEND_HOLD_SECONDS = 0.1
+FILL_DEADLINE_SECONDS = 30
 
 
 @dataclass
 class HeldClient:
     """Stands in for the remote provider and counts the requests in flight. Each send stays in flight
     for ``SEND_HOLD_SECONDS``, or until more than ``bound`` are in flight together, so a judge without
-    one shared bound shows a peak above it at once instead of by timing. With ``refuse_lists`` it
+    one shared bound shows a peak above it at once instead of by timing. With ``fill`` the hold starts
+    only once ``bound`` requests have been in flight together (waiting up to ``FILL_DEADLINE_SECONDS``),
+    so the first wave of a wide beam reaches the bound however slowly the machine starts its threads,
+    and a request past the bound still arrives while the wave is held. With
+    ``refuse_lists`` it
     refuses, for its input size, any request whose state carries more than one candidate, which
     splits every opening into its found question and one batch per neighbour."""
 
     bound: int = DEFAULT_MAX_CONCURRENCY
     refuse_lists: bool = False
+    fill: bool = False
     script: ScriptedJevClient = field(default_factory=lambda: ScriptedJevClient(default_noul=0.05))
     in_flight: int = 0
     peak: int = 0
+    filled_at: float | None = None
     _changed: threading.Condition = field(default_factory=threading.Condition)
 
     @property
@@ -57,8 +64,10 @@ class HeldClient:
     def send(self, state: Mapping, questions: Mapping) -> RawResponse:
         self._arrive()
         try:
+            deadline = time.monotonic() + self.hold_seconds
             with self._changed:
-                self._changed.wait_for(self._over_bound, timeout=SEND_HOLD_SECONDS)
+                while not self._released() and time.monotonic() < deadline:
+                    self._changed.wait(0.005)
             return self._answer(state, questions)
         finally:
             self._leave()
@@ -70,14 +79,23 @@ class HeldClient:
         with self._changed:
             self.in_flight += 1
             self.peak = max(self.peak, self.in_flight)
+            if self.filled_at is None and self.in_flight >= self.bound:
+                self.filled_at = time.monotonic()
             self._changed.notify_all()
 
     def _leave(self) -> None:
         with self._changed:
             self.in_flight -= 1
 
-    def _over_bound(self) -> bool:
-        return self.in_flight > self.bound
+    @property
+    def hold_seconds(self) -> float:
+        return FILL_DEADLINE_SECONDS if self.fill else SEND_HOLD_SECONDS
+
+    def _released(self) -> bool:
+        if self.in_flight > self.bound:
+            return True
+        start = self.filled_at if self.fill else None
+        return start is not None and time.monotonic() - start >= SEND_HOLD_SECONDS
 
     def _answer(self, state: Mapping, questions: Mapping) -> RawResponse:
         if self.refuse_lists and len(state.get("candidates", ())) > 1:
@@ -101,8 +119,8 @@ class AsyncHeldClient:
     async def send(self, state: Mapping, questions: Mapping) -> RawResponse:
         self.held._arrive()
         try:
-            deadline = time.monotonic() + SEND_HOLD_SECONDS
-            while not self.held._over_bound() and time.monotonic() < deadline:
+            deadline = time.monotonic() + self.held.hold_seconds
+            while not self.held._released() and time.monotonic() < deadline:
                 await asyncio.sleep(0.005)
             return self.held._answer(state, questions)
         finally:
@@ -143,7 +161,7 @@ def _search(mode: str, index: CodeIndex, held: HeldClient, width: int) -> FindRe
 
 def main(mode: str, width: int, refuse_lists: bool, workspace: Path) -> dict:
     index = _many_functions_index(workspace, width)
-    held = HeldClient(refuse_lists=refuse_lists)
+    held = HeldClient(refuse_lists=refuse_lists, fill=not refuse_lists)
     result = _search(mode, index, held, width)
     candidates = [len(state.get("candidates", ())) for state, _ in held.requests]
     return {
