@@ -62,11 +62,11 @@ class HeldClient:
         return self.parse(self.send(state, questions))
 
     def send(self, state: Mapping, questions: Mapping) -> RawResponse:
-        self._arrive()
+        arrived = self._arrive()
         try:
             deadline = time.monotonic() + self.hold_seconds
             with self._changed:
-                while not self._released() and time.monotonic() < deadline:
+                while not self._released(arrived) and time.monotonic() < deadline:
                     self._changed.wait(0.005)
             return self._answer(state, questions)
         finally:
@@ -75,13 +75,14 @@ class HeldClient:
     def parse(self, raw: RawResponse):
         return self.script.parse(raw)
 
-    def _arrive(self) -> None:
+    def _arrive(self) -> float:
         with self._changed:
             self.in_flight += 1
             self.peak = max(self.peak, self.in_flight)
             if self.filled_at is None and self.in_flight >= self.bound:
                 self.filled_at = time.monotonic()
             self._changed.notify_all()
+            return time.monotonic()
 
     def _leave(self) -> None:
         with self._changed:
@@ -91,10 +92,10 @@ class HeldClient:
     def hold_seconds(self) -> float:
         return FILL_DEADLINE_SECONDS if self.fill else SEND_HOLD_SECONDS
 
-    def _released(self) -> bool:
+    def _released(self, arrived: float) -> bool:
         if self.in_flight > self.bound:
             return True
-        start = self.filled_at if self.fill else None
+        start = max(self.filled_at, arrived) if self.fill and self.filled_at is not None else None
         return start is not None and time.monotonic() - start >= SEND_HOLD_SECONDS
 
     def _answer(self, state: Mapping, questions: Mapping) -> RawResponse:
@@ -117,10 +118,10 @@ class AsyncHeldClient:
         return self.parse(await self.send(state, questions))
 
     async def send(self, state: Mapping, questions: Mapping) -> RawResponse:
-        self.held._arrive()
+        arrived = self.held._arrive()
         try:
             deadline = time.monotonic() + self.held.hold_seconds
-            while not self.held._released() and time.monotonic() < deadline:
+            while not self.held._released(arrived) and time.monotonic() < deadline:
                 await asyncio.sleep(0.005)
             return self.held._answer(state, questions)
         finally:

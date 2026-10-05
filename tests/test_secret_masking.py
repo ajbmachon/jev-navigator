@@ -330,12 +330,12 @@ LONG_LINES = {
 @pytest.mark.parametrize("text", LONG_LINES.values(), ids=LONG_LINES.keys())
 def test_masking_a_long_line_takes_time_linear_in_its_length(text: str) -> None:
     # Act
-    started = time.perf_counter()
+    started = time.process_time()
     SecretMasker().mask(text)
     SecretScanner().findings(text)
 
     # Assert
-    assert time.perf_counter() - started < 1.0
+    assert time.process_time() - started < 1.0
 
 
 REPEATED_PAIRS = {"assignment pairs": "a=b ", "SVG attributes": 'x="1" '}
@@ -344,22 +344,23 @@ REPEATED_PAIRS = {"assignment pairs": "a=b ", "SVG attributes": 'x="1" '}
 @pytest.mark.parametrize("pair", REPEATED_PAIRS.values(), ids=REPEATED_PAIRS.keys())
 def test_masking_time_grows_linearly_as_a_line_of_pairs_doubles(pair: str) -> None:
     # Arrange
-    lengths = [8_000, 16_000, 32_000, 64_000]
+    lengths = [32_000, 64_000, 128_000]
 
     # Act
     seconds = [_fastest_mask_seconds(pair * (length // len(pair))) for length in lengths]
 
     # Assert
-    assert seconds[-1] < 24 * max(seconds[0], 0.001), seconds
-    assert seconds[-1] < 0.5, seconds
+    assert seconds[-1] < 8 * seconds[0], seconds
+    assert seconds[-1] < 1.0, seconds
 
 
 def _fastest_mask_seconds(text: str) -> float:
+    """The fastest of three runs, in this process's CPU time, which other processes' load leaves alone."""
     timings = []
     for _ in range(3):
-        started = time.perf_counter()
+        started = time.process_time()
         SecretMasker().mask(text)
-        timings.append(time.perf_counter() - started)
+        timings.append(time.process_time() - started)
     return min(timings)
 
 
