@@ -15,6 +15,8 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
+from ..judgments.masked_text import masked_lines
+from ..judgments.secrets import DEFAULT_MASKER, Masker
 from . import listing, tools
 from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
 from .fact_cache import FactCache
@@ -85,6 +87,7 @@ class CodeIndex:
         fact_cache_dir: Path | None = None,
         blob_ids: Mapping[str, str] | None = None,
         not_indexed: Mapping[str, str] | None = None,
+        masker: Masker = DEFAULT_MASKER,
     ) -> None:
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
@@ -104,8 +107,13 @@ class CodeIndex:
         self._unavailable: dict[str, str] = {}
         self._refused: dict[str, str] = {}
         self._not_indexed = dict(not_indexed or {})
+        self.masker = masker
         self._sources = SourceFiles(
-            self.root, self._unavailable, LINE_CACHE_FILES, _held_weakly(self._standing_first_read)
+            self.root,
+            self._unavailable,
+            LINE_CACHE_FILES,
+            lambda file, lines: masked_lines(lines, file, masker),
+            _held_weakly(self._standing_first_read),
         )
         self._unparsed = Unparsed()
         self._facts: dict[str, FileFacts] = {}
@@ -529,7 +537,7 @@ class CodeIndex:
         structure = self._facts_in(span.file).structure
         if span in structure.symbols:
             return role != "type" or span not in structure.functions
-        first_line = self.read_slice(Span(span.file, span.start, span.start)).text
+        first_line = self._lines_of(span.file)[span.start - 1]
         return declares_type(first_line) if role == "type" else declares_value(first_line)
 
     @memoized
@@ -751,7 +759,10 @@ class CodeIndex:
         return imported_names("\n".join(self._lines_of(file)), file)
 
     def read_slice(self, span: Span, origin: str = "") -> CodeSlice:
-        lines = self._lines_of(span.file)
+        """The span's code as a request may show it: cut from the file's ``lines``, which the masker
+        read whole, so no slice holds a value masked anywhere in its file. The slice's SHA-256 names
+        the source bytes it was cut from, as provenance; the request journal records the bytes sent."""
+        lines = self.lines(span.file)
         return CodeSlice(
             span,
             "\n".join(lines[span.start - 1 : span.end]),
@@ -853,6 +864,13 @@ class CodeIndex:
         return f"{self.commit}+worktree" if file in self._changed else self.commit
 
     def lines(self, file: str) -> tuple[str, ...]:
+        """The file's lines as a request may show them: masked as one text by ``masker``, as many
+        lines as the file has. Code that reads a file to analyse it uses ``plain_lines``."""
+        self._require_in_scope(file)
+        return self._sources.masked_lines(file)
+
+    def plain_lines(self, file: str) -> tuple[str, ...]:
+        """The file's lines as first read, unmasked: for analysis only, never for a request."""
         return self._lines_of(file)
 
     def _script_paths(self, file: str) -> ScriptPaths | None:

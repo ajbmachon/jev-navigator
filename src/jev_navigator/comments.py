@@ -29,9 +29,9 @@ class CommentKind(StrEnum):
 
 @dataclass(frozen=True)
 class CommentBlock:
-    """``attached`` is the code the comment sits on: the declaration or block below it, or the
-    statement a trailing comment ends. ``facts`` are mechanical observations such as
-    ``todo_without_owner``."""
+    """``text`` is the block as a request may show it, masked with its whole file. ``attached`` is
+    the code the comment sits on: the declaration or block below it, or the statement a trailing
+    comment ends. ``facts`` are mechanical observations such as ``todo_without_owner``."""
 
     span: Span
     text: str
@@ -141,7 +141,7 @@ def code_above_comment(index: CodeIndex, file: str, line: int) -> CodeAbove:
     directly above, ``code`` is None and ``reason`` says why."""
     if line == 1:
         return CodeAbove(None, CodeAboveReason.START_OF_FILE)
-    lines = index.lines(file)
+    lines = index.plain_lines(file)
     if not lines[line - 2].strip():
         return CodeAbove(None, CodeAboveReason.BLANK_LINE)
     start = _start_of_code_above(lines, line)
@@ -178,7 +178,7 @@ def _comments_in_file(
     raw = _comment_ranges(_comment_nodes(index, file, language, refused))
     if file in refused:
         return [], refused[file]
-    lines = index.lines(file)
+    lines = index.plain_lines(file)
     blocks = [_block(index, file, lines, start, end, rules) for start, end in _merge_adjacent(raw, lines)]
     return sorted(blocks + _docstrings(index, file, lines, rules), key=lambda block: block.span.start), None
 
@@ -222,7 +222,7 @@ def _line_comment_marker(text: str) -> str | None:
 def _block(
     index: CodeIndex, file: str, lines: Sequence[str], start: int, end: int, rules: Sequence[FactRule]
 ) -> CommentBlock:
-    text = "\n".join(lines[start - 1 : end])
+    text = "\n".join(index.lines(file)[start - 1 : end])
     kind, attached = _kind_and_attachment(index, file, lines, start, end, text)
     return CommentBlock(Span(file, start, end), text, kind, attached, comment_facts(text, rules))
 
@@ -256,7 +256,7 @@ def _docstrings(
     for owner, first_body_line in owners:
         end = _docstring_end(lines, first_body_line)
         if end is not None:
-            text = "\n".join(lines[first_body_line - 1 : end])
+            text = "\n".join(index.lines(file)[first_body_line - 1 : end])
             span = Span(file, first_body_line, end)
             blocks.append(CommentBlock(span, text, CommentKind.DOCSTRING, owner, comment_facts(text, rules)))
     return blocks

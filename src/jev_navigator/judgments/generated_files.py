@@ -22,9 +22,9 @@ from ..index.file_shape import FileShape
 from ..index.scope import is_test_file
 from ..index.spans import TextHit
 from .judge import CheckResult, Judge
-from .masked_cut import masked_cut
+from .masked_text import masked_lines, trimmed_cut
 from .questions import Check, Criterion
-from .secrets import Masker, SecretInRequestError, mask_request, refuse_if_secret
+from .secrets import SecretInRequestError, mask_request, refuse_if_secret
 
 FILES = "files"
 EXCERPT_CHARS = 2_000
@@ -63,8 +63,7 @@ def judge_generated_files(
 ) -> GeneratedJudgments:
     naming = files_naming(index.root, sorted(awaiting))
     entries = {
-        path: generated_file_entry(index, path, awaiting[path], naming[path], judge.masker)
-        for path in sorted(awaiting)
+        path: generated_file_entry(index, path, awaiting[path], naming[path]) for path in sorted(awaiting)
     }
     refused = {path for path, entry in entries.items() if _refused_by_secret_scan(judge, entry)}
     sendable = [path for path in entries if path not in refused]
@@ -74,13 +73,11 @@ def judge_generated_files(
     )
 
 
-def generated_file_entry(
-    index: CodeIndex, path: str, shape: FileShape, naming: Sequence[TextHit], masker: Masker | None
-) -> dict:
+def generated_file_entry(index: CodeIndex, path: str, shape: FileShape, naming: Sequence[TextHit]) -> dict:
     """One file as Jev sees it: path, measured facts, importers, the files naming it (``naming``, from
     ``files_naming``) and the two excerpts. Every field is a measurement or real text, never a verdict:
     no trigger names and no reasons. ``file_shape`` measures lines in bytes, so the line fields say so.
-    Each naming line and excerpt is a ``masked_cut`` of its whole file with ``masker``."""
+    Each naming line and excerpt is cut from its whole file masked by the index's masker."""
     importers = importers_of(index, path)
     text = "\n".join(index.lines(path))
     return {
@@ -91,9 +88,9 @@ def generated_file_entry(
         "average_line_bytes": round(shape.chars_per_line, 1),
         "importers": list(importers[:MAX_IMPORTERS]),
         "importer_count": len(importers),
-        "named_by": [_naming_entry(index.root, hit, path, masker) for hit in naming[:MAX_NAMED_BY]],
+        "named_by": [_naming_entry(index, hit, path) for hit in naming[:MAX_NAMED_BY]],
         "named_by_count": len(naming),
-        **_excerpts(text, path, masker),
+        **_excerpts(text),
     }
 
 
@@ -146,43 +143,34 @@ def _naming_order(hit: TextHit) -> tuple[bool, str]:
     return is_test_file(hit.file), hit.file
 
 
-def _naming_entry(root: Path, hit: TextHit, path: str, masker: Masker | None) -> dict:
-    """The naming line as Jev sees it: the whole line when it fits ``NAMING_LINE_CHARS``, otherwise
-    that many characters around the name, cut from the whole file by ``masked_cut``."""
-    source = (root / hit.file).read_bytes().decode(errors="replace")
-    line_start, line_end = _line_span(source, hit.line)
-    named = re.compile(_whole_path(re.escape(path)), re.MULTILINE).search(source, line_start, line_end)
+def _naming_entry(index: CodeIndex, hit: TextHit, path: str) -> dict:
+    """The naming line as Jev sees it, from its whole file masked by the index's masker: the whole
+    line when it fits ``NAMING_LINE_CHARS``, otherwise that many characters around the name."""
+    source = (index.root / hit.file).read_bytes().decode(errors="replace")
+    line = masked_lines(source.split("\n"), hit.file, index.masker)[hit.line - 1]
+    named = re.compile(_whole_path(re.escape(path))).search(line)
     if named is None:
         raise ValueError(f"{hit.file}:{hit.line} no longer names {path}")
     keep = named.span("path")
-    start, end = _around(keep, line_start, line_end)
-    text = masked_cut(source, start, end, masker, file=hit.file, keep=keep).strip()
-    return {"file": hit.file, "line": hit.line, "text": text}
+    start, end = _around(keep, len(line))
+    return {"file": hit.file, "line": hit.line, "text": trimmed_cut(line, start, end, keep).strip()}
 
 
-def _line_span(source: str, number: int) -> tuple[int, int]:
-    start = 0
-    for _ in range(number - 1):
-        start = source.index("\n", start) + 1
-    end = source.find("\n", start)
-    return start, len(source) if end < 0 else end
-
-
-def _around(keep: tuple[int, int], line_start: int, line_end: int) -> tuple[int, int]:
-    if line_end - line_start <= NAMING_LINE_CHARS:
-        return line_start, line_end
+def _around(keep: tuple[int, int], line_length: int) -> tuple[int, int]:
+    if line_length <= NAMING_LINE_CHARS:
+        return 0, line_length
     centre = (keep[0] + keep[1]) // 2
-    start = min(max(line_start, centre - NAMING_LINE_CHARS // 2), line_end - NAMING_LINE_CHARS)
+    start = min(max(0, centre - NAMING_LINE_CHARS // 2), line_length - NAMING_LINE_CHARS)
     return start, start + NAMING_LINE_CHARS
 
 
-def _excerpts(text: str, path: str, masker: Masker | None) -> dict[str, str]:
+def _excerpts(text: str) -> dict[str, str]:
     if len(text) <= 2 * EXCERPT_CHARS:
-        return {"opening": masked_cut(text, 0, len(text), masker, file=path)}
+        return {"opening": text}
     middle = (len(text) - EXCERPT_CHARS) // 2
     return {
-        "opening": masked_cut(text, 0, EXCERPT_CHARS, masker, file=path),
-        "middle": masked_cut(text, middle, middle + EXCERPT_CHARS, masker, file=path),
+        "opening": trimmed_cut(text, 0, EXCERPT_CHARS),
+        "middle": trimmed_cut(text, middle, middle + EXCERPT_CHARS),
     }
 
 

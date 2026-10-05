@@ -295,7 +295,8 @@ def _imported(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     name that module only passes on from elsewhere, opens the start of that module."""
     span = opened.span
     module_level = not any(symbol.contains(span.start) for symbol in index.symbols_in(span.file))
-    text = "\n".join(index.lines(span.file)) if module_level else opened.text
+    lines = index.plain_lines(span.file)
+    text = "\n".join(lines if module_level else lines[span.start - 1 : span.end])
     source = span.file if module_level else _span_label(span)
     places = []
     for fact, names in index.imports_in(span.file, text):
@@ -313,7 +314,7 @@ def _imported(index: CodeIndex, opened: CodeSlice) -> list[Place]:
         )
         places += [function_place(index, definition, relation) for definition in definitions]
         if names is None or not names <= {definition.name for definition in definitions}:
-            end = min(len(index.lines(fact.path)), IMPORTED_HEAD_LINES)
+            end = min(len(index.plain_lines(fact.path)), IMPORTED_HEAD_LINES)
             places.append(range_place(index, fact.path, 1, end, f"start of a module {relation}"))
     return places
 
@@ -399,7 +400,7 @@ def _co_changed(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     places = []
     for other, commits in index.co_changed_files(opened.span.file, limit=2):
         relation = f"start of a file committed with {opened.span.file} {commits} times"
-        end = min(len(index.lines(other)), CO_CHANGE_HEAD_LINES)
+        end = min(len(index.plain_lines(other)), CO_CHANGE_HEAD_LINES)
         places.append(range_place(index, other, 1, end, relation))
     return places
 
@@ -414,7 +415,7 @@ def _lines_before(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 def _rest_of_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     span = opened.span
-    line_count = len(index.lines(span.file))
+    line_count = len(index.plain_lines(span.file))
     if span.end >= line_count:
         return []
     end = min(line_count, span.end + REST_OF_FILE_LINES)

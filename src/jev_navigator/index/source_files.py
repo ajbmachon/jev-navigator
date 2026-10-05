@@ -21,13 +21,14 @@ class SourceFiles:
     always holds the code its SHA-256 names. Split lines are cached for ``line_cache_files`` files.
     ``standing_first_read(file, content)`` names the bytes that stand as a file's first read, given
     what the disk holds then (``None`` when the file is gone); bytes other than the disk's count as a
-    change."""
+    change. ``mask(file, lines)`` gives the lines a request may show, cached the same way."""
 
     def __init__(
         self,
         root: Path,
         unavailable: MutableMapping[str, str],
         line_cache_files: int,
+        mask: Callable[[str, tuple[str, ...]], tuple[str, ...]],
         standing_first_read: Callable[[str, bytes | None], bytes | None] = lambda file, content: content,
     ) -> None:
         self._root = root
@@ -36,7 +37,9 @@ class SourceFiles:
         self._sha256: dict[str, str] = {}
         self._first_read: dict[str, bytes] = {}
         self._line_cache_files = line_cache_files
+        self._mask = mask
         self._lines: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+        self._masked_lines: OrderedDict[str, tuple[str, ...]] = OrderedDict()
         self._lines_lock = threading.Lock()
 
     def current(self, file: str) -> bytes | None:
@@ -64,15 +67,24 @@ class SourceFiles:
     def lines(self, file: str) -> tuple[str, ...]:
         """The file's lines as first read; the most recently read ``line_cache_files`` files keep
         theirs split."""
+        return self._cached(self._lines, file, self._read_lines)
+
+    def masked_lines(self, file: str) -> tuple[str, ...]:
+        """The file's lines as first read, masked as one text by ``mask``; as many as ``lines``."""
+        return self._cached(self._masked_lines, file, lambda file: self._mask(file, self.lines(file)))
+
+    def _cached(
+        self, cache: OrderedDict[str, tuple[str, ...]], file: str, read: Callable[[str], tuple[str, ...]]
+    ) -> tuple[str, ...]:
         with self._lines_lock:
-            if file in self._lines:
-                self._lines.move_to_end(file)
-                return self._lines[file]
-        lines = self._read_lines(file)
+            if file in cache:
+                cache.move_to_end(file)
+                return cache[file]
+        lines = read(file)
         with self._lines_lock:
-            self._lines[file] = lines
-            while len(self._lines) > self._line_cache_files:
-                self._lines.popitem(last=False)
+            cache[file] = lines
+            while len(cache) > self._line_cache_files:
+                cache.popitem(last=False)
         return lines
 
     def sha256(self, file: str) -> str:

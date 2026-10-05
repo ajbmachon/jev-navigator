@@ -141,7 +141,7 @@ def _start_span(index: CodeIndex, start: str) -> Span:
         line = int(raw_line)
     except ValueError as error:
         raise ValueError(f"start line must be an integer, got {start!r}") from error
-    if line < 1 or line > len(index.lines(path)):
+    if line < 1 or line > len(index.plain_lines(path)):
         raise ValueError(f"start line is outside {path}: {line}")
     span = index.enclosing_symbol(path, line)
     if span is None:

@@ -1007,7 +1007,7 @@ def _parse_start(index: CodeIndex, value: str) -> Place:
         line = int(raw_line)
     except ValueError as error:
         raise ValueError(f"start line must be an integer, got {value!r}") from error
-    if line < 1 or line > len(index.lines(path)):
+    if line < 1 or line > len(index.plain_lines(path)):
         raise ValueError(f"start line is outside {path}: {line}")
     return place_for_line(index, path, line, "caller-provided start")
 

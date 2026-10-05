@@ -73,7 +73,7 @@ def code_described_by_comment(index: CodeIndex, file: str, line: int) -> CodeSli
     """The code a comment is about, whole: the next function or class (decorators included) after
     a comment line, past blank lines; or, for a comment trailing code, that statement, with its
     block when the statement opens one."""
-    lines = index.lines(file)
+    lines = index.plain_lines(file)
     trailing = _is_trailing_comment(lines[line - 1])
     target = line if trailing else _next_code_line(lines, line)
     if target is None:

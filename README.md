@@ -288,7 +288,7 @@ index.find_references("send_invoice")  # Reference(name, file, line, role, holde
 index.references_in(span)  # names a function passes on without calling (callbacks, registries)
 index.enclosing_symbol(file, line)
 index.symbols_in(file)
-index.read_slice(span)
+index.read_slice(span)  # masked as part of its whole file; see Secrets
 index.read_window(file, line, radius=10)
 index.search_text("orders.max_items")  # ripgrep over the narrowed files only
 index.imports(file)
@@ -505,9 +505,9 @@ else:
   the path; files outside the scope count, non-test files come first; a path written relative to the
   naming file, such as `../src/a.js`, or joined to a variable folder, such as `$root/src/a.js`, is not
   found) and their true count, and two 2,000-character excerpts (the opening and the middle). Each
-  naming line and excerpt is cut by `judgments.masked_cut.masked_cut`: the masker reads the whole file
-  first, so a secret whose key the cut leaves out is still masked, and a cut that splits a run of
-  characters drops that run up to the nearest whitespace or quote. A file the secret scan would refuse
+  naming line and excerpt is cut from its whole file as `judgments.masked_text.masked_lines` masked it,
+  so a secret whose key the cut leaves out is still masked, and a cut that splits a run of characters
+  drops that run up to the nearest whitespace or quote (`trimmed_cut`). A file the secret scan would refuse
   is never sent and comes back in `not_judged` with the reason. Nothing calls it yet: the
   search that acts on the answers lands with Find v2's round controller.
 - `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are
@@ -624,6 +624,11 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
   left in a key is refused too. Both are on by default; a host passes its own (a masker offers
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
+  Code reaches a request already masked as part of its whole file: `CodeIndex(masker=...)` (default
+  `secrets.DEFAULT_MASKER`, with no "off") masks each file once, line count kept, and `index.lines`,
+  `read_slice` and `read_window` cut from that text. So a slice, window, preview or line cut never holds
+  a value masked anywhere in its file, even when the cut leaves the key out. `index.plain_lines` is for
+  analysis only. A key in one file and its value in another are left to the request's copy masking.
 - **Batches.** A batched request carries at most `Judge(items_per_request=N)` items (default 16)
   and closes early when the next item would not fit the size budget. Batches form over every item in
   an order fixed by each unit's file and lines (by content for an item without them), so the same

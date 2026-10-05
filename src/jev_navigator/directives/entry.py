@@ -127,11 +127,10 @@ def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> En
         raise ValueError("the repository scope contains no supported code files")
     decisions: list[EntryDecision] = []
     parent = ""
-    mask = _mask_of(judge)
     while True:
         entries = _path_entries(files, parent)
         chosen, decision = _choose_path(
-            judge, target, parent, entries, lambda shown: _path_descriptions(index, shown, mask)
+            judge, target, parent, entries, lambda shown: _path_descriptions(index, shown)
         )
         decisions += decision
         if chosen.kind == "file":
@@ -139,9 +138,9 @@ def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> En
             break
         parent = chosen.path
 
-    spans = _source_spans(index, selected_file, mask)
+    spans = _source_spans(index, selected_file)
     if not spans:
-        end = min(40, len(index.lines(selected_file)))
+        end = min(40, len(index.plain_lines(selected_file)))
         candidate = EntryCandidate(
             range_place(index, selected_file, 1, end, "automatic entry selection"), None
         )
@@ -183,16 +182,13 @@ def _path_entries(files: tuple[str, ...], parent: str) -> tuple[_PathEntry, ...]
     return tuple(_PathEntry(kind, path, tuple(paths)) for (kind, path), paths in sorted(grouped.items()))
 
 
-def _path_descriptions(index: CodeIndex, entries: Sequence[_PathEntry], mask: Mask) -> list[str]:
+def _path_descriptions(index: CodeIndex, entries: Sequence[_PathEntry]) -> list[str]:
     """The descriptions of the options one request shows. Only their main files are read, so a level
     with more entries than one request reads nothing for the groups it is not asked about."""
     symbols = _symbols_of_main_files(
         index, [(entry.kind, entry.path, list(entry.files)) for entry in entries]
     )
-    return [
-        _path_description(index, entry.kind, entry.path, list(entry.files), symbols, mask)
-        for entry in entries
-    ]
+    return [_path_description(index, entry.kind, entry.path, list(entry.files), symbols) for entry in entries]
 
 
 def _description_limit(question: Pick, state: dict, option_count: int, box_chars: int) -> int:
@@ -278,15 +274,14 @@ def _path_description(
     path: str,
     files: list[str],
     symbols: dict[str, tuple[str, ...]],
-    mask: Mask,
 ) -> str:
     if kind == "file":
-        return _file_description(index, path, symbols, mask)
+        return _file_description(index, path, symbols)
     return _directory_description(path, files, symbols)
 
 
-def _file_description(index: CodeIndex, path: str, symbols: dict[str, tuple[str, ...]], mask: Mask) -> str:
-    doc = _first_doc_line(_masked_lines(index.lines(path)[:DOC_SCAN_LINES], mask))
+def _file_description(index: CodeIndex, path: str, symbols: dict[str, tuple[str, ...]]) -> str:
+    doc = _first_doc_line(index.lines(path)[:DOC_SCAN_LINES])
     names = symbols.get(path)
     parts = [f"file {path}:"]
     if doc:
@@ -332,12 +327,6 @@ def _subfolder_counts(relative: list[str]) -> list[tuple[str, int]]:
 def _listed(items: list[str]) -> str:
     shown = ", ".join(items[:LISTED_PATHS])
     return shown if len(items) <= LISTED_PATHS else f"{shown} (+{len(items) - LISTED_PATHS} more)"
-
-
-def _masked_lines(lines: Sequence[str], mask: Mask) -> list[str]:
-    """The lines masked as one text, before any of them is cut: a secret can span lines or be
-    longer than what a later cut keeps."""
-    return mask("\n".join(lines)).split("\n")
 
 
 def _first_doc_line(lines: Sequence[str]) -> str:
@@ -401,20 +390,20 @@ def _escaped_chars(text: str) -> int:
     return serialized_chars(text) - serialized_chars("")
 
 
-def _source_spans(index: CodeIndex, file: str, mask: Mask) -> tuple[_SpanEntry, ...]:
+def _source_spans(index: CodeIndex, file: str) -> tuple[_SpanEntry, ...]:
     unique = {
-        span.key: _SpanEntry(span, _span_description(index, span, mask))
+        span.key: _SpanEntry(span, _span_description(index, span))
         for span in (*index.symbols_in(file), *index.declarations_in(file))
     }
     return tuple(unique[key] for key in sorted(unique, key=lambda key: (unique[key].span.start, key)))
 
 
-def _span_description(index: CodeIndex, span: Span, mask: Mask) -> str:
-    return f"{span.key}: {_preview(index, span.file, span.start, mask)}"
+def _span_description(index: CodeIndex, span: Span) -> str:
+    return f"{span.key}: {_preview(index, span.file, span.start)}"
 
 
-def _preview(index: CodeIndex, file: str, start: int, mask: Mask) -> str:
-    lines = _masked_lines(index.lines(file)[start - 1 : start - 1 + SPAN_PREVIEW_LINES], mask)
+def _preview(index: CodeIndex, file: str, start: int) -> str:
+    lines = index.lines(file)[start - 1 : start - 1 + SPAN_PREVIEW_LINES]
     return " ".join(line.strip() for line in lines if line.strip())[:360]
 
 

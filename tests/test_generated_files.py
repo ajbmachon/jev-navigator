@@ -65,7 +65,7 @@ def test_a_flagged_file_reaches_jev_as_its_path_measured_facts_and_two_excerpts(
     middle_start = (len(text) - EXCERPT_CHARS) // 2
     opening, middle = text[:EXCERPT_CHARS], text[middle_start : middle_start + EXCERPT_CHARS]
 
-    entry = generated_file_entry(index, "web/bundle.js", awaiting["web/bundle.js"], (), SecretMasker())
+    entry = generated_file_entry(index, "web/bundle.js", awaiting["web/bundle.js"], ())
 
     # Each excerpt drops the piece its cut splits, up to the nearest space
     assert entry == {
@@ -91,7 +91,7 @@ def test_importers_are_the_files_whose_imports_resolve_to_it_capped_with_the_tru
     repo = _repository(tmp_path / "repo", {"web/bundle.js": BUNDLE, **importers, **mention_only})
     index, _ = _awaiting(repo)
 
-    entry = generated_file_entry(index, "web/bundle.js", shape_of(repo, "web/bundle.js"), (), SecretMasker())
+    entry = generated_file_entry(index, "web/bundle.js", shape_of(repo, "web/bundle.js"), ())
 
     assert entry["importers"] == sorted(importers)[:MAX_IMPORTERS]
     assert entry["importer_count"] == 12
@@ -168,9 +168,7 @@ def test_files_that_name_a_flagged_path_reach_jev_non_test_files_first_capped_wi
     index, awaiting = _awaiting(repo)
 
     naming = files_naming(repo, list(awaiting))
-    entry = generated_file_entry(
-        index, "web/bundle.js", awaiting["web/bundle.js"], naming["web/bundle.js"], SecretMasker()
-    )
+    entry = generated_file_entry(index, "web/bundle.js", awaiting["web/bundle.js"], naming["web/bundle.js"])
 
     assert entry["named_by"] == [
         {"file": "README.md", "line": 1, "text": "The build rewrites [/web/bundle.js](web/bundle.js)."},
@@ -190,7 +188,7 @@ def test_a_long_naming_line_reaches_jev_as_a_window_that_keeps_the_path(tmp_path
 
     naming = files_naming(repo, list(awaiting))
     [named] = generated_file_entry(
-        index, "web/bundle.js", awaiting["web/bundle.js"], naming["web/bundle.js"], SecretMasker()
+        index, "web/bundle.js", awaiting["web/bundle.js"], naming["web/bundle.js"]
     )["named_by"]
 
     assert NAMING_LINE_CHARS - len("alpha") <= len(named["text"]) <= NAMING_LINE_CHARS
@@ -348,7 +346,6 @@ def test_a_naming_line_after_the_first_with_windows_line_endings_is_sent_as_writ
         "web/gen.js",
         awaiting["web/gen.js"],
         files_naming(repo, ["web/gen.js"])["web/gen.js"],
-        SecretMasker(),
     )["named_by"]
 
     # Assert
@@ -378,7 +375,7 @@ def test_an_excerpt_cut_anywhere_through_a_keyed_secret_sends_none_of_it(tmp_pat
     index, _ = _awaiting(repo)
 
     # Act
-    entries = [generated_file_entry(index, path, shape_of(repo, path), (), SecretMasker()) for path in texts]
+    entries = [generated_file_entry(index, path, shape_of(repo, path), ()) for path in texts]
     masked, _, _ = mask_request({FILES: entries}, {}, SecretMasker())
 
     # Assert
@@ -398,7 +395,7 @@ def _sent_naming_texts(repo: Path, path: str) -> list[str]:
     """The naming text of each file naming ``path``, as the judge would send it, masked."""
     index, awaiting = _awaiting(repo)
     entries = [
-        generated_file_entry(index, path, awaiting[path], (hit,), SecretMasker())["named_by"][0]
+        generated_file_entry(index, path, awaiting[path], (hit,))["named_by"][0]
         for hit in files_naming(repo, [path])[path]
     ]
     masked, _, _ = mask_request({"named_by": entries}, {}, SecretMasker())
