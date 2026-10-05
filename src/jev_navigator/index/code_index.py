@@ -57,7 +57,6 @@ from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
 DEFAULT_WINDOW_RADIUS = 10
-MAX_TEXT_HITS = 20
 # The bytes kept on either side of a text hit, so a hit in a one-line bundle never holds the line.
 TEXT_HIT_CONTEXT_BYTES = 200
 CO_CHANGE_COMMITS = 200
@@ -1017,15 +1016,16 @@ class CodeIndex:
         return self.read_slice(span, origin)
 
     def search_text(
-        self, text: str, max_hits: int = MAX_TEXT_HITS, *, whole_word: bool = False
+        self, text: str, max_hits: int | None = None, *, whole_word: bool = False
     ) -> tuple[TextHit, ...]:
-        """Lines holding ``text``, searched once per text for the life of the index. A hit's text is
-        the line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word`` keeps only
-        matches no word character touches."""
+        """Every line holding ``text``, in file and line order, or only the first ``max_hits`` when a
+        caller bounds them, searched once per text, bound and word rule for the life of the index. A
+        hit's text is the line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word``
+        keeps only matches no word character touches."""
         return self._search_text(text, max_hits, whole_word)
 
     @memoized
-    def _search_text(self, text: str, max_hits: int, whole_word: bool) -> tuple[TextHit, ...]:
+    def _search_text(self, text: str, max_hits: int | None, whole_word: bool) -> tuple[TextHit, ...]:
         found = self._on_available(
             self._available_files(self.files),
             lambda files: tools.ripgrep_fixed(
@@ -1033,7 +1033,7 @@ class CodeIndex:
             ),
         )
         hits = sorted(hit for hit in found if hit.file in self._scope)
-        return tuple(hits[:max_hits])
+        return tuple(hits if max_hits is None else hits[:max_hits])
 
     def imports(self, file: str) -> tuple[str, ...]:
         source = "\n".join(self._lines_of(file))

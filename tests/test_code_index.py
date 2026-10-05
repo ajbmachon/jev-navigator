@@ -955,6 +955,24 @@ def test_an_index_at_a_commit_reads_a_file_whose_name_holds_a_newline(tmp_path: 
     assert (historical.root / "app/plain.py").read_text().endswith("return 2\n")
 
 
+def test_search_text_returns_every_hit_in_file_and_line_order_unless_the_caller_bounds_it(
+    tmp_path: Path,
+) -> None:
+    # Arrange: 27 hits, the last two past the 20 the search once kept by default
+    (tmp_path / "a.py").write_text("".join(f"x{n} = TOKEN\n" for n in range(25)))
+    (tmp_path / "b.py").write_text("y = TOKEN\nz = 1\nw = TOKEN\n")
+    index = CodeIndex(tmp_path, ["a.py", "b.py"])
+
+    # Act
+    every = index.search_text("TOKEN")
+    bounded = index.search_text("TOKEN", max_hits=3)
+
+    # Assert
+    expected = [("a.py", n) for n in range(1, 26)] + [("b.py", 1), ("b.py", 3)]
+    assert [(hit.file, hit.line) for hit in every] == expected
+    assert [(hit.file, hit.line) for hit in bounded] == expected[:3]
+
+
 def test_search_text_reads_a_line_that_is_not_utf8_as_the_index_does(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "labels.py").write_bytes(b'LABEL = "caf\xe9"\nLIMIT = 5\n')

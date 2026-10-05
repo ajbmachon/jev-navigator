@@ -513,7 +513,7 @@ def test_findall_pack_composes_seed_search_with_disconnected_enumeration(tmp_pat
     saved = json.loads((output / "manifest.json").read_text())
     assert manifest["search"]["outcome"] == "scope_examined"
     assert saved["workflow"] == "findall"
-    assert saved["search"]["coverage"] == "functions_examined"
+    assert saved["search"]["coverage"] == "units_examined"
     assert {item["name"] for item in saved["search"]["found"]} == {"admit", "fits"}
     assert saved["seed_search"]["outcome"] == "found"
     assert saved["search"]["calls"] == len(client.requests)
@@ -1225,10 +1225,13 @@ def test_findall_budget_stop_writes_partial_pack_with_completed_results(tmp_path
     saved = json.loads((out / "manifest.json").read_text())
     assert saved["search"]["outcome"] == result["search"]["outcome"]
     assert saved["search"]["calls"] <= cap
-    if cap < 3:
+    if cap == 0:
+        assert saved["search"]["outcome"] == "budget"
+        assert saved["search"]["room_chars"] is None, "the seed search stops before Find All starts"
+    elif cap < 3:
         assert saved["search"]["outcome"] == "budget"
         assert saved["search"]["coverage"] == "partial"
-        assert saved["search"]["remaining_files"]
+        assert saved["search"]["not_judged"]
     else:
         assert saved["search"]["found"]
     assert (out / "report.md").is_file()
@@ -1494,7 +1497,8 @@ def test_find_and_findall_reports_name_each_refused_file_with_its_reason(tmp_pat
             workflow=workflow,
             fact_cache_dir=tmp_path / "facts",
         )
-        reports[workflow] = ((output / "report.md").read_text(), manifest["search"]["unavailable_files"])
+        refused = "unlisted_files" if workflow == "findall" else "unavailable_files"
+        reports[workflow] = ((output / "report.md").read_text(), manifest["search"][refused])
 
     # Assert
     for report, unavailable in reports.values():

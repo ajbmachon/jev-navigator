@@ -42,7 +42,7 @@ from .relations import without_quoted_code
 
 SHARED_STORE_VARIABLE = "JEV_NAVIGATOR_ANSWER_STORE"
 SKELETON_ITEM_FIELDS = frozenset(
-    {"file", "lines", "commit", "file_sha256", "reached_by", "span_key", "name", "place"}
+    {"file", "lines", "runs", "commit", "file_sha256", "reached_by", "span_key", "name", "place"}
 )
 """The item fields a run pack keeps without ``keep_requests``: ids, locations, hashes and names. Every
 other field, such as a Trace link line or a Find signature, can quote code and is withheld; a

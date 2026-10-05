@@ -6,6 +6,8 @@ from git_repos import commit_files, git
 
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import Span
+from jev_navigator.index.units import UnitKind, items_to_judge, list_units, read_ranges
+from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.rebuild import rebuild_request
@@ -99,3 +101,50 @@ def test_a_batch_whose_items_share_a_masked_value_is_rebuilt_exactly(tmp_path: P
     # Assert
     assert "order-hook-4f7a1c" not in str(client.requests[0][0])
     assert rebuilt.matches
+
+
+TWO_RUNS = "LIMIT = 3\n\n\ndef admit(items):\n    return len(items) <= LIMIT\n\n\nSTRICT = True\n"
+
+
+def judge_top_level_at_its_place(repo: Path, store_path: Path) -> CodeIndex:
+    """Judge the top-level unit of a committed file, two runs of lines, at its place."""
+    repo.mkdir()
+    commit_files(repo, {"orders.py": TWO_RUNS})
+    index = CodeIndex.from_git(repo)
+    units = list_units(index, ["orders.py"], box_chars=JEV_INPUT_LIMITS.box_chars).units
+    [top_level] = [unit for unit in units if unit.kind == UnitKind.TOP_LEVEL]
+    assert len(top_level.ranges) == 2, "the unit must span two runs of lines for these tests to tell"
+    [place] = items_to_judge(top_level)
+    entry = {"file": place.file, "code": read_ranges(index, place.file, place.ranges)}
+    Judge(ScriptedJevClient(), store=JsonlAnswerStore(store_path)).check_each(
+        LIMITS, [entry], CLAIM, places=[place]
+    )
+    return index
+
+
+def test_a_top_level_unit_of_several_runs_judged_at_its_place_is_rebuilt_exactly(tmp_path: Path) -> None:
+    # Arrange
+    store_path = tmp_path / "answers.jsonl"
+    index = judge_top_level_at_its_place(tmp_path / "repo", store_path)
+
+    # Act
+    rebuilt = rebuild_request(stored_record(store_path), index, CLAIM)
+
+    # Assert
+    assert rebuilt.matches
+
+
+def test_a_changed_unit_judged_at_its_place_names_its_runs(tmp_path: Path) -> None:
+    # Arrange
+    repo = tmp_path / "repo"
+    store_path = tmp_path / "answers.jsonl"
+    judge_top_level_at_its_place(repo, store_path)
+    (repo / "orders.py").write_text(TWO_RUNS.replace("STRICT = True", "STRICT = False"))
+    git(repo, "commit", "-qam", "relax")
+
+    # Act
+    rebuilt = rebuild_request(stored_record(store_path), CodeIndex.from_git(repo), CLAIM)
+
+    # Assert
+    assert not rebuilt.matches
+    assert rebuilt.differences == ("code of item 0 (orders.py lines 1-1, 8-8)",)

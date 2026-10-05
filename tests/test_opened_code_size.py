@@ -358,11 +358,13 @@ def test_a_neighbour_that_fits_only_unmasked_does_not_fit_alone(tmp_path: Path) 
         return {"file": "app/settings.py", "lines": [1, lines], "code": code}
 
     largest = max(
-        lines for lines in range(400, 700) if plain.fits_alone(check, neighbour(lines), shared, "candidates")
+        lines
+        for lines in range(400, 700)
+        if plain.fits_alone([check], neighbour(lines), shared, "candidates")
     )
 
     # Act
-    fits_masked = masking.fits_alone(check, neighbour(largest), shared, "candidates")
+    fits_masked = masking.fits_alone([check], neighbour(largest), shared, "candidates")
 
     # Assert
     assert not fits_masked

@@ -43,18 +43,19 @@ jvn help findall
 jvn schema findall
 ```
 
-`find` locates an implementation; `findall` finds a seed, examines related functions, then checks
-remaining function bodies for disconnected implementations. It uses batched Jev judgments and
-defaults to 48 live model calls (twice `find`); `--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
-[run folder](#where-jvn-keeps-runs-and-caches). `functions_examined` describes coverage of function bodies, not a proof
-of semantic equivalence or completeness across arbitrary code fragments. Uncertain answers and
+`find` locates an implementation; `findall` finds a seed, then judges every unit in scope (each
+function, method and file's top-level code), the units holding the seed's found code in its first
+wave of requests. It uses batched Jev judgments and defaults to 48 live model calls (twice `find`);
+`--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
+[run folder](#where-jvn-keeps-runs-and-caches). `units_examined` describes coverage of the units in
+scope, not a proof of semantic equivalence or completeness. Uncertain answers and
 unreadable or unsupported source stay visible. At a call stop, the terminal offers another allowance.
 For a later invocation or an agent pipeline, pass `--resume` with the folder the earlier run printed, and the same
 Find All query and scope. Completed judgments and the seed are retained; only unfinished work spends
 new model calls.
 
 For an engineer-authored library composition and its limits, see
-[Extending: seed-first Find All](docs/extending.md#compose-a-seed-first-find-all-search).
+[Extending: judge every unit with Find All](docs/extending.md#judge-every-unit-with-find-all).
 
 ## Install
 
@@ -293,7 +294,8 @@ index.decorator_starts_in(file)  # each decorated function's span and its first 
 index.stubs_in(file)  # functions whose body is only ..., pass, a docstring or raise NotImplementedError
 index.read_slice(span)  # masked as part of its whole file; see Secrets
 index.read_window(file, line, radius=10)
-index.search_text("orders.max_items")  # ripgrep over the narrowed files only
+index.search_text("orders.max_items")  # ripgrep over the narrowed files only, every hit in file and line order
+index.search_text("orders.max_items", max_hits=30)  # only the first 30 hits
 index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
@@ -606,7 +608,8 @@ judge.choose_call(route, offers, state)  # function calling: operation plus its 
 ```
 
 Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all_async`,
-`choose_call_async`, `ask_async`), and `find_code_async` is the async search. They take any
+`choose_call_async`, `ask_async`, and `iter_check_every_async`, which yields each wave's answers as
+the wave settles), and `find_code_async` and `find_all_async` are the async searches. They take any
 `AsyncJevClient` (an object with `model` and `async ask(state, questions)`, optionally an async
 `send`), such as a host's own orchestrator; a sync client also works there and runs in a worker
 thread. Both paths share one core: masking, the secret scan, the hash, the store lookup, the call
@@ -620,6 +623,11 @@ forms send their batches on a thread pool under the same `max_concurrency` and f
 call cap stays exact under concurrency, and after a failure or cancellation no batch sends a new
 request, while answers already received still yield. A sync method given an async client raises
 `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
+
+Places: `check_each`, `check_every` and their `iter_` and async forms take `places`, one
+`index.units.Item` per item, when items are code units. A place orders the batches (file, then
+lines) and goes into the stored record, never into the state, so each item carries only the fields a
+question reads; each `CheckResult` names its `place`.
 
 Budgets: `judge.calls` counts requests sent (store hits are free; `judge.replayed_answers` counts
 the answers the store gave instead). `Judge(max_calls=N)` caps a judge
@@ -635,36 +643,49 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `JEV_NAVIGATOR_CHOICE_MIN_CONFIDENCE`, `JEV_NAVIGATOR_NOUL_YES_AT` and `JEV_NAVIGATOR_NOUL_NO_AT` (via
   `Thresholds.from_env()` at the edge), then a directive's defaults, then per-call overrides
   (`judge.effective(directive, call)`).
-- **Secrets.** `SecretMasker` masks secret values and keeps code. It hides private keys, token
-  shapes, password hashes (bcrypt, argon2), Bearer values, passwords and secret query values in URLs,
-  env-file values, quoted, bare and fallback values under secret-named keys, and literal arguments to
-  secret-named calls that look like key material, plus high-entropy quoted values in assignments. A
-  key holds a secret when a secret word (including `pass`, `pwd` and `credentials`) is one of its
+- **Secrets.** `SecretMasker` masks secret values and keeps code (rules in `judgments/secret_shapes.py`,
+  `secret_structures.py` and `secret_values.py`). It hides private keys, token shapes, password hashes
+  (bcrypt, argon2), Bearer values, passwords and secret query values in URLs, and values under
+  secret-named keys: shell and env-file words, quoted values (with escapes, prefixes such as `b"..."`,
+  triple quotes, across lines, or never closed), YAML block and continued values, nested values that
+  hold a literal, plain words, fallbacks after a reference, and literal arguments to secret-named
+  calls that look like key material; plus high-entropy quoted values that are not identifier words.
+  A key holds a secret when a secret word (including `pass`, `pwd` and `credentials`) is one of its
   parts; `max_tokens`, `tokenizer` and `bypass` hold none. Under a key the secret word ends
-  (`DB_PASSWORD`, `authToken`, `db_pass`) every literal is hidden. Under a key a naming word ends
-  (`SECRET_ENV`, `token_url`, `CREDENTIAL_PATTERNS`) only a credential-looking word is hidden: one word of
-  eight or more characters that is not a name, a path or a URL. Under any other suffix
-  (`SECRET_KEY_BASE`, `GH_TOKEN_RO`) every literal is hidden except an environment variable's name, a
-  path or a URL. A value that repeats its key (`PASS: "PASS"`) is kept, unless it is a common default
-  password such as `password`. A long unquoted run of letters and digits is a value, not a reference.
+  (`DB_PASSWORD`, `authToken`, `db_pass`) every literal is hidden, in tables and blocks too. Under a key
+  a naming word ends (`SECRET_ENV`, `token_url`, `CREDENTIAL_PATTERNS`) only a credential-looking word
+  is hidden: one word of eight or more characters that is not a name, a path or a URL. Under any other
+  suffix (`SECRET_KEY_BASE`, `GH_TOKEN_RO`) every string literal is hidden, sentences and passphrases
+  too, except an environment variable's name, a path or a URL; that includes a block scalar and the
+  literals concatenated onto one, while a nested table's inner keys are judged on their own. Under a
+  key a message word ends (`PASSWORD_ERROR`, `TOKEN_HELP_TEXT`) a sentence is kept. A value that
+  repeats its key (`PASS: "PASS"`) is kept, unless it is a common default password such as
+  `password`. A long unquoted run of letters and digits is a value, not a reference.
   The masker reads a slice as its file type: in a config file (`.yml`, `.yaml`, `.env`, `.ini`, `.cfg`,
   `.conf`, `.properties`, `.toml`, a Dockerfile) or in text from no file, an unquoted value under a
   secret key is masked too (`POSTGRES_PASSWORD: example`), unless it is empty, a boolean or a whole
   `${VAR}`, `$VAR` or `${{ ... }}` reference; in code it stays (`token: str`). A request mapping's
-  `file` names the file of the strings inside it. An upper-case environment assignment is a value wherever it stands on a
-  shell, Makefile or CI line (`run: API_TOKEN=... npm test`), unless it is a usage placeholder
-  (`KEY=...`, `KEY=<credential>`). `is_high_entropy`, `HIGH_ENTROPY_MIN_CHARS` and
-  `TOKEN_CHARACTER_CLASS` are public, for callers that judge a lone token. A secret flag on a command line
-  (`psql --password=...`, `deploy --api-token ...`) and a Stripe secret key anywhere are values too. A reference stays code: an identifier, dotted
-  path, call, a whole `${...}` or `$(...)`, or `$NAME` outside single quotes, so
-  `secret: process.env.AUTH_SECRET` reaches Jev unchanged. Every rule scans in time linear in the line
-  length. Masking works by content: a value hidden in one place is hidden everywhere
-  in the request, for example where a relation text or another candidate quotes it; a value of 8 or
-  more characters wherever it appears, a shorter one as a whole word, and a number of at most four
-  characters or a value without letters or digits only where it stands. JVN's own question wording
-  (instructions, and the criteria of a question that is not a choice) keeps its words, and a key of
-  the request equal to a short masked value does not refuse it. In a code file a plain identifier under a secret-named key
-  (`{ password: changeme }`) reads as code; in YAML it is a value.
+  `file` names the file of the strings inside it, and a candidate's signature names its file the same
+  way (the signature builders in `directives/places.py` write it, and `located_file` in `directives/place_signatures.py` parses
+  exactly that grammar); a signature that names no file, or whose file is ambiguous, reads as config. An upper-case environment assignment is a value
+  wherever it stands on a shell, Makefile or CI line (`run: API_TOKEN=... npm test`), unless it is a
+  usage placeholder (`KEY=...`, `KEY=<credential>`). A secret flag on a command line
+  (`psql --password=...`, `deploy --api-token ...`) and a Stripe secret key anywhere are values too.
+  `is_high_entropy`, `HIGH_ENTROPY_MIN_CHARS` and `TOKEN_CHARACTER_CLASS` are public, for callers that
+  judge a lone token. A reference stays code: an identifier, dotted path, call, a whole `${...}`, a
+  command substitution `$(...)`, or `$NAME` outside single quotes, so `secret: process.env.AUTH_SECRET`
+  reaches Jev unchanged, and so does nested metadata such as a Kubernetes `secret:` volume. Every rule
+  scans in time linear in the text length. The analysis engine's audit-masker corpus is shared in
+  `tests/test_secret_shape_corpus.py`. Masking works by content: a value hidden in one place is hidden
+  everywhere in the request, for example where a relation text or another candidate quotes it; a value
+  of 8 or more characters wherever it appears, a shorter one as a whole word, and a number of at most four characters or a value without letters
+  or digits only where it stands. JVN's own question wording (instructions, and the criteria of a
+  question that is not a choice) keeps its words, and a key of the request equal to a short masked
+  value does not refuse it.
+  A quoted value may run across lines (triple quotes, template literals, text blocks) or sit in
+  parentheses with its joined parts; a quote that closes a string the key sat in opens no value; a string
+  that is not hidden is read again for the secret assignments inside it; and a value inside another
+  quote's string ends where that string closes.
   The complete candidate set is masked once, before packing, so copied values stay hidden across
   batches; the final scan still runs on every request before it is sent.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
@@ -720,9 +741,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `record.sent_request()`, with a judge that has no store. `JsonlJournal(keep_request_text=True)`
   likewise keeps the body as handed to the client (`body_base64`) and the wire bytes when captured
   (`sent_body_base64`), and `export_for_review` keeps the order the request is sent in. By default the store keeps
-  hashes, question wording, and each item's ids, file, lines, commit and names, so
-  `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from the code at
-  that commit and proves it matches, or names the part that differs. A request whose items carried a
+  hashes, question wording, and each item's ids, file, lines, commit and names, or its place's file
+  and runs, so `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from
+  the code at that commit and proves it matches, or names the part that differs. A request whose items carried a
   field that can quote code, such as a Trace link line or a Find signature, keeps that field withheld,
   so it does not rebuild exactly; the mismatch then names the withheld fields first.
 

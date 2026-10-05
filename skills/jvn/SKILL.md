@@ -13,7 +13,7 @@ Choose the operation by the evidence needed:
 | Exact identifier, literal or filename | `rg` / `rg --files` |
 | Exact callers or references of a resolved symbol | Compiler/reference tooling or JVN's `CodeIndex`; model judgment is unnecessary |
 | Locate an implementation described by behavior | `jvn find` |
-| Enumerate functions implementing a specified behavior, including disconnected implementations | `jvn findall` |
+| Enumerate every function, method or top-level code implementing a specified behavior, however connected | `jvn findall` |
 | Follow relationships around a known function and assess workflow evidence | `jvn trace` |
 | Independently score source chunks against a property | `jgrep`; inspect its scope/omissions separately |
 
@@ -52,7 +52,8 @@ as `path:line name`, key mentions as `mentions a key (path:line)`), so open it t
 for your own or open-source code. Resume works without it. `provider.input_tokens` adds only the
 counts the provider reported; `responses_without_usage` counts responses that reported none (null
 when resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free.
-Findall covers indexed function bodies; uncertain, unsupported and unexamined code remain gaps.
+Findall covers every function, method and file's top-level code in scope; uncertain, unsupported and
+unexamined code remain gaps.
 Trace expands the whole connected component: not a precise data-flow slice, nor proof the path is
 complete. Its five judgments cover input, transformation, handoff, outcome and relevant branches.
 
@@ -74,7 +75,7 @@ offers another allowance in a terminal (never in JSON or pipes); continue with t
 `--resume /path/to/previous-pack`; completed Findall judgments remain. Ctrl+C cancels; a cancelled
 Trace may leave a journal without a manifest; keep its output.
 
-Find All and Trace judge at most 16 functions per request and send their requests in parallel; a Find
+Find All and Trace judge at most 16 units per request and send their requests in parallel; a Find
 opening still asks about all its neighbours in one request. Every answer goes to one shared answer
 store, `$XDG_CACHE_HOME/jev-navigator/answers-v2.sqlite` (`~/.cache` when unset or relative), which
 holds hashes, locations and answers, never code, and forgets a request no run reused for 30 days. A later run at the same commit replays from it after the

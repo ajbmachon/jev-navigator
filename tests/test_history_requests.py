@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 
 import pytest
-from git_repos import commit_files
 from test_cli_run_logs import TARGET, limit_client, marked_repository
 from test_history import FETCHED_HOLDS_LIMIT
 from test_typesafe import _jev_server, _seed_index, _stop
@@ -201,60 +200,6 @@ def test_the_stop_step_names_the_answer_of_its_last_stop_check(sample_index, tmp
     records = [json.loads(line) for line in journal_path.read_text().splitlines()]
     stop_check = result.history.steps[-1].judgments["last_stop_check"]
     assert answered_probability(records, stop_check["answered_by"]) == stop_check["probability"]
-
-
-def test_a_find_all_pack_saved_before_question_ids_were_recorded_still_resumes(tmp_path: Path) -> None:
-    # Arrange: a budget stop during enumeration, its saved answers stripped of their question ids
-    repository = tmp_path / "repository"
-    commit_files(
-        repository,
-        {
-            "entry.py": "from policy import admit\n\ndef handle(item):\n    return admit(item)\n",
-            "policy.py": "def admit(item):\n    return len(item) <= 3\n",
-            "other.py": "def fits(item):\n    return len(item) <= 3\n",
-        },
-    )
-
-    def response(question_id, question, state):
-        code = (
-            state["items"][int(question_id.rsplit("#", 1)[1])]["code"]
-            if "items" in state
-            else state["slice"]["code"]
-        )
-        return 0.96 if "len(item)" in code else 0.04
-
-    first = tmp_path / "first"
-    stopped = create_evidence_pack(
-        repository,
-        (),
-        "item limit",
-        ("entry.py:3",),
-        first,
-        SearchBudget(max_calls=3, beam_width=1),
-        ScriptedJevClient(nouls=response),
-        workflow="findall",
-    )
-    checkpoint = json.loads((first / "resume.json").read_text())
-    assert all(answer.pop("question_id") for answer in checkpoint["completed"])
-    (first / "resume.json").write_text(json.dumps(checkpoint))
-
-    # Act
-    resumed = create_evidence_pack(
-        repository,
-        (),
-        "item limit",
-        ("entry.py:3",),
-        tmp_path / "second",
-        SearchBudget(max_calls=1, beam_width=1),
-        ScriptedJevClient(nouls=response),
-        workflow="findall",
-        resume_from=first,
-    )
-
-    # Assert
-    assert stopped["search"]["outcome"] == "budget"
-    assert resumed["search"]["outcome"] == "scope_examined"
-    assert {entry["name"] for entry in resumed["search"]["found"]} == {"admit", "fits"}
 
 
 def test_each_entry_selection_decision_joins_to_the_answer_that_chose_it(tmp_path: Path) -> None:

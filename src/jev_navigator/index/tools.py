@@ -266,7 +266,13 @@ def _stderr_text(errors: IO[bytes]) -> str:
 
 
 def ripgrep_fixed(
-    text: str, files: Sequence[str], cwd: Path, max_hits: int, context_bytes: int, *, whole_word: bool = False
+    text: str,
+    files: Sequence[str],
+    cwd: Path,
+    max_hits: int | None,
+    context_bytes: int,
+    *,
+    whole_word: bool = False,
 ) -> list[TextHit]:
     """``ripgrep_windows`` for the exact ``text``; ``whole_word`` keeps only hits no word character
     touches."""
@@ -277,10 +283,10 @@ def ripgrep_fixed(
 
 
 def ripgrep_windows(
-    hit_pattern: str, files: Sequence[str], cwd: Path, max_hits: int, context_bytes: int
+    hit_pattern: str, files: Sequence[str], cwd: Path, max_hits: int | None, context_bytes: int
 ) -> list[TextHit]:
     """The lines matching the ripgrep regular expression ``hit_pattern``, at most ``max_hits`` per
-    file, each as the bytes around one hit: up to ``context_bytes`` before and after, so a one-line
+    file or every one when it is None, each as the bytes around one hit: up to ``context_bytes`` before and after, so a one-line
     bundle costs no more than a short line. The match runs on to the end of the line, so each line
     matches once, and ``--replace`` prints only the hit and its context, each on its own line;
     ripgrep's JSON would carry the whole line."""
@@ -288,8 +294,9 @@ def ripgrep_windows(
         return []
     context = f"(?-u:.){{0,{context_bytes}}}"
     pattern = f"(?P<before>{context})(?P<hit>{hit_pattern})(?P<after>{context})(?-u:.)*"
-    command = [*RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null"]
-    command += ["--max-count", str(max_hits), "--replace", _WINDOW_FIELDS, "--regexp", pattern, "--"]
+    per_file = [] if max_hits is None else ["--max-count", str(max_hits)]
+    command = [*RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null", *per_file]
+    command += ["--replace", _WINDOW_FIELDS, "--regexp", pattern, "--"]
     windows: dict[tuple[str, int], TextHit] = {}
     for chunk in file_chunks(files, bytes_only=True):
         output = command_output([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)

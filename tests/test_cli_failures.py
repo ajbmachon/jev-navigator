@@ -13,7 +13,6 @@ from test_cli_run_logs import TARGET, limit_client, marked_repository
 
 from jev_navigator import cli
 from jev_navigator.cli import create_evidence_pack
-from jev_navigator.directives.find_all import CONTAINS_IMPLEMENTATION
 from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.judgments.journal import RawAttempt, RawResponse
 from jev_navigator.judgments.questions import request_sha256
@@ -118,7 +117,7 @@ def enumerating(name: str) -> Callable[[int, Mapping], bool]:
 
     def holds(position: int, state: Mapping) -> bool:
         del position
-        return any(item.get("name") == name for item in state.get("items", []))
+        return any(item.get("code", "").startswith(f"def {name}(") for item in state.get("items", []))
 
     return holds
 
@@ -156,9 +155,10 @@ def verdicts(manifest: dict) -> list[tuple[str, str, str]]:
 
 
 def items_asked(requests: list[tuple[Mapping, Mapping]]) -> list[str]:
-    """Each enumerated item once per request that asked it, by span key: batches regroup on Resume,
+    """Each enumerated item once per request that asked it, by its content: batches regroup on Resume,
     so request hashes differ while the items asked must not."""
-    return sorted(item["span_key"] for state, _ in requests for item in state.get("items", []))
+    items = (item for state, _ in requests for item in state.get("items", []))
+    return sorted(json.dumps(item, sort_keys=True) for item in items)
 
 
 def uninterrupted_requests(repository: Path, tmp_path: Path) -> tuple[dict, list[str]]:
@@ -348,7 +348,7 @@ def test_a_find_all_whose_seed_search_fails_never_starts_its_enumeration(
     # Assert
     assert status == 1
     assert manifest_of(tmp_path / "findall")["search"]["outcome"] == "failed"
-    assert not any(map(asks(CONTAINS_IMPLEMENTATION.question_id), failing.received))
+    assert not any(map(asks(cli.FIND_ALL_QUESTION.question_id), failing.received))
     assert (tmp_path / "findall" / "resume.json").is_file()
 
 

@@ -38,6 +38,7 @@ from .spans import Span, holder_of
 PIECE_LINES = 60
 TOP_LEVEL_SYMBOL = "<top level>"
 UNSUPPORTED_LANGUAGE = "language not supported"
+OUTSIDE_SCOPE = "not in the index scope"
 _UNLISTED_TOP_LEVEL = (
     "top-level code of only imports, comments, directives and brackets, which a listing leaves out"
 )
@@ -116,14 +117,18 @@ def list_units(index: CodeIndex, files: Sequence[str], *, box_chars: int) -> Uni
     code, in file order and then by position, parsing every source file in one batched scan. Every
     line of code is in a listed unit. A file whose top-level code is only imports, comments,
     directives (``"use client"``), lines of closing brackets and blank lines lists no top-level unit.
-    A file in a language JVN does not parse, or gone since the inventory, is named in ``unlisted``.
+    A file in a language JVN does not parse, gone since the inventory, or outside the index's scope is
+    named in ``unlisted``, the last with the index's own reason where it has one.
     ``box_chars`` is the room one unit's text has in a request, as ``serialized_chars`` counts it: the
     client's box (``InputLimits.box_chars``) less what the request carries beside the unit."""
     files = tuple(dict.fromkeys(files))
-    source_files = tuple(file for file in files if language_of(file))
+    in_scope = frozenset(index.files)
+    not_indexed = index.not_indexed_files
+    unlisted = {file: not_indexed.get(file, OUTSIDE_SCOPE) for file in files if file not in in_scope}
+    source_files = tuple(file for file in files if file in in_scope and language_of(file))
     index.functions_in_files(source_files)
     units = tuple(unit for file in source_files for unit in _SourceFile(index, file, box_chars).listed)
-    unlisted = {file: UNSUPPORTED_LANGUAGE for file in files if not language_of(file)}
+    unlisted |= {file: UNSUPPORTED_LANGUAGE for file in files if file in in_scope and not language_of(file)}
     unlisted |= {file: reason for file, reason in index.unavailable_files.items() if file in files}
     return UnitListing(units, unlisted)
 

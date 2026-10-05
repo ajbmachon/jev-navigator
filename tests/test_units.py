@@ -485,6 +485,23 @@ def test_a_file_gone_after_the_inventory_is_named_not_listed(tmp_path: Path) -> 
     assert listing.unlisted == {"app/gone.py": "disappeared after inventory"}
 
 
+def test_a_file_the_index_never_held_is_named_with_the_index_reason_not_raised(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    write_files(root, {"app/kept.py": "def kept():\n    return 1\n"})
+    commit_all(root)
+    index = CodeIndex.from_git(root, ["app/kept.py", "app/removed.py"], fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    listing = list_units(index, ["app/kept.py", "app/removed.py", "app/never_asked.py"], box_chars=JEV_BOX)
+
+    # Assert: the index's own reason where it has one, else that the file is outside its scope.
+    assert [unit.id for unit in listing.units] == ["app/kept.py:1-2"]
+    assert listing.unlisted == {
+        "app/removed.py": "no file at this path",
+        "app/never_asked.py": "not in the index scope",
+    }
+
+
 def test_top_level_code_over_the_box_is_cut_into_pieces(shop: CodeIndex) -> None:
     # Act
     top = _units_by_id(shop, ("app/table.py",), TABLE_BOX)["app/table.py:top"]

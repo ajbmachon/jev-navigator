@@ -17,7 +17,7 @@ from git_repos import commit_files
 from isolated_jvn import JVN
 from stored_messages import digested
 
-from jev_navigator.cli import create_evidence_pack
+from jev_navigator.cli import FIND_ALL_QUESTION, create_evidence_pack
 from jev_navigator.cli_resume import load_resume
 from jev_navigator.cli_trace import create_trace_evidence_pack
 from jev_navigator.directives.find_code import SearchBudget
@@ -234,7 +234,9 @@ def test_a_run_resumed_from_a_pack_that_saved_neighbour_code_holds_no_code_text(
     first, second = tmp_path / "first", tmp_path / "second"
     find_pack(repository, first, "find", 1)
     index = CodeIndex.from_directory(repository, ("app/",), fact_cache_dir=tmp_path / "fact-cache")
-    frontier = load_resume(first / "resume.json", index).result.not_inspected
+    frontier = load_resume(
+        first / "resume.json", index, find_all_question=FIND_ALL_QUESTION.question_id
+    ).result.not_inspected
     save_as_before_labels(first, {entry.place_key: entry.signature for entry in frontier})
     assert files_holding_code(first) == ["journal.jsonl", "manifest.json", "resume.json"]
 

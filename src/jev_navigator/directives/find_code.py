@@ -811,7 +811,7 @@ def _neighbour_request_fits(search: _Search, judge: Judge, largest: Mapping | No
     """Whether asking about the opening's largest neighbour alone beside ``shown`` fits the judge's
     input box."""
     shared = _opened_state(search.target, shown)
-    return largest is None or judge.fits_alone(_neighbour_check(search), largest, shared, "candidates")
+    return largest is None or judge.fits_alone([_neighbour_check(search)], largest, shared, "candidates")
 
 
 def _largest_neighbour(search: _Search, opening: _Opening) -> Mapping | None:

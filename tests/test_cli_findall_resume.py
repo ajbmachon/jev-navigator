@@ -10,8 +10,21 @@ from jev_navigator.cli import create_evidence_pack
 from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.testing import ScriptedJevClient
 
+HELPERS = "".join(f"def helper_{number}(value):\n    return value + {number}\n\n" for number in range(20))
 
-def test_findall_reopens_remaining_functions_without_repeating_completed_judgments(tmp_path: Path):
+
+def enumerated(client: ScriptedJevClient) -> list[str]:
+    """Each item a Find All request asked, by its content."""
+    return [
+        json.dumps(item, sort_keys=True)
+        for state, _ in client.requests
+        if "targets" in state
+        for item in state["items"]
+    ]
+
+
+def test_findall_reopens_remaining_units_without_repeating_completed_judgments(tmp_path: Path):
+    # Arrange: 23 units, so Find All needs two requests and a cap of three calls stops after the first
     repository = tmp_path / "repository"
     commit_files(
         repository,
@@ -19,6 +32,7 @@ def test_findall_reopens_remaining_functions_without_repeating_completed_judgmen
             "entry.py": "from policy import admit\n\ndef handle(item):\n    return admit(item)\n",
             "policy.py": "def admit(item):\n    return len(item) <= 3\n",
             "other.py": "def fits(item):\n    return len(item) <= 3\n",
+            "helpers.py": HELPERS,
         },
     )
 
@@ -42,7 +56,7 @@ def test_findall_reopens_remaining_functions_without_repeating_completed_judgmen
         workflow="findall",
     )
     assert initial["search"]["outcome"] == "budget"
-    assert {x["name"] for x in initial["search"]["found"]} == {"admit"}
+    assert initial["search"]["not_judged"]
     second_client = ScriptedJevClient(nouls=response)
     resumed = create_evidence_pack(
         repository,
@@ -56,13 +70,14 @@ def test_findall_reopens_remaining_functions_without_repeating_completed_judgmen
         resume_from=first,
     )
     assert resumed["search"]["outcome"] == "scope_examined"
-    assert resumed["search"]["coverage"] == "functions_examined"
+    assert resumed["search"]["coverage"] == "units_examined"
     assert {x["name"] for x in resumed["search"]["found"]} == {"admit", "fits"}
     assert resumed["search"]["calls"] == 4
     assert resumed["search"]["calls_this_invocation"] == 1
     assert resumed["seed_search"] == initial["seed_search"]
     assert len(second_client.requests) == 1
-    assert [x["name"] for x in second_client.requests[0][0]["items"]] == ["fits"]
+    assert not set(enumerated(first_client)) & set(enumerated(second_client))
+    assert len(enumerated(first_client)) + len(enumerated(second_client)) == 23
 
     checkpoint = json.loads((first / "resume.json").read_text())
     checkpoint["check_id"] = "previous-containment-question"
@@ -114,6 +129,6 @@ def test_findall_budget_stop_during_seed_search_continues_the_same_work(tmp_path
             break
         assert manifest["search"]["coverage"] == "partial"
         previous = output
-    assert manifest["search"]["coverage"] == "functions_examined"
+    assert manifest["search"]["coverage"] == "units_examined"
     assert {x["name"] for x in manifest["search"]["found"]} == {"handle", "admit", "fits"}
-    assert manifest["search"]["calls"] == len(provider.requests) == 4
+    assert manifest["search"]["calls"] == len(provider.requests) == 3

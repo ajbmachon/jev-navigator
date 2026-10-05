@@ -14,7 +14,7 @@ that are absent from the source?” rather than “find everything important”.
 - [JSON requests](#json-requests)
 - [Results, progress and exit status](#results-progress-and-exit-status)
 - [Agent workflow](#agent-workflow)
-- [Find All function search](#find-all-function-search)
+- [Find All unit search](#find-all-unit-search)
 - [Workflow trace](#workflow-trace)
 - [Structural measurements](#structural-measurements)
 - [Disk use and housekeeping](#disk-use-and-housekeeping)
@@ -229,19 +229,27 @@ Schema discovery and structured calls take inspiration from the
 [Google Workspace CLI's agent guidance](https://github.com/googleworkspace/cli/blob/main/CONTEXT.md).
 The Python library remains the interface for composing a custom planner or a broader workflow.
 
-## Find All function search
+## Find All unit search
 
 Use `jvn findall "functions enforcing the order item limit"` with the same scope, output and
 request-display options as `find`. `jvn schema findall` describes the JSON input. Find All defaults
 to 48 live model calls, twice the 24-call `find` default. Use `--max-calls N` to change it or
-`--max-calls none` (JSON `null`) to remove it. Parsing, graph traversal and cached answers are free. Depth/step/neighbour and preview options affect seed discovery only; the
-function enumeration reads complete bodies. The call allowance is shared across seed discovery and enumeration. A budget stop writes completed
-judgments and remaining coverage to a partial evidence pack.
+`--max-calls none` (JSON `null`) to remove it. Parsing and cached answers are free. Depth/step/neighbour
+and preview options affect seed discovery only. Find All then judges every unit in scope, each
+function, method and file's top-level code, with the units that hold the seed's found code in its first
+wave of requests;
+a unit larger than its room in a request is judged by its 60-line pieces and scored by its best one.
+The call allowance is shared across seed discovery and enumeration. A budget stop writes completed
+judgments and the units not yet judged to a partial evidence pack.
 
-The result includes `seed_search`, and `search` records `found`, `unsure`, `searched`, source hashes,
-request identities, the static graph and coverage gaps. `functions_examined` means every enumerated
-function was judged; it does not prove the model found every behavior. `scope_incomplete` retains
-unsupported, unparsed or unavailable files; a file too large to parse safely is unavailable, and report.md names each unavailable file with its reason. See the library composition in [extending.md](extending.md#compose-a-seed-first-find-all-search).
+The result includes `seed_search`, and `search` records the `found`, `unsure` and `searched` units
+(each with its kind, name, file and runs of lines, the piece judged when it was cut, its answer and
+request identity), `room_chars`, `not_judged` (each unit or piece left unjudged, with the reason)
+and coverage gaps: `unlisted_files`, `unresolved_seeds`, `unparsed_files` and `not_indexed_files`.
+`units_examined` means every unit was judged; it does not prove the model found every behavior.
+`scope_incomplete` retains files JVN does not parse or could not read, unparsed files and pieces too
+large to judge; a file too large to parse safely is unlisted, and report.md names each unlisted file
+with its reason. See the library composition in [extending.md](extending.md#judge-every-unit-with-find-all).
 
 `seed_search.calls` counts seed discovery; `search.enumeration_calls` counts the following enumeration.
 Their sum is `search.calls`, the whole workflow's actual model-request count.
@@ -254,9 +262,9 @@ jvn --json '{"command":"findall","target":"functions enforcing the order item li
 
 A stop during seed selection resumes that stage first. Once enumeration has begun, continuation
 restores the seed and all completed judgments, including negative and uncertain answers, and
-examines only the outstanding functions. Static graph reconstruction reuses parser caches; it is
-not a paid call. `calls_this_invocation` shows new calls; `calls` and `enumeration_calls` are cumulative.
-Source, scope, target, thresholds, model and containment-question identity must still match.
+judges only the outstanding units. `calls_this_invocation` shows new calls; `calls` and
+`enumeration_calls` are cumulative. Source, scope, target, thresholds, model and the Find All
+question must still match.
 
 ## Workflow trace
 

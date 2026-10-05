@@ -15,6 +15,7 @@ from git_repos import commit_files
 from isolated_jvn import JVN
 
 from jev_navigator import cli
+from jev_navigator.cli import FIND_ALL_QUESTION
 from jev_navigator.cli_resume import load_resume, save_resume
 from jev_navigator.directives.find_code import SearchBudget, find_code
 from jev_navigator.directives.places import MOVES, function_place
@@ -49,7 +50,7 @@ def test_saved_find_frontier_restores_relationship_binding(tmp_path: Path) -> No
     # Act
     save_resume(resume_file, index, result, labels=PlaceLabels(index), entry_pending=False)
     saved = json.loads(resume_file.read_text())
-    restored = load_resume(resume_file, index)
+    restored = load_resume(resume_file, index, find_all_question=FIND_ALL_QUESTION.question_id)
 
     # Assert
     frontier_record = saved["result"]["not_inspected"][0]
@@ -95,7 +96,9 @@ def test_a_resumed_search_that_stops_again_keeps_its_frontier_names_while_the_pa
     )
     save_resume(tmp_path / "first.json", first, stopped, labels=PlaceLabels(first), entry_pending=False)
     resumed = CodeIndex(repository, list(files), fact_cache_dir=tmp_path / "resumed-facts")
-    checkpoint = load_resume(tmp_path / "first.json", resumed)
+    checkpoint = load_resume(
+        tmp_path / "first.json", resumed, find_all_question=FIND_ALL_QUESTION.question_id
+    )
     killed = tmp_path / "killed-bin"
     killed.mkdir()
     (killed / tools.AST_GREP).write_text("#!/bin/sh\nkill -9 $$\n")
@@ -135,7 +138,9 @@ def test_a_restored_place_set_aside_again_carries_its_code_signature(tmp_path: P
     budget = SearchBudget(max_steps=1, beam_width=1)
     stopped = find_code(index, Judge(unsure), "the check function", [start], moves=moves, budget=budget)
     save_resume(tmp_path / "resume.json", index, stopped, labels=PlaceLabels(index), entry_pending=False)
-    restored = load_resume(tmp_path / "resume.json", index).result
+    restored = load_resume(
+        tmp_path / "resume.json", index, find_all_question=FIND_ALL_QUESTION.question_id
+    ).result
 
     class InterruptingClient:
         model = "interrupting"

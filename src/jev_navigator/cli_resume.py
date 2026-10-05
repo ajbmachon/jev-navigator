@@ -12,6 +12,7 @@ from .directives.places import Place, place_relationship, restored_signature
 from .index.bindings import Binding
 from .index.code_index import CodeIndex
 from .index.spans import Span
+from .index.units import Item
 from .judgments.judge import CheckResult
 from .judgments.thresholds import NoulVerdict
 from .run_files import PlaceLabels, is_place_label, relation_shown, relationship_shown
@@ -27,7 +28,6 @@ class SavedSearch:
 
     result: FindResult | None
     completed: tuple[CheckResult, ...] | None = None
-    check_id: str | None = None
     frontier_labels: dict[str, str] = field(default_factory=dict)
 
 
@@ -87,8 +87,10 @@ def save_resume(
     return unavailable
 
 
-def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
-    """Return a fresh-index frontier, or None when entry selection must be replayed."""
+def load_resume(path: Path, index: CodeIndex, *, find_all_question: str) -> SavedSearch:
+    """Return a fresh-index frontier, or None when entry selection must be replayed. An enumeration
+    saved under another Find All question than ``find_all_question`` is refused: its answers are to
+    another question."""
     state = json.loads(path.read_text())
     if state.get("version") != STATE_VERSION:
         raise ValueError("unsupported find resume state version")
@@ -98,6 +100,8 @@ def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
         return SavedSearch(None)
     if state.get("stage") not in ("navigation", "enumeration"):
         raise ValueError("invalid find resume stage")
+    if state["stage"] == "enumeration" and state.get("check_id") != find_all_question:
+        raise ValueError("Find All question changed since the evidence pack; start a new search")
     record = state["result"]
     result = FindResult(
         outcome=Outcome(record.get("outcome", Outcome.BUDGET)),
@@ -113,15 +117,25 @@ def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
     )
     completed = None
     if state["stage"] == "enumeration":
-        completed = tuple(
-            CheckResult(**{**item, "verdict": NoulVerdict(item["verdict"])}) for item in state["completed"]
-        )
+        completed = tuple(_read_answer(item) for item in state["completed"])
     labels = {
         item["place_key"]: item["signature"]
         for item in record["not_inspected"]
         if is_place_label(item["place_key"], item["signature"])
     }
-    return SavedSearch(result, completed, state.get("check_id"), labels)
+    return SavedSearch(result, completed, frontier_labels=labels)
+
+
+def _read_answer(record: dict) -> CheckResult:
+    place = record["place"]
+    ranges = tuple((start, end) for start, end in place["ranges"])
+    return CheckResult(
+        **{
+            **record,
+            "verdict": NoulVerdict(record["verdict"]),
+            "place": Item(place["id"], place["file"], ranges),
+        }
+    )
 
 
 def _result_record(result: FindResult, labels: PlaceLabels) -> dict:

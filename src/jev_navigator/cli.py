@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -25,13 +26,13 @@ from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_stat
 from .cli_trace import create_trace_evidence_pack, not_indexed_lines, unavailable_file_lines
 from .data_root import default_run_folder
 from .directives.entry import EntrySelection, choose_initial_candidates
-from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
+from .directives.find_all import FindAllResult, UnitScore, find_all, match_check
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code, search_failure
 from .directives.places import Place, place_for_line
 from .environment import checkout_root, load_typesafe_environment
 from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
 from .index.code_index import CodeIndex
-from .index.languages import language_of
+from .index.units import RangeAnchor
 from .judgments.answers import answered_by
 from .judgments.client import JevClient
 from .judgments.journal import (
@@ -48,8 +49,7 @@ from .judgments.store import (
     run_answer_store,
     shared_store_path,
 )
-from .judgments.thresholds import Thresholds
-from .operations import TraceGraph
+from .judgments.thresholds import NoulVerdict, Thresholds
 from .progress import ProgressJournal, TerminalProgress
 from .run_files import (
     PlaceLabels,
@@ -79,6 +79,8 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_line_chars")
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
 RESUMABLE_OUTCOMES = (Outcome.BUDGET, Outcome.CANCELLED, Outcome.FAILED)
+FIND_ALL_TARGET = "target"
+FIND_ALL_QUESTION = match_check(FIND_ALL_TARGET)
 """A search that stopped before it finished: it saves its frontier, a Find All does not enumerate
 after it, and ``--resume`` continues it."""
 OUT_HELP = (
@@ -345,13 +347,13 @@ def create_evidence_pack(
         if previous is not None:
             if previous["source"]["revision"] != index.commit:
                 raise ValueError("repository revision changed since the evidence pack")
-            checkpoint = load_resume(resume_from.resolve() / "resume.json", index)
+            checkpoint = load_resume(
+                resume_from.resolve() / "resume.json", index, find_all_question=FIND_ALL_QUESTION.question_id
+            )
         labels = PlaceLabels(index, checkpoint.frontier_labels)
         journal.place_label = labels
         resume = checkpoint.result
         resuming_enumeration = checkpoint.completed is not None
-        if resuming_enumeration and checkpoint.check_id != CONTAINS_IMPLEMENTATION.question_id:
-            raise ValueError("Find All question changed since the evidence pack; start a new search")
         judge = Judge(
             client,
             thresholds=thresholds,
@@ -408,14 +410,17 @@ def create_evidence_pack(
         seed_duration_seconds = monotonic() - started
         enumeration = None
         if workflow == "findall" and result.outcome not in RESUMABLE_OUTCOMES:
-            progress.phase("expanding seed and checking remaining functions")
+            progress.phase("judging the found code's units, then every unit in scope")
             enumeration = find_all(
                 index,
                 judge,
-                target,
-                [visit.code.span for visit in result.found],
-                completed=checkpoint.completed or (),
-                check=CONTAINS_IMPLEMENTATION,
+                {FIND_ALL_TARGET: target},
+                files=index.files,
+                anchors=[
+                    RangeAnchor(visit.code.span.file, visit.code.span.start, visit.code.span.end)
+                    for visit in result.found
+                ],
+                completed={FIND_ALL_TARGET: checkpoint.completed or ()},
             )
         duration_seconds = monotonic() - started
         progress.phase("writing evidence pack")
@@ -432,8 +437,8 @@ def create_evidence_pack(
                 result,
                 labels=labels,
                 entry_pending=entry_stop is not None,
-                completed=enumeration.judged if enumeration is not None else None,
-                check_id=CONTAINS_IMPLEMENTATION.question_id if enumeration is not None else None,
+                completed=enumeration.judged[FIND_ALL_TARGET] if enumeration is not None else None,
+                check_id=FIND_ALL_QUESTION.question_id if enumeration is not None else None,
             )
         manifest = _manifest(
             repository,
@@ -456,17 +461,7 @@ def create_evidence_pack(
         )
         manifest["workflow"] = workflow
         if workflow == "findall" and enumeration is None:
-            enumeration = FindAllResult(
-                target,
-                TraceGraph((), (), (), "not_started"),
-                (),
-                tuple(index.files),
-                index.observed_unparsed_files,
-                tuple(file for file in index.files if not language_of(file)),
-                index.unavailable_files,
-                str(result.outcome),
-                0,
-            )
+            enumeration = FindAllResult.not_started({FIND_ALL_TARGET: target}, str(result.outcome))
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
             manifest["search"] = _find_all_summary(
@@ -1170,37 +1165,57 @@ def _find_all_summary(
     result: FindAllResult, calls: int, elapsed: float, previous: dict | None, not_indexed: dict[str, str]
 ) -> dict:
     old_search = previous["search"] if previous else {}
-
-    def answer(value):
-        return {
-            "source": {key: value.item[key] for key in ("file", "lines", "commit", "file_sha256")},
-            "code": value.item["code"],
-            "name": value.item["name"],
-            "probability": value.probability,
-            "verdict": value.verdict,
-            "request_sha256": value.request_sha256,
-            "from_store": value.from_store,
-            **answered_by(value.source()),
-        }
-
+    scores = result.scores(FIND_ALL_TARGET)
     return {
         "outcome": result.stopped_by,
         "coverage": result.coverage,
-        "unit": "function",
+        "unit": "a function, a method, or a file's top-level code",
         "calls": old_search.get("calls", 0) + calls,
         "calls_this_invocation": calls,
         "enumeration_calls": old_search.get("enumeration_calls", 0) + result.calls,
         "duration_seconds": round(old_search.get("duration_seconds", 0) + elapsed, 3),
-        "found": [answer(value) for value in result.matched],
-        "unsure": [answer(value) for value in result.uncertain],
-        "searched": [answer(value) for value in result.negative],
-        "remaining_files": list(result.remaining_files),
+        "room_chars": result.room,
+        **{
+            group: [_unit_shown(score) for score in scores if score.answer.verdict == verdict]
+            for group, verdict in _VERDICT_GROUPS
+        },
+        "not_judged": dict(result.not_judged),
+        "unlisted_files": dict(result.unlisted),
+        "unresolved_seeds": [
+            {**asdict(problem.anchor), "problem": problem.problem} for problem in result.unresolved
+        ],
         "unparsed_files": sorted(result.unparsed_files),
-        "unsupported_files": list(result.unsupported_files),
-        "unavailable_files": dict(result.unavailable_files),
         "not_indexed_files": dict(not_indexed),
-        "graph": asdict(result.graph),
     }
+
+
+_VERDICT_GROUPS = (("found", NoulVerdict.YES), ("unsure", NoulVerdict.UNSURE), ("searched", NoulVerdict.NO))
+
+
+def _unit_shown(score: UnitScore) -> dict:
+    """A judged unit as the pack shows it: where it is, the code judged (the unit, or for a cut unit
+    its best piece), and the answer that judged it."""
+    unit, answer = score.unit, score.answer
+    shown = {
+        "unit": unit.id,
+        "kind": str(unit.kind),
+        "name": unit.symbol,
+        "source": {"file": unit.path, "runs": [list(run) for run in unit.ranges], "commit": unit.revision},
+        "unit_sha256": unit.content_sha256,
+        "code": answer.item["code"],
+        "probability": answer.probability,
+        "verdict": answer.verdict,
+        "request_sha256": answer.request_sha256,
+        "from_store": answer.from_store,
+        **answered_by(answer.source()),
+    }
+    if score.piece is not None:
+        shown["piece"] = {
+            "index": score.piece.index,
+            "lines": [score.piece.start, score.piece.end],
+            "of": len(unit.pieces),
+        }
+    return shown
 
 
 def _not_indexed_section(search: dict) -> list[str]:
@@ -1222,31 +1237,40 @@ def _find_all_report(manifest: dict) -> str:
         f"{search['calls']} live requests; "
         f"{search['duration_seconds']:.3f}s for seed search and enumeration.",
         "",
-        "Coverage counts function bodies examined. It does not prove model accuracy, behavioral "
-        "equivalence or absence of other implementations. Uncertain graph bindings remain uncertain.",
+        "Coverage counts the units examined: each function, method and file's top-level code in scope. "
+        "It does not prove model accuracy, behavioral equivalence or absence of other implementations.",
         "",
-        "| Result | P(contains target) | Function | Source |",
+        "| Result | P(matches target) | Unit | Source |",
         "| --- | ---: | --- | --- |",
     ]
-    for group in ("found", "unsure", "searched"):
+    for group, _ in _VERDICT_GROUPS:
         for value in search[group]:
-            source = value["source"]
             lines.append(
-                f"| {group} | {value['probability']:.3f} | `{value['name']}` | "
-                f"`{source['file']}:{source['lines'][0]}-{source['lines'][1]}` |"
+                f"| {group} | {value['probability']:.3f} | `{value['name']}` | `{_judged_location(value)}` |"
             )
     lines += ["", "## Coverage gaps", ""]
-    for field in ("remaining_files", "unparsed_files", "unsupported_files"):
-        lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
-    lines.append("- unavailable_files:" if search["unavailable_files"] else "- unavailable_files: none")
-    lines += unavailable_file_lines(search["unavailable_files"])
+    lines.append(f"- not_judged: {_reason_counts(search['not_judged']) or 'none'}")
+    lines.append("- unlisted_files:" if search["unlisted_files"] else "- unlisted_files: none")
+    lines += unavailable_file_lines(search["unlisted_files"])
+    lines.append(f"- unresolved_seeds: {len(search['unresolved_seeds']) or 'none'}")
+    lines.append(f"- unparsed_files: {', '.join(search['unparsed_files']) or 'none'}")
     lines += _not_indexed_section(search)
-    lines += ["", "## Matching bodies", ""]
+    lines += ["", "## Matching units", ""]
     for value in search["found"]:
-        source = value["source"]
-        lines += [f"### {source['file']}:{source['lines'][0]}-{source['lines'][1]}", ""]
+        lines += [f"### {_judged_location(value)}", ""]
         lines += _code_block(value, "")
     return "\n".join(lines) + "\n"
+
+
+def _reason_counts(not_judged: dict[str, str]) -> str:
+    """``2 too large to judge, 5 not reached: ...``: how many units or pieces were left for each reason."""
+    return ", ".join(f"{count} {reason}" for reason, count in sorted(Counter(not_judged.values()).items()))
+
+
+def _judged_location(value: dict) -> str:
+    """``file:first-last, ...``: the runs of the unit, or of the piece of it that was judged."""
+    runs = [value["piece"]["lines"]] if "piece" in value else value["source"]["runs"]
+    return f"{value['source']['file']}:{', '.join(f'{first}-{last}' for first, last in runs)}"
 
 
 def _navigator_provenance() -> dict:

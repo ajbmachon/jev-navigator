@@ -2,6 +2,7 @@ import json
 import re
 import time
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -109,6 +110,8 @@ SECRET_VALUES = {
         "secret: getSecret('sk-live-signing-0042')",
         "sk-live-signing-0042",
     ),
+    "unterminated quoted value": ('password: "unterminated secret', "unterminated secret"),
+    "camelCase secret key": ('const authToken = "hunter2";', "hunter2"),
     "bcrypt password hash": (
         'password_hash = "$2b$12$KIXQJpZ8sWm3eVt7Lq9u0OaBcDeFgHiJkLmNoPqRsTuVwXyZ01234"',
         "KIXQJpZ8sWm3eVt7Lq9u0OaBcDeFgHiJkLmNoPqRsTuVwXyZ01234",
@@ -134,7 +137,18 @@ SECRET_VALUES = {
         'password_hash = "pbkdf2-sha256-600000-abcdef"',
         "pbkdf2-sha256-600000-abcdef",
     ),
+    "bytes literal": ('secret_key = b"abcd1234efgh5678"', "abcd1234efgh5678"),
+    "raw string literal": ('SECRET_KEY = r"abcd1234efgh5678"', "abcd1234efgh5678"),
+    "triple-quoted literal": ('private_key = """abcd1234efgh5678"""', "abcd1234efgh5678"),
+    "nested value a window cut before it closed": (
+        'password: {"part": "s3cret-value", "next": ',
+        "s3cret-value",
+    ),
     "unquoted hex key under a lower-case key": ("secret_key_base=" + "4f" * 64, "4f" * 64),
+    "short value under a suffixed key": ("DB_PASSWORD_PROD=hunter2", "hunter2"),
+    "short quoted value under a suffixed key": ('SECRET_KEY_BASE: "s3cret"', "s3cret"),
+    "dollar sign inside a password": ('password = "my$ecret"', "ecret"),
+    "dollar sign inside a token": ('token: "a$b1234567"', "b1234567"),
     "unquoted generated value": ("webhook_secret_v1=whsec_" + "a1B2" * 8, "a1B2" * 8),
     "high-entropy value under an ordinary name": (
         'const signingKey = "Zq8vT2mN4xR7pL1wK9sD3fH6";',
@@ -169,6 +183,24 @@ CODE_REFERENCES = [
     "_render_reports_block(reports, token_budget=...)",
     'secretAnnotation(kind, "name")',
     'requireSecretEnvironment(config, "RUNNER_AUTH_TOKEN", "engine-secrets", "runner-auth-token")',
+    "        fencing_token=self.identity.fencing_token,",
+    '        hub_token=token or "",',
+    "          csrfToken={csrfToken}",
+    'this.name = "RunAttemptExecutionClaimConflictError";',
+    "secret = {path for file in cited if (path := repo_relative_path(file, repo)) is not None}",
+    "# fixture paths are tagged secret: likely fixture by the scanner",
+    "// Deprecated env token: an exact match resolves without a round-trip.",
+    'RunsRestToken: { in: "header", name: "x-heedvane-runs-rest-token", type: "apiKey" },',
+    "existingSecret: { encryptedSecret: Uint8Array; encryptionKeyVersion: number } | null;",
+    "secret: {\n  name: AUTH_SECRET_NAME,\n"
+    '  items: [{ key: "proxy.htpasswd", path: "proxy.htpasswd", mode: 0o440 }],\n},',
+    "emailAndPassword: {\n  enabled: true,\n  // the bounds are the server's copy\n"
+    "  minPasswordLength: PASSWORD_MIN_LENGTH,\n},",
+    "volumes:\n  - name: runtime\n    secret:\n      secretName: observability-runtime\n"
+    "      items:\n        - key: metrics-token\n          path: metrics_token\n",
+    "secrets:\n  READ_TOKEN:\n    description: Read-only token for the exact checkout.\n"
+    "    required: false\n",
+    'WEBHOOK_SECRET="whsec_$(openssl rand -base64 32)"',
     'my_token = "${TOKEN}"',
     'DATABASE_URL = "postgres://app:${DB_PASSWORD}@db:5432/app"',
     'token_url = "https://example.test/oauth/token"',
@@ -181,9 +213,29 @@ CODE_REFERENCES = [
     'return createHmac("sha256", key)',
     "crypto.createHmac('sha1', key)",
     "MAX_TOKENS_MARKER = 'max_tokens_exceeded'",
+    'AND "cancellationEventLeaseToken" = $5',
+    "// URL user-info credentials (`postgresql://user:password@host/db`) are masked",
+    "Set `HEEDVANE_PROXY_URL=http://user:pass@proxy:3128` first.",
+    "// here with ?token=… when valid",
+    "clientSecret: `GITLAB_INTEGRATION_CLIENT_SECRET_${slug}`,",
+    "const gitSecretName = `inv-${input.inventoryId}-${input.generation}-git`;",
+    'need = isCredential(name) ? "must use valueFrom.secretKeyRef" : "is not an approved literal";',
+    "return `read -rsp 'GitLab token: ' GITLAB_TOKEN && printf '\\n' && export GITLAB_TOKEN && ` +",
+    'CREDENTIAL_PATTERNS = [\n  { label: "github-token", pattern: /gh_x/g },\n];',
+    "secret-scan:\n  runs-on: ubuntu-latest\n  steps:\n    - name: Install pinned Gitleaks\n",
+    'credentialsSourcePath: "/var/run/secrets/google/credentials.json",',
+    "        token_budget=(",
+    "        password=(",
+    'export GOOGLE_APPLICATION_CREDENTIALS="$CI_TMP/google-adc.json"',
+    "print(f\"GATE pass={c['gate_pass']} confidence={c.get('confidence')}\")",
+    '"rawCredentialInherited": "GOOGLE_VERTEX_CREDENTIALS_JSON" in os.environ,',
+    "clientSecret: `[MASKED]_${slug}`,",
+    "secret-scan: run the scan nightly",
     " *   REQUESTY_API_KEY=... REQUESTY_RECEIPT=/absolute/path/receipt.json \\",
     "const USAGE = 'Usage: REQUESTY_API_KEY=<credential> '",
+    "` -e HEEDVANE_ENROLLMENT_TOKEN=${shellQuote(input.enrollmentToken)}` +",
     "  ? `never cached (${row.prefixTokens ?? '?'}-token prefix, likely below)`",
+    'lines = [line for line in values if line.startswith("DB_PASSWORD: ")]',
 ]
 
 
@@ -266,6 +318,11 @@ LONG_LINES = {
     "upper-case run": "A_" * 35_000 + "=x",
     "dotted secret-word run": "token." * 12_000 + "x",
     "secret-named call run": "getToken" * 9_000 + "(x)",
+    "unclosed flow values": "password: {" * 6_000,
+    "unterminated quoted value": 'password: "' + "a" * 70_000,
+    "plain value with a long space run": "password: a" + " " * 70_000 + "x",
+    "flow value of many quoted pairs": "secret: {" + '"a": "b", ' * 7_000 + "}",
+    "YAML block of many lines": "password:\n" + "  x: y\n" * 10_000,
     "assignment pairs": "a=b " * 8_000,
     "inline SVG attributes": "<svg " + 'x="1" y="2" fill="none" ' * 2_700 + "/>",
 }
@@ -312,7 +369,7 @@ SUFFIXED_SECRET_KEYS = [
     "dbPasswordProd", "STRIPE_SECRET_LIVE", "password1", "PASSWORD_CONFIRMATION", "access_token_secret",
     "client_secret_value", "refresh_token_old", "MYSQL_ROOT_PASSWORD", "mysql_password_root",
     "secretAccessKeyId", "GH_TOKEN_RO", "webhook_secret_v1", "PASSWORD_SALT", "pwd_admin", "credentials_json",
-    "db_pass", "userPwd", "credentials",
+    "db_pass", "db_passwd", "userPwd", "credentials",
 ]  # fmt: skip
 
 
@@ -359,6 +416,7 @@ def test_a_secret_word_inside_another_word_is_not_a_secret_key(code: str) -> Non
         "SECRET_KEY_BASE=abc",
         '"credentials_json": "{}x",',
         'password_hash = "pw"',
+        'GH_TOKEN_RO = process.env.GH_TOKEN ?? "dev"',
     ],
 )
 def test_a_short_value_under_a_suffixed_secret_key_is_masked(line: str) -> None:
@@ -401,6 +459,35 @@ def test_a_credential_under_a_naming_key_is_masked() -> None:
 
     # Assert
     assert "a8f9e0d1c2b3a4f5" not in masked
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ("DB_PASSWORD_PROD: |\n  hunter2\n  rest\n", "hunter2"),
+        ("DB_PASSWORD_PROD: >-\n  hunter2\n", "hunter2"),
+        ('DB_PASSWORD = "abc" + "hunter2"', "hunter2"),
+        ('GH_TOKEN_RO = "abc" \\\n  "hunter2"', "hunter2"),
+        ('$db_password = "abc" . "hunter2";', "hunter2"),
+    ],
+)
+def test_a_value_that_belongs_to_a_secret_key_is_masked_whole(text: str, secret: str) -> None:
+    # Act
+    masked = SecretMasker().mask(text)
+
+    # Assert
+    assert secret not in masked
+
+
+def test_a_nested_table_under_a_suffixed_key_judges_its_inner_keys() -> None:
+    # Arrange
+    text = "DB_PASSWORD_PROD:\n  user: app\n  host: db.internal\n"
+
+    # Act
+    masked = SecretMasker().mask(text)
+
+    # Assert
+    assert masked == text
 
 
 COMPOSE = "services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: example\n      POSTGRES_USER: app\n"
@@ -580,6 +667,121 @@ def test_a_short_masked_value_inside_a_longer_word_does_not_refuse_the_request()
 
     # Assert
     assert "pw" in masked
+
+
+VALUE = "hunter2hunter2"
+
+
+@pytest.mark.parametrize(
+    ("file", "code"),
+    [
+        ("tests/test_x.py", f'files = {{"settings.py": \'WEBHOOK_TOKEN = "{VALUE}"\\n\'}}\n'),
+        ("package.json", f'{{"scripts": {{"start": "DB_PASSWORD=\'{VALUE}\' node app.js"}}}}\n'),
+        ("docker-compose.yml", f"    command: \"export API_TOKEN='{VALUE}' && run\"\n"),
+        ("app/docs.py", f"HELP = 'set password = \"{VALUE}\" first'\n"),
+        ("app/settings.py", f'DB_PASSWORD_PROD = """\n{VALUE}\n"""\n'),
+        ("app/settings.py", "DB_PASSWORD = " + "'" * 3 + f"\n    {VALUE}\n" + "'" * 3 + "\n"),
+        ("src/db.ts", f"const DB_PASSWORD = `\n  {VALUE}\n`;\n"),
+        ("src/Db.java", f'String password = """\n    {VALUE}\n    """;\n'),
+        ("config/app.toml", f'db_password = """\n{VALUE}"""\n'),
+        ("app/settings.py", f'DB_PASSWORD = " {VALUE}"\n'),
+        ("app/settings.py", f'SECRET_KEY = (\n    "{VALUE}"\n)\n'),
+        ("app/settings.py", f'SECRET_KEY = (\n    "first-part-x"\n    "{VALUE}"\n)\n'),
+    ],
+)
+def test_a_secret_inside_another_string_or_across_lines_is_masked(file: str, code: str) -> None:
+    # Act
+    masked_state, _, _ = mask_request({"slice": {"file": file, "code": code}}, {}, SecretMasker())
+
+    # Assert
+    assert VALUE not in masked_state["slice"]["code"]
+
+
+def test_masking_keeps_the_quotes_around_a_hidden_value() -> None:
+    # Act
+    masked = SecretMasker().mask(f"assert line == 'WEBHOOK_TOKEN = \"{VALUE}\"'", "tests/test_x.py")
+
+    # Assert
+    assert masked == "assert line == 'WEBHOOK_TOKEN = \"[MASKED]\"'"
+
+
+def test_a_value_hidden_at_its_key_is_hidden_where_it_stands_bare_in_the_same_request() -> None:
+    # Arrange
+    random_value = "Zx81kQ0pLw93mN2vB7cR" * 2
+    code = f'CASES = [(\'aws_secret_access_key = "{random_value}"\', "{random_value}")]\n'
+    state = {"slice": {"file": "tests/test_x.py", "code": code}}
+
+    # Act
+    masked_state, questions, masked = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert random_value not in masked_state["slice"]["code"]
+    refuse_if_secret(masked_state, questions, SecretScanner(), masked)
+
+
+@pytest.mark.parametrize(
+    "path", ["tests/test_judgments.py", "tests/test_round.py", "tests/test_secret_masking.py"]
+)
+def test_the_final_scan_finds_nothing_in_masked_repository_code(path: str) -> None:
+    # Arrange
+    text = (Path(__file__).parents[1] / path).read_text()
+
+    # Act
+    masked = SecretMasker().mask(text, path)
+
+    # Assert
+    assert SecretScanner().findings(masked, path) == []
+
+
+def test_an_unterminated_value_inside_another_string_ends_where_that_string_closes() -> None:
+    # Act
+    masked = SecretMasker().mask(
+        """('DB_PASSWORD="unterminated secret', "DB_PASSWORD=[REDACTED]"),""", "tests/x.py"
+    )
+
+    # Assert
+    assert masked == """('DB_PASSWORD="[MASKED]', "DB_PASSWORD=[REDACTED]"),"""
+
+
+def _candidate_request(signature: str, preview: str) -> dict:
+    return {"candidates": [{"signature": signature, "preview": preview, "relationship": "calls"}]}
+
+
+def test_a_candidate_from_a_code_file_keeps_its_code() -> None:
+    # Arrange
+    line = "createApiKey: (input) => serverClient.apiKeys.create.mutate(input),"
+    state = _candidate_request(f"apps/web/src/app/api/settings/api-keys/route.ts:28 `{line}`", f"  {line}\n")
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert masked_state == state
+
+
+def test_a_candidate_from_a_config_file_is_read_as_config() -> None:
+    # Arrange
+    state = _candidate_request(
+        "deploy/docker-compose.yml:3-12 line 5 `POSTGRES_PASSWORD: example` (mentions)",
+        "environment:\n  POSTGRES_PASSWORD: example\n",
+    )
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert "example" not in json.dumps(masked_state)
+
+
+def test_a_candidate_whose_location_does_not_parse_is_read_as_config() -> None:
+    # Arrange
+    state = _candidate_request("form.ts, line 3: `token: abc123`", "token: abc123\n")
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert "abc123" not in json.dumps(masked_state)
 
 
 def _check_request(code: str, path: str) -> tuple[dict, dict, frozenset]:

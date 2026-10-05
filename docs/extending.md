@@ -16,7 +16,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
-| `find_all` | seed-first function search: expand the static component, batch containment judgments, then examine disconnected functions |
+| `find_all` | judges every unit of a population (anchored lines, files, and each hit of named texts, rarest name first) against described targets, one question per unit per target |
 | `places.MOVES` | the ways a search lists the neighbours of an opened place; pick a subset or add your own |
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
 | `LlmStep` | an opt-in LLM call for the cases where Jev's answer is not clear enough |
@@ -104,51 +104,64 @@ Test it offline with `ScriptedJevClient` and AAA tests, including the unsure pat
 
 ## Searching instead of listing
 
-### Compose a seed-first Find All search
+### Judge every unit with Find All
 
-This is an ordinary function composition, not a workflow interpreter. Obtain concrete seeds from
-`find_code` or a symbol lookup, follow relationships with `operations.trace_graph`, and judge each
-candidate body with the existing containment question. `find_all` combines the latter two pieces:
+This is an ordinary function composition, not a workflow interpreter. `find_all` judges each unit of
+a population against one or more described targets: one question per unit per target, all targets
+asked in the same request. The population is the units the caller's line and range anchors name,
+then the units of the named files, then the units holding each hit of the named texts, names with
+fewer hits first, so a common word never decides which hits of a rare name are seen:
 
 ```python
 from jev_navigator.directives.find_all import find_all
+from jev_navigator.index.units import RangeAnchor
 
-seeds = index.find_definition("check_limits")
-result = find_all(index, judge, "the check that limits items per order", seeds)
-for match in result.matched:
-    print(match.item["file"], match.item["lines"], match.probability)
+seed = index.find_definition("check_limits")[0]
+result = find_all(
+    index,
+    judge,
+    {"limit": "the check that limits items per order"},
+    files=index.files,
+    anchors=[RangeAnchor(seed.file, seed.start, seed.end)],
+    names=["max_items"],
+)
+for score in result.scores("limit"):
+    print(score.unit.path, score.unit.ranges, score.probability)
 ```
 
-The seed is a candidate, not an assumed match. Connected functions are examined first; the fallback
-then enumerates every other in-scope function, even with unrelated names. Both phases batch atomic
-questions through `Judge`; code deduplicates by source span. Entire bodies and source hashes are
-retained. `CodeIndex.functions_in_files` batches fact collection instead of launching a parser scan
-for each file. No default file or live-call cap is added by this composition.
+Each item Jev reads holds only the unit's file and code. The targets sit in the shared state, and each
+question reads "Look only at `items[n]`. Does that code match the description in `targets.<name>`?"
+(`match_check`). A unit larger than its room in a request (`result.room`) is judged by its pieces and
+scored by its best one; a piece still too large is named in `not_judged`, and so is a unit or piece
+whose request asking every target does not fit the client's limits once masked, since masking can
+lengthen code past the room (`Judge.fits_alone`). One unit never fails the search. Every unit is one
+a listing lists, so a hit inside a nested function names the function holding it. No code step is capped: the
+Judge's call cap is the only budget. The population goes to the Judge in waves of `batches_per_wave`
+requests' worth (16 by default). Its order holds between waves, and exactly only at one batch per
+wave. Like `items_per_request`, the wave size shapes the batches and so the answer store's keys.
+`delivered` names the line ranges the caller already shows: a unit or piece whose every line lies
+in them is named `already delivered by the caller` and not judged, while one with a line outside them
+is judged. `find_all_async` takes the same arguments for an
+async client, such as a host's orchestrator; it lists and reads code in a worker thread, reads
+`cancelled` between waves, and keeps every answer a wave received before a failure. Ranking and any
+bar belong to the caller:
+`scores(target)` gives every judged unit's answer, and `names` each name's hits found, reached and
+naming no unit.
 
-Pass `include_disconnected=False` for a deliberately partial, component-only search. Supply a `Check`
-through `check=` to examine another concrete property of each body; use `{item}.code` and the shared
-`target.description`. Independent additional properties belong in `Judge.check_every`, which asks
-them together and keeps the answers separate. The engineer authors the branches and stopping rule;
-Jev does not decide whether to invent a workflow or declare the repository fully understood.
-Checks in one batch need distinct names because each name identifies its returned result list.
+`units_examined` means every unit of the population was judged, not that every semantic answer is
+correct. Uncertain answers, parser failures, unlisted files and unresolved anchors remain visible.
+Pass `completed=previous.judged` to continue with a fresh Judge allowance: a place answered for every
+target is not asked again. Reuse is valid only for the same source bytes, scope, targets and
+thresholds; the CLI verifies those identities in its saved pack. Cancellation keeps coverage partial
+and parses nothing it has not reached. Ctrl-C during judging ends it `cancelled`, and a failed request
+ends it `failed` with `failure` holding the same error; both keep every answer that arrived in
+`judged`, so `completed=` resumes it. Retained journal receipts describe the work actually performed.
 
-`functions_examined` means the function inventory was examined, not that every semantic answer is
-correct. Module-level statements, declarations and multi-function behaviors require a different
-unit/composition. `uncertain`, parser failures, unavailable files and unsupported grammars remain
-visible. A graph link marked candidate never becomes a proven call because its body matched.
-Pass `completed=previous.judged` to continue enumeration with a fresh Judge allowance. Reuse is valid
-only for the same source bytes, scope, target, Check and thresholds; the CLI verifies those identities
-in its saved pack. Completed positive, negative and uncertain judgments retain their original
-request hashes and are not sent again. Static graph reconstruction does not consume model calls.
-Cancellation keeps coverage partial and reporting does not trigger scans of untouched files.
-Ctrl-C during judging ends it `cancelled`, and a failed request ends it `failed` with `failure` holding
-the same error; both keep every answer that arrived in `judged`, so `completed=` resumes it. Retained
-journal receipts describe the work actually performed.
-
-The CLI composes entry selection and `find_code` with this function. A seed-search miss still permits
-the disconnected fallback. Use `jvn findall "functions that enforce the order item limit"` or
+The CLI composes entry selection and `find_code` with this function: the seed search's found code
+becomes range anchors, and the population is every file in scope, so a seed-search miss still judges
+the whole scope. Use `jvn findall "functions that enforce the order item limit"` or
 `jvn --json '{"command":"findall","target":"functions that enforce the order item limit"}'`.
-The evidence pack retains the seed search, per-function answers and raw request identities.
+The evidence pack retains the seed search, per-unit answers and raw request identities.
 
 ### Find one location
 
@@ -355,7 +368,8 @@ Top-level code is a file's lines outside every function and method, class bodies
 runs of lines in order (`ranges`) without the blank lines at their edges. A file whose top-level code
 is only imports, comments, directives such as `"use client"`, lines of closing brackets and blank
 lines lists no top-level unit. A file in a language JVN does not parse gives no units and is named
-in `unlisted` with `language not supported`, as is a file that disappeared after the inventory.
+in `unlisted` with `language not supported`, as is a file that disappeared after the inventory, and a
+file outside the index's scope with the index's own reason (`no file at this path`) or `not in the index scope`.
 
 A unit whose text fits `box_chars` is one item, whatever its length. Only a larger unit is cut into
 `pieces` of at most 60 lines, in order, with no overlap and never across two runs of top-level code;

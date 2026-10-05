@@ -142,6 +142,70 @@ def test_a_sync_call_with_an_async_client_is_refused() -> None:
         judge.check_each(DESCRIBES, [{"code": "x = 1"}], SHARED)
 
 
+THREE_ITEMS = [
+    {"file": "a.py", "lines": [1, 1], "code": "first = 1"},
+    {"file": "b.py", "lines": [1, 1], "code": "boom = 2"},
+    {"file": "c.py", "lines": [1, 1], "code": "third = 3"},
+]
+SENTENCE = {"doc": {"sentence": "the first value"}}
+
+
+class FailsOnItem:
+    """An async provider that fails the request carrying an item whose code holds ``marker``."""
+
+    def __init__(self, marker: str) -> None:
+        self.script = ScriptedJevClient(default_noul=0.9)
+        self.marker = marker
+
+    @property
+    def model(self) -> str:
+        return self.script.model
+
+    async def ask(self, state, questions):
+        await asyncio.sleep(0)
+        if any(self.marker in item["code"] for item in state["items"]):
+            raise RuntimeError("Jev answered 503")
+        return self.script.ask(state, questions)
+
+
+def iterated_codes(judge: Judge, answered: list[str]) -> None:
+    """Every item's code the async iterator yields, into ``answered``, until it raises."""
+
+    async def collect() -> None:
+        async for _name, result in judge.iter_check_every_async([DESCRIBES], THREE_ITEMS, SENTENCE):
+            answered.append(result.item["code"])
+
+    asyncio.run(collect())
+
+
+def test_the_async_iterator_yields_each_answered_batch_before_its_wave_raises_a_failure() -> None:
+    # Arrange: one request at a time, so the third batch is never sent once the second fails
+    judge = Judge(FailsOnItem("boom"), items_per_request=1, max_concurrency=1)
+    answered: list[str] = []
+
+    # Act
+    with pytest.raises(RuntimeError, match="503"):
+        iterated_codes(judge, answered)
+
+    # Assert
+    assert answered == ["first = 1"]
+
+
+def test_the_async_iterator_yields_the_answers_its_call_cap_left_room_for_then_raises() -> None:
+    # Arrange
+    client = AsyncScriptedJevClient(ScriptedJevClient(default_noul=0.9))
+    judge = Judge(client, items_per_request=1, max_calls=1)
+    answered: list[str] = []
+
+    # Act
+    with pytest.raises(CallCapReachedError):
+        iterated_codes(judge, answered)
+
+    # Assert
+    assert answered == ["first = 1"]
+    assert len(client.requests) == 1
+
+
 def test_the_async_path_counts_calls_against_the_same_caps() -> None:
     # Arrange
     judge = Judge(AsyncScriptedJevClient(ScriptedJevClient(nouls={"describes": 0.9})), max_calls=1)
