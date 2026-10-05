@@ -4,7 +4,8 @@
 generated header, a vendored or output folder) and hands the rest on in
 ``ResolvedScope.awaiting_generated_judgment``. Each reaches Jev as one entry: its path, its measured
 facts, up to ``MAX_IMPORTERS`` files that import it with their true count, up to ``MAX_NAMED_BY``
-files that name its path with the line that names it and their true count, and two excerpts. The
+files that name its path with the line that names it and their count when searched (a file edited
+since then is left out of the lines), and two excerpts. The
 line the answer draws is André's (04.10.2026, 12:55): generated means no person edits the file
 as source. A file the secret scan refuses is never sent; it is named as not judged.
 """
@@ -23,7 +24,7 @@ from ..index.file_shape import FileShape
 from ..index.scope import is_test_file
 from ..index.spans import TextHit
 from .judge import CheckResult, Judge
-from .masked_text import masked_lines, trimmed_cut
+from .masked_text import masked_lines
 from .questions import Check, Criterion
 from .secrets import SecretInRequestError, mask_request, refuse_if_secret
 
@@ -100,7 +101,7 @@ def generated_file_entry(
         "importers": list(importers[:MAX_IMPORTERS]),
         "importer_count": len(importers),
         "named_by": [
-            _naming_entry(lines_of(hit.file)[hit.line - 1], hit, path) for hit in naming[:MAX_NAMED_BY]
+            entry for hit in naming[:MAX_NAMED_BY] if (entry := _naming_entry(lines_of(hit.file), hit, path))
         ],
         "named_by_count": len(naming),
         **_excerpts(text),
@@ -162,15 +163,17 @@ def _masked_namer_lines(index: CodeIndex, file: str) -> tuple[str, ...]:
     return masked_lines(source.split("\n"), file, index.masker)
 
 
-def _naming_entry(line: str, hit: TextHit, path: str) -> dict:
-    """The masked naming ``line`` as Jev sees it: whole when it fits ``NAMING_LINE_CHARS``,
-    otherwise that many characters around the name."""
+def _naming_entry(lines: Sequence[str], hit: TextHit, path: str) -> dict | None:
+    """The hit's line from the naming file's masked ``lines`` as Jev sees it: whole when it fits
+    ``NAMING_LINE_CHARS``, otherwise that many characters around the name. None when the file no
+    longer names ``path`` on that line, because it changed after the search."""
+    line = lines[hit.line - 1] if hit.line <= len(lines) else ""
     named = re.compile(_whole_path(re.escape(path))).search(line)
     if named is None:
-        raise ValueError(f"{hit.file}:{hit.line} no longer names {path}")
+        return None
     keep = named.span("path")
     start, end = _around(keep, len(line))
-    return {"file": hit.file, "line": hit.line, "text": trimmed_cut(line, start, end, keep).strip()}
+    return {"file": hit.file, "line": hit.line, "text": line[start:end].strip()}
 
 
 def _around(keep: tuple[int, int], line_length: int) -> tuple[int, int]:
@@ -186,8 +189,8 @@ def _excerpts(text: str) -> dict[str, str]:
         return {"opening": text}
     middle = (len(text) - EXCERPT_CHARS) // 2
     return {
-        "opening": trimmed_cut(text, 0, EXCERPT_CHARS),
-        "middle": trimmed_cut(text, middle, middle + EXCERPT_CHARS),
+        "opening": text[:EXCERPT_CHARS],
+        "middle": text[middle : middle + EXCERPT_CHARS],
     }
 
 

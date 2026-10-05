@@ -1,11 +1,11 @@
-"""masked_lines and trimmed_cut, the owner of the text a request may show, with the real SecretMasker."""
+"""masked_lines, the owner of the text a request may show, with the real SecretMasker."""
 
 from __future__ import annotations
 
 import pytest
 from secret_shapes import COPY_VALUE, SECRET_SHAPES, pieces
 
-from jev_navigator.judgments.masked_text import masked_lines, trimmed_cut
+from jev_navigator.judgments.masked_text import masked_lines
 from jev_navigator.judgments.secrets import MASK, SecretMasker
 
 
@@ -54,37 +54,3 @@ def test_a_value_spanning_lines_keeps_the_line_count() -> None:
 
     # Assert
     assert masked == ("before", MASK, "", "", "", " after", "end")
-
-
-def test_a_cut_through_a_word_drops_the_word_up_to_whitespace_or_a_quote() -> None:
-    # Arrange
-    text = 'alpha bravo "charlie delta" echo'
-
-    # Act
-    cut = trimmed_cut(text, text.index("ravo"), text.index("elta") + 2)
-
-    # Assert
-    assert cut == ' "charlie '
-
-
-def test_a_cut_never_drops_the_kept_span_even_when_no_whitespace_reaches_it() -> None:
-    # Arrange
-    text = "a=" + "b" * 50 + "=web/gen.js;c=" + "d" * 50
-    keep = (text.index("web/gen.js"), text.index("web/gen.js") + len("web/gen.js"))
-
-    # Act
-    cut = trimmed_cut(text, 10, len(text) - 10, keep)
-
-    # Assert
-    assert cut == "web/gen.js"
-
-
-def test_a_cut_on_whitespace_keeps_both_edges() -> None:
-    # Arrange
-    text = "alpha bravo charlie"
-
-    # Act
-    cut = trimmed_cut(text, 5, 11)
-
-    # Assert
-    assert cut == " bravo"

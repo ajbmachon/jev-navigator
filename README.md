@@ -504,10 +504,10 @@ else:
   true count, up to 5 files that name its path with the naming line (at most 200 characters around
   the path; files outside the scope count, non-test files come first; a path written relative to the
   naming file, such as `../src/a.js`, or joined to a variable folder, such as `$root/src/a.js`, is not
-  found) and their true count, and two 2,000-character excerpts (the opening and the middle). Each
-  naming line and excerpt is cut from its whole file as `judgments.masked_text.masked_lines` masked it,
-  so a secret whose key the cut leaves out is still masked, and a cut that splits a run of characters
-  drops that run up to the nearest whitespace or quote (`trimmed_cut`). A file the secret scan would refuse
+  found) and their count when searched (a naming file edited since then is left out of the lines),
+  and two 2,000-character excerpts (the opening and the middle). Each naming line and excerpt is cut
+  from its whole file as `judgments.masked_text.masked_lines` masked it, so a secret whose key the cut
+  leaves out is still masked. A file the secret scan would refuse
   is never sent and comes back in `not_judged` with the reason. Nothing calls it yet: the
   search that acts on the answers lands with Find v2's round controller.
 - `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are

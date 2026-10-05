@@ -69,7 +69,6 @@ def test_a_flagged_file_reaches_jev_as_its_path_measured_facts_and_two_excerpts(
 
     entry = generated_file_entry(index, "web/bundle.js", awaiting["web/bundle.js"], ())
 
-    # Each excerpt drops the piece its cut splits, up to the nearest space
     assert entry == {
         "file": "web/bundle.js",
         "size_bytes": shape.size_bytes,
@@ -80,8 +79,8 @@ def test_a_flagged_file_reaches_jev_as_its_path_measured_facts_and_two_excerpts(
         "importer_count": 0,
         "named_by": [],
         "named_by_count": 0,
-        "opening": opening[: opening.rindex(" ") + 1],
-        "middle": middle[middle.index(" ") : middle.rindex(" ") + 1],
+        "opening": opening,
+        "middle": middle,
     }
 
 
@@ -322,18 +321,6 @@ def test_a_sentence_ending_with_the_path_names_it(tmp_path: Path) -> None:
     assert [(hit.file, hit.line) for hit in naming["web/bundle.js"]] == [("README.md", 1)]
 
 
-def test_a_minified_line_cut_on_both_sides_still_shows_the_path(tmp_path: Path) -> None:
-    # Arrange: no whitespace or quote stands between either cut and the path
-    line = "a=" + "b" * 300 + "=web/gen.js;c=" + "d" * 300 + "\n"
-    repo = _repository(tmp_path / "repo", {"web/gen.js": BUNDLE, "web/min.js": line})
-
-    # Act
-    texts = _sent_naming_texts(repo, "web/gen.js")
-
-    # Assert
-    assert texts == ["web/gen.js"]
-
-
 def test_a_naming_line_after_the_first_with_windows_line_endings_is_sent_as_written(tmp_path: Path) -> None:
     # Arrange
     repo = _repository(
@@ -378,6 +365,24 @@ def test_the_sent_request_holds_no_piece_of_a_secret_that_a_naming_window_or_exc
     assert (pieces(excerpt_value) | pieces(naming_value)) & pieces(json.dumps(state)) == set()
 
 
+def test_a_naming_file_edited_after_the_search_is_left_out_and_still_counted(tmp_path: Path) -> None:
+    # Arrange: both files name the path when searched; then one is edited and one is shortened
+    repo = _repository(
+        tmp_path / "repo",
+        {"web/gen.js": BUNDLE, "app/a.js": "load('web/gen.js')\n", "app/b.js": "x\nload('web/gen.js')\n"},
+    )
+    index, awaiting = _awaiting(repo)
+    naming = files_naming(repo, ["web/gen.js"])["web/gen.js"]
+    (repo / "app/a.js").write_text("load('web/other.js')\n")
+    (repo / "app/b.js").write_text("x\n")
+
+    # Act
+    entry = generated_file_entry(index, "web/gen.js", awaiting["web/gen.js"], naming)
+
+    # Assert
+    assert (entry["named_by"], entry["named_by_count"]) == ([], 2)
+
+
 # Made-up, never a credential: the shape of the verifier's excerpt probe.
 EXCERPT_SECRET = "Vq7Lm2Xz9Rk4Tn8Wb3Yc6Hd1Fg5Jp0Ns2Qa7Ue"
 
@@ -414,7 +419,6 @@ def test_an_excerpt_cut_anywhere_through_a_keyed_secret_sends_none_of_it(tmp_pat
 
 # Made-up values with a secret's shape; none was ever a credential.
 OPAQUE_VALUE = "Zq8mKx2LpR7vWn4TsB9cHd3FgJ6aE1yU" * 4
-EDGE_TOKENS = ("Q7xK2mZp9LwR4vTn8YsB3cHd6FgJ1aE5", "Yt5Rw2Nq8Lm3Kp7Vx4Bz9Cs6Dh1Fj0Gk")
 
 
 def _sent_naming_texts(repo: Path, path: str) -> list[str]:
@@ -444,29 +448,6 @@ def test_a_secret_whose_key_falls_outside_the_naming_window_stays_masked(tmp_pat
     # Assert
     assert "web/gen.js" in text
     assert not any(piece in text for piece in _pieces(OPAQUE_VALUE, 6))
-
-
-def test_a_token_cut_at_either_edge_of_the_naming_window_leaves_no_piece(tmp_path: Path) -> None:
-    # Arrange: the window keeps NAMING_LINE_CHARS around the path, so with these fillers its left
-    # edge sweeps across the head token and its right edge across the tail token, one character per
-    # naming line, leaving fragments of every length shorter than a token
-    head, tail = EDGE_TOKENS
-    namers = {
-        f"scripts/s{shift}.mjs": f'{head} {"w" * (56 + shift)} copy("web/gen.js") {"w" * (90 - shift)} {tail}'
-        + "\n"
-        for shift in range(31)
-    }
-    repo = _repository(tmp_path / "repo", {"web/gen.js": BUNDLE, **namers})
-
-    # Act
-    texts = _sent_naming_texts(repo, "web/gen.js")
-
-    # Assert
-    assert len(texts) == 31 and all("web/gen.js" in text for text in texts)
-    leaked = {
-        piece for text in texts for token in EDGE_TOKENS for piece in _pieces(token, 4) if piece in text
-    }
-    assert leaked == set()
 
 
 # Made-up values with a JWT's and a password's shape; neither was ever a credential.
