@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-from .secrets import BY_CONTENT_MIN_CHARS, MASK, Masker
+from .secrets import BY_CONTENT_MIN_CHARS, MASK, Masker, remember_hidden
 
 
 def masked_lines(lines: Sequence[str], file: str | None, masker: Masker) -> tuple[str, ...]:
@@ -15,11 +15,12 @@ def masked_lines(lines: Sequence[str], file: str | None, masker: Masker) -> tupl
     ``file``. The line count stays: a value spanning lines becomes ``MASK`` on its first line and
     leaves the lines it covered empty up to what follows it on its last line."""
     text = "\n".join(lines)
-    return tuple(_masked(text, _secret_spans(text, masker, file)).split("\n"))
-
-
-def _secret_spans(text: str, masker: Masker, file: str | None) -> list[tuple[int, int]]:
     values = sorted(set(masker.masked_values(text, file)) - {MASK}, key=len, reverse=True)
+    remember_hidden(values)
+    return tuple(_masked(text, _secret_spans(text, values)).split("\n"))
+
+
+def _secret_spans(text: str, values: list[str]) -> list[tuple[int, int]]:
     if not values:
         return []
     copies = re.compile("|".join(_copy_pattern(value) for value in values))

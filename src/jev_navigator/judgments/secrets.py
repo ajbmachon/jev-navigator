@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import cache
 from typing import Protocol
@@ -172,6 +173,9 @@ class SecretMasker:
         return [value for value in _hide_secrets(text, path)[1] if not _SHORT_NUMBER.fullmatch(value)]
 
 
+_HIDDEN_LOCK = threading.Lock()
+_HIDDEN: set[str] = set()
+
 DEFAULT_MASKER = SecretMasker()
 """What every request is masked with unless its caller names another masker."""
 
@@ -196,10 +200,27 @@ def mask_by_content(value: object, masker: Masker) -> object:
 
 
 def masked_values(value: object, masker: Masker) -> frozenset[str]:
-    """Every value the masker hides anywhere inside nested JSON-like data, keys included."""
-    return frozenset(
+    """Every value the masker hides anywhere inside nested JSON-like data, keys included, and every
+    value this process already hid in a file it read (``remember_hidden``), whatever masker hid it."""
+    found = frozenset(
         found for text, path in dict.fromkeys(_strings(value)) for found in masker.masked_values(text, path)
     )
+    with _HIDDEN_LOCK:
+        return found | _HIDDEN
+
+
+def remember_hidden(values: Iterable[str]) -> None:
+    """Keeps ``values``, hidden from a file before any cut, so every later request hides their copies
+    too: a file masked whole no longer shows a request the value its other slices copy."""
+    kept = {value for value in values if value and value != MASK}
+    with _HIDDEN_LOCK:
+        _HIDDEN.update(kept)
+
+
+def forget_hidden() -> None:
+    """Forgets every remembered value; for tests, so none depends on what an earlier one read."""
+    with _HIDDEN_LOCK:
+        _HIDDEN.clear()
 
 
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:
