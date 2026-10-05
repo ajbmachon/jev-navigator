@@ -23,7 +23,15 @@ from ..index.scope import is_test_file
 from ..index.spans import TextWindow
 from .judge import CheckResult, Judge
 from .questions import Check, Criterion
-from .secrets import SecretInRequestError, mask_request, refuse_if_secret
+from .secrets import (
+    HIGH_ENTROPY_MIN_CHARS,
+    MASK,
+    TOKEN_CHARACTER_CLASS,
+    SecretInRequestError,
+    is_high_entropy,
+    mask_request,
+    refuse_if_secret,
+)
 
 FILES = "files"
 EXCERPT_CHARS = 2_000
@@ -33,11 +41,11 @@ NAMING_LINE_CHARS = 200
 NOT_JUDGED_SECRET = "not judged: the secret scan refused its entry"
 _PACKAGE_ENTRY_STEMS = frozenset({"index", "__init__"})
 _PATH_CHARACTERS = r"A-Za-z0-9_\-"
-# The characters of a token a secret can be written in, as the masker reads quoted values.
-_TOKEN_CHARACTERS = r"A-Za-z0-9+/=_\-"
-_TOKEN = re.compile(rf"[{_TOKEN_CHARACTERS}]+")
-_LEADING_TOKEN = re.compile(rf"^[{_TOKEN_CHARACTERS}]+")
-_TRAILING_TOKEN = re.compile(rf"[{_TOKEN_CHARACTERS}]+$")
+_TOKEN = re.compile(rf"{TOKEN_CHARACTER_CLASS}+")
+_LEADING_TOKEN = re.compile(rf"^{TOKEN_CHARACTER_CLASS}+")
+_TRAILING_TOKEN = re.compile(rf"{TOKEN_CHARACTER_CLASS}+$")
+# A quoted value the masker would mask after a key; the window may have cut the key away.
+_QUOTED_TOKEN = re.compile(rf"""(?<=["'])({TOKEN_CHARACTER_CLASS}{{{HIGH_ENTROPY_MIN_CHARS},}})(?=["'])""")
 
 GENERATED_FILE = Check(
     name="generated_file",
@@ -150,15 +158,20 @@ def _naming_entry(window: TextWindow, path: str) -> dict:
 
 def _naming_text(window: TextWindow, path: str) -> str:
     """The naming line as Jev sees it: the whole line when it fits ``NAMING_LINE_CHARS``, otherwise
-    that many characters around ``path``. Where a cut splits a token, the token's part is dropped: a
-    secret cut away from its key no longer looks like one to the masker, so none of it is kept."""
+    that many characters around ``path``. A cut can part a secret from its key, after which the
+    masker no longer sees it as one, so where a cut splits a token its part is dropped, and a whole
+    quoted value is masked as the masker masks one after a key."""
     text = _without_split_tokens(window.text, window.cut_start, window.cut_end).strip()
-    if len(text) <= NAMING_LINE_CHARS:
-        return text
-    centre = text.index(path) + len(path) // 2
-    start = min(max(0, centre - NAMING_LINE_CHARS // 2), len(text) - NAMING_LINE_CHARS)
-    end = start + NAMING_LINE_CHARS
-    return _without_split_tokens(text[start:end], _splits_token(text, start), _splits_token(text, end))
+    if len(text) > NAMING_LINE_CHARS:
+        centre = text.index(path) + len(path) // 2
+        start = min(max(0, centre - NAMING_LINE_CHARS // 2), len(text) - NAMING_LINE_CHARS)
+        end = start + NAMING_LINE_CHARS
+        text = _without_split_tokens(text[start:end], _splits_token(text, start), _splits_token(text, end))
+    return _QUOTED_TOKEN.sub(lambda token: _masked_unless_path(token.group(), path), text)
+
+
+def _masked_unless_path(token: str, path: str) -> str:
+    return MASK if is_high_entropy(token) and token not in path else token
 
 
 def _splits_token(text: str, index: int) -> bool:

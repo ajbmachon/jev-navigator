@@ -266,7 +266,7 @@ def test_nothing_is_sent_when_no_file_awaits_a_judgment(tmp_path: Path) -> None:
 class _MarkScanner:
     """A host's stronger scanner, which the judge accepts by design: it finds one marked string."""
 
-    def findings(self, text: str) -> list[str]:
+    def findings(self, text: str, path: str | None = None) -> list[str]:
         return [SECRET_MARK] if SECRET_MARK in text else []
 
 
@@ -394,3 +394,17 @@ def test_a_token_cut_where_the_search_stops_reading_leaves_no_piece(tmp_path: Pa
         piece for text in texts for token in EDGE_TOKENS for piece in _pieces(token, 4) if piece in text
     }
     assert leaked == set()
+
+
+def test_a_secret_that_fits_the_naming_window_without_its_key_is_masked(tmp_path: Path) -> None:
+    # Arrange: the window cuts between the key and its whole quoted value, so the masker's
+    # assignment rule never sees the value as assigned
+    line = f'{{"apiKey":{" " * 150}"{OPAQUE_VALUE}", "output": "web/gen.js"}}'
+    repo = _repository(tmp_path / "repo", {"web/gen.js": BUNDLE, "app/build.js": line + "\n"})
+
+    # Act
+    [text] = _sent_naming_texts(repo, "web/gen.js")
+
+    # Assert
+    assert "web/gen.js" in text and "apiKey" not in text
+    assert not any(piece in text for piece in _pieces(OPAQUE_VALUE, 6))
