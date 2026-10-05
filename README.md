@@ -588,9 +588,34 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `JEV_NAVIGATOR_CHOICE_MIN_CONFIDENCE`, `JEV_NAVIGATOR_NOUL_YES_AT` and `JEV_NAVIGATOR_NOUL_NO_AT` (via
   `Thresholds.from_env()` at the edge), then a directive's defaults, then per-call overrides
   (`judge.effective(directive, call)`).
-- **Secrets.** `SecretMasker` masks private keys, token shapes, secret-named assignments and
-  high-entropy assignments in every request, by content: a value hidden in one place is hidden
-  everywhere in the request, for example where a relation text or another candidate quotes it.
+- **Secrets.** `SecretMasker` masks secret values and keeps code. It hides private keys, token
+  shapes, password hashes (bcrypt, argon2), Bearer values, passwords and secret query values in URLs,
+  env-file values, quoted, bare and fallback values under secret-named keys, and literal arguments to
+  secret-named calls that look like key material, plus high-entropy quoted values in assignments. A
+  key holds a secret when a secret word (including `pass`, `pwd` and `credentials`) is one of its
+  parts; `max_tokens`, `tokenizer` and `bypass` hold none. Under a key the secret word ends
+  (`DB_PASSWORD`, `authToken`, `db_pass`) every literal is hidden. Under a key a naming word ends
+  (`SECRET_ENV`, `token_url`, `CREDENTIAL_PATTERNS`) only a credential-looking word is hidden: one word of
+  eight or more characters that is not a name, a path or a URL. Under any other suffix
+  (`SECRET_KEY_BASE`, `GH_TOKEN_RO`) every literal is hidden except an environment variable's name, a
+  path or a URL. A value that repeats its key (`PASS: "PASS"`) is kept, unless it is a common default
+  password such as `password`. A long unquoted run of letters and digits is a value, not a reference.
+  The masker reads a slice as its file type: in a config file (`.yml`, `.yaml`, `.env`, `.ini`, `.cfg`,
+  `.conf`, `.properties`, `.toml`, a Dockerfile) or in text from no file, an unquoted value under a
+  secret key is masked too (`POSTGRES_PASSWORD: example`), unless it is empty, a boolean or a whole
+  `${VAR}`, `$VAR` or `${{ ... }}` reference; in code it stays (`token: str`). A request mapping's
+  `file` names the file of the strings inside it. An upper-case environment assignment is a value wherever it stands on a
+  shell, Makefile or CI line (`run: API_TOKEN=... npm test`), unless it is a usage placeholder
+  (`KEY=...`, `KEY=<credential>`). `is_high_entropy`, `HIGH_ENTROPY_MIN_CHARS` and
+  `TOKEN_CHARACTER_CLASS` are public, for callers that judge a lone token. A secret flag on a command line
+  (`psql --password=...`, `deploy --api-token ...`) and a Stripe secret key anywhere are values too. A reference stays code: an identifier, dotted
+  path, call, a whole `${...}` or `$(...)`, or `$NAME` outside single quotes, so
+  `secret: process.env.AUTH_SECRET` reaches Jev unchanged. Every rule scans in time linear in the line
+  length. Masking works by content: a value hidden in one place is hidden everywhere
+  in the request, for example where a relation text or another candidate quotes it; a value of 8 or
+  more characters wherever it appears, a shorter one as a whole word, and a short number only where it
+  stands. In a code file a plain identifier under a secret-named key
+  (`{ password: changeme }`) reads as code; in YAML it is a value.
   The complete candidate set is masked once, before packing, so copied values stay hidden across
   batches; the final scan still runs on every request before it is sent.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
