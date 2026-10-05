@@ -18,10 +18,8 @@ from ..index.code_index import CodeIndex
 from ..index.spans import Span
 from .judge import CODE_FIELD
 from .questions import content_hash, request_sha256
-from .secrets import Masker, SecretMasker, mask_request
+from .secrets import DEFAULT_MASKER, Masker, mask_request
 from .store import AnswerRecord
-
-_DEFAULT_MASKER = SecretMasker()
 
 
 @dataclass(frozen=True)
@@ -38,7 +36,7 @@ def rebuild_request(
     index_at_commit: CodeIndex,
     shared: Mapping,
     *,
-    masker: Masker | None = _DEFAULT_MASKER,
+    masker: Masker | None = DEFAULT_MASKER,
 ) -> RebuiltRequest:
     skeleton = record.skeleton
     if not skeleton:

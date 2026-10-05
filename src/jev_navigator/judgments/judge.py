@@ -37,9 +37,9 @@ from .questions import (
     request_sha256,
 )
 from .secrets import (
+    DEFAULT_MASKER,
     Masker,
     Scanner,
-    SecretMasker,
     SecretScanner,
     mask_everywhere,
     mask_request,
@@ -66,7 +66,6 @@ shared with sync sends; waiting on one from the event loop by polling never bloc
 never takes an executor thread that a sync client's send needs to finish."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
-_DEFAULT_MASKER = SecretMasker()
 _DEFAULT_SCANNER = SecretScanner()
 
 
@@ -156,6 +155,17 @@ class CallDecision:
         return self.route.request_sha256
 
 
+def masked_request_fits(
+    state: Mapping, questions: Mapping, input_limits: InputLimits, masker: Masker | None
+) -> bool:
+    """Whether the request ``state`` and ``questions`` make fits ``input_limits`` once ``masker`` has
+    masked it, as a judge masks every request it sends. A size check measures the masked request:
+    masking can make it longer, since a short secret becomes the 8-character mask."""
+    if masker is not None:
+        state, questions, _ = mask_request(state, questions, masker)
+    return not input_limits.exceeded_by(state, questions)
+
+
 class Judge:
     """``calls`` counts requests sent (store hits are free); ``replayed_answers`` counts the answers
     the store gave instead. ``scope()`` gives one caller, such as a
@@ -171,7 +181,7 @@ class Judge:
         self,
         client: JevClient | AsyncJevClient,
         *,
-        masker: Masker | None = _DEFAULT_MASKER,
+        masker: Masker | None = DEFAULT_MASKER,
         scanner: Scanner | None = _DEFAULT_SCANNER,
         store: AnswerStore | None = None,
         thresholds: Thresholds | None = None,
@@ -270,6 +280,10 @@ class Judge:
         return self.check_every([check], items, shared, list_name=list_name, thresholds=thresholds)[
             check.name
         ]
+
+    def fits(self, state: Mapping, questions: Mapping) -> bool:
+        """Whether ``ask`` can send this request within this judge's input limits, masked as it is sent."""
+        return masked_request_fits(state, questions, self.input_limits, self.masker)
 
     def fits_alone(self, check: Check, item: Mapping, shared: Mapping, list_name: str = "items") -> bool:
         """Whether the smallest request ``check_each`` can send about ``item``, ``shared`` with that

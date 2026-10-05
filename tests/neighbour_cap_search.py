@@ -1,12 +1,14 @@
-"""One `jvn find` with ``--neighbours-per-kind 1`` under Drex's box, run in its own process by
-``test_opened_code_size``, so a cut that never settles fails at the deadline instead of hanging
-pytest. Prints what the run kept as one JSON object.
+"""One `jvn find` under Drex's box, run in its own process by ``test_opened_code_size``, so a cut that
+never settles fails at the deadline instead of hanging pytest. Prints what the run kept as one JSON
+object. The shape is the second argument:
 
-The opened function calls its own nested tail before ``audit``, whose preview is large, and is
-committed on its own, so no file committed with it is a neighbour. Shown whole,
-the tail is on screen and ``audit`` is the one callee; ``audit`` beside the whole function is too
-large, so the function is cut. The cut leaves the tail's lines out, so the tail becomes a callee and
-ranks first, and a cap of one keeps it in place of ``audit``.
+- ``per-kind-cap``: the opened function calls its own nested tail before ``audit``, whose preview is
+  large, and is committed on its own, so no file committed with it is a neighbour. Shown whole, the
+  tail is on screen and ``audit`` is the one callee; ``audit`` beside the whole function is too
+  large, so the function is cut. The cut leaves the tail's lines out, so the tail becomes a callee
+  and ranks first, and ``--neighbours-per-kind 1`` keeps it in place of ``audit``.
+- ``common``: a small function beside one small callee, whose first cut is the whole function and
+  already fits beside it.
 """
 
 from __future__ import annotations
@@ -39,6 +41,24 @@ OTHERS = "from app.audit import audit\n\n\ndef others(order):\n" + "".join(
 )
 
 
+SMALL_AUDIT = "def audit(order):\n    return order\n"
+SMALL_PLACE = "from app.audit import audit\n\n\ndef place(order):\n    audit(order)\n    return order\n"
+
+
+def _per_kind_cap_shape(repository: Path) -> list[str]:
+    commit_files(repository, {"app/audit.py": AUDIT, "app/other.py": OTHERS})
+    commit_files(repository, {"app/orders.py": PLACE})
+    return ["--start", "app/orders.py:1", "--neighbours-per-kind", "1"]
+
+
+def _common_shape(repository: Path) -> list[str]:
+    commit_files(repository, {"app/audit.py": SMALL_AUDIT, "app/orders.py": SMALL_PLACE})
+    return ["--start", "app/orders.py:4"]
+
+
+SHAPES = {"per-kind-cap": _per_kind_cap_shape, "common": _common_shape}
+
+
 class _DrexStandIn(BudgetedClient):
     """The provider behind the CLI: Drex's box, and nothing to release when the run ends."""
 
@@ -46,32 +66,24 @@ class _DrexStandIn(BudgetedClient):
         pass
 
 
-def main(folder: Path) -> None:
+def main(folder: Path, shape: str) -> None:
     settings.checkout_root = lambda: NO_SETTINGS
     settings.LEGACY_CONFIG = NO_SETTINGS / "env"
     os.environ["TYPESAFE_API_KEY"] = "local-test-key"
     repository, output = folder / "repository", folder / "pack"
-    commit_files(repository, {"app/audit.py": AUDIT, "app/other.py": OTHERS})
-    commit_files(repository, {"app/orders.py": PLACE})
+    options = SHAPES[shape](repository)
     client = _DrexStandIn(JEV_INPUT_LIMITS.request_chars, input_box=DREX_INPUT_LIMITS.box_chars)
     client.input_limits = DREX_INPUT_LIMITS
     cli.system_one_client = lambda environment: client
-    arguments = ["find", "the order total", "--repo", str(repository), "--start", "app/orders.py:1"]
-    limits = ["--out", str(output), "--max-steps", "1", "--beam-width", "1", "--neighbours-per-kind", "1"]
+    arguments = ["find", "the order total", "--repo", str(repository), *options]
+    limits = ["--out", str(output), "--max-steps", "1", "--beam-width", "1"]
     with contextlib.redirect_stdout(sys.stderr):
         status = cli.main([*arguments, *limits])
     if status != 0:
         raise SystemExit(f"jvn find exited {status}")
     manifest = json.loads((output / "manifest.json").read_text())
     asked = [_asked(state) for state, _questions in client.requests]
-    tail_line = PLACE.split("\n").index("    def place_tail(order):") + 1
-    kept = {
-        "refusals": client.refusals,
-        "asked": asked,
-        "function_lines": PLACE.count("\n"),
-        "tail_line": tail_line,
-    }
-    print(json.dumps({**kept, "search": manifest["search"]}))
+    print(json.dumps({"refusals": client.refusals, "asked": asked, "search": manifest["search"]}))
 
 
 def _asked(state: dict) -> dict:
@@ -82,4 +94,4 @@ def _asked(state: dict) -> dict:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]))
+    main(Path(sys.argv[1]), sys.argv[2])

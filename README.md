@@ -767,8 +767,12 @@ judge's client (Jev's 32,000 tokens are 76,800 characters, `judgments.client.JEV
 request asking whether it is the target, and, when the opening is split, the request asking about each
 neighbour alone. Larger code is cut on a line boundary with a visible note, and `Visit.code` ends at
 the last shown line. A cut never grows back: under `neighbours_per_kind` a shorter cut can list a
-small neighbour in place of a large one, so the opening keeps that cut and the neighbours listed for it. If not even its first line fits, the place stays `not_inspected` with reason
-`budget`; Resume on a route with a larger box inspects that same source.
+small neighbour in place of a large one, so the opening keeps that cut and the neighbours listed for it.
+Every opening starts from the code that fits the request asking whether it is the target, and
+`find_code.shown_for_target(code, target, input_limits, found=FOUND, masker=DEFAULT_MASKER)` gives
+exactly that, for a caller that must show what Find shows. Every size check measures a request as
+the judge's masker leaves it (`judge.masked_request_fits`), since masking can make it longer. If not even its first line fits, the place stays
+`not_inspected` with reason `budget`; Resume on a route with a larger box inspects that same source.
 `questions=SearchQuestions(found=...,
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
 `places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `imported`,

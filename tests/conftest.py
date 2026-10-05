@@ -20,7 +20,7 @@ from jev_navigator.cache_root import cache_root
 from jev_navigator.data_root import data_root
 from jev_navigator.environment import SETTING_PREFIXES
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.judgments.answers import JevResponse, NoulAnswer
+from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
 from jev_navigator.judgments.questions import serialized_chars
 from jev_navigator.judgments.secrets import forget_hidden
@@ -262,8 +262,15 @@ class BudgetedClient:
                 f"(input of {body} characters, {box} of them state and the longest question)"
             )
         self.requests.append((state, questions))
-        answers = {question_id: NoulAnswer(self.default_noul) for question_id in questions}
+        answers = {question_id: self._answer(question) for question_id, question in questions.items()}
         return JevResponse(answers, self.model, 100)
+
+    def _answer(self, question: Mapping) -> NoulAnswer | ChoiceAnswer:
+        """A choice question gets its first option, any other question ``default_noul``."""
+        if question.get("type") != "choice":
+            return NoulAnswer(self.default_noul)
+        first, *others = question["criteria"]
+        return ChoiceAnswer.from_probabilities({first: 1.0, **dict.fromkeys(others, 0.0)})
 
     @staticmethod
     def _state_and_longest_question(state: Mapping, questions: Mapping) -> int:

@@ -38,9 +38,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..index import tools
-from .secrets import Masker, SecretMasker, mask_request
-
-DEFAULT_MASKER = SecretMasker()
+from .secrets import DEFAULT_MASKER, Masker, mask_request
 
 MANIFEST_LINE = "manifest.json sha256: "
 REGISTRATION_FILE = "registration.json"
