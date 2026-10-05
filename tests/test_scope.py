@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from git_repos import commit_all, git, write_files
+from git_repos import assume_another_owner, commit_all, git, write_files
 
 from jev_navigator.index import tools
 from jev_navigator.index.file_shape import Trigger, shape_of
@@ -260,7 +260,7 @@ def test_a_repository_git_refuses_is_never_scoped_as_a_plain_folder(
 ) -> None:
     # Arrange
     repo = _repository(tmp_path / "repo", {"app.py": SOURCE})
-    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    assume_another_owner(monkeypatch)
 
     # Act and assert
     with pytest.raises(tools.ToolFailedError, match="dubious ownership"):

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from git_repos import commit_all, commit_files, git, write_files
+from git_repos import assume_another_owner, commit_all, commit_files, git, write_files
 
 from jev_navigator.index import listing, tools
 from jev_navigator.index.code_index import CodeIndex
@@ -185,7 +185,7 @@ def test_a_repository_git_refuses_is_reported_instead_of_listed_as_a_plain_direc
     # Arrange: git refuses a repository it believes another user owns
     repository = tmp_path / "repository"
     commit_files(repository, {"a.py": "needle = 1\n"})
-    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    assume_another_owner(monkeypatch)
 
     # Act and assert
     with pytest.raises(tools.ToolFailedError, match="dubious ownership"):

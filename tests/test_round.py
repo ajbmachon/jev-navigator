@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from git_repos import commit_files, git
+from git_repos import assume_another_owner, commit_files, git
 
 from jev_navigator.index.tools import ToolFailedError
 from jev_navigator.judgments.round import (
@@ -158,7 +158,7 @@ def test_a_round_frozen_in_a_repository_git_refuses_fails_instead_of_recording_n
     checkout = tmp_path / "checkout"
     commit_files(checkout, {"a.py": "x = 1\n"})
     monkeypatch.chdir(checkout)
-    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    assume_another_owner(monkeypatch)
 
     # Act and assert
     with pytest.raises(ToolFailedError, match="dubious ownership"):

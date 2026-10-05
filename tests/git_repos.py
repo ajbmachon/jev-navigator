@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+
+import pytest
 
 
 def git(root: Path, *arguments: str, stdin: str | None = None) -> str:
@@ -42,3 +45,12 @@ def commit_files(root: Path, files: Mapping[str, str]) -> None:
 def read_files(root: Path, files: Iterable[str]) -> dict[str, bytes]:
     """Each file's bytes as an index first reads them, for calling the fact scan directly."""
     return {file: (root / file).read_bytes() for file in files}
+
+
+def assume_another_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Makes git believe another user owns every repository and read no system or user configuration,
+    so no ``safe.directory`` trusts it and git refuses it with "dubious ownership" on every machine.
+    CI runners trust every directory in their git configuration."""
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
