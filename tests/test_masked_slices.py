@@ -15,10 +15,11 @@ from jev_navigator.adapters.routes import DREX_INPUT_LIMITS
 from jev_navigator.directives import find_code, places, shown, trace
 from jev_navigator.directives.entry import _file_description, _preview
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.index.spans import Span
-from jev_navigator.judgments.judge import Judge
+from jev_navigator.index.spans import CodeSlice, Span
+from jev_navigator.judgments.client import InputLimits
+from jev_navigator.judgments.judge import Judge, masked_request_fits
 from jev_navigator.judgments.questions import Check, Criterion
-from jev_navigator.judgments.secrets import MASK, SecretMasker
+from jev_navigator.judgments.secrets import DEFAULT_MASKER, MASK, SecretMasker
 from jev_navigator.operations import TraceLink
 from jev_navigator.testing import ScriptedJevClient
 
@@ -260,3 +261,73 @@ def test_a_copy_in_one_file_of_a_value_keyed_in_another_is_hidden_in_the_sent_re
 
     # Assert
     assert [request for request in client.requests if COPY_VALUE[:12] in str(request)] == []
+
+
+# units-builder's fixtures (05.10.2026), measured on #110's head with the real masker.
+KEYED_TOKEN = "r8Kq2LmV9xTzP4wN7bYc3HdJ6fGs1QaE"
+SENDS = "".join(f'    client.send("{KEYED_TOKEN}")\n' for _ in range(4))
+LOGS = "".join(
+    f'    client.log("handshake step {step} with the remote authentication service")\n' for step in range(8)
+)
+RETURN = "    return client.open(API_KEY)\n"
+KEY_INSIDE = "def connect(client):\n" + SENDS + f'    API_KEY = "{KEYED_TOKEN}"\n' + LOGS + RETURN
+KEY_ABOVE = f'API_KEY = "{KEYED_TOKEN}"\n\n\n' + "def connect(client):\n" + SENDS + LOGS + RETURN
+AUTH_TARGET = "where the client authenticates"
+BOXES = range(840, 1640, 10)
+
+
+def _connect_slice(tmp_path: Path, source: str, first: int) -> CodeSlice:
+    index = _index(tmp_path, {"app/client.py": source})
+    return index.read_slice(Span("app/client.py", first, source.count("\n")))
+
+
+def _longest_fitting_start(code: CodeSlice, limits: InputLimits) -> int:
+    """By a linear scan, the most lines of ``code`` whose masked first-cut request fits ``limits``."""
+    lines = [shown.cut_long_line(line) for line in code.text.split("\n")]
+    questions = {find_code.FOUND.question_id: find_code.FOUND.to_question()}
+    target = find_code._target(AUTH_TARGET)
+    fitting = [
+        count
+        for count in range(1, len(lines) + 1)
+        if masked_request_fits(
+            find_code._opened_state(target, shown._first_lines(code, lines, count)),
+            questions,
+            limits,
+            DEFAULT_MASKER,
+        )
+    ]
+    return max(fitting, default=0)
+
+
+def test_finds_first_cut_shows_the_longest_start_that_fits_every_box(tmp_path: Path) -> None:
+    # Arrange: before whole-file masking, six lines fit a box that five did not, so the cut fell short
+    code = _connect_slice(tmp_path, KEY_INSIDE, 1)
+
+    # Act
+    cuts = {box: find_code.shown_for_target(code, AUTH_TARGET, InputLimits(box)) for box in BOXES}
+
+    # Assert
+    shown_ends = {box: cut.span.end if cut else 0 for box, cut in cuts.items()}
+    assert shown_ends == {box: _longest_fitting_start(code, InputLimits(box)) for box in BOXES}
+
+
+@pytest.mark.parametrize(
+    ("source", "first"),
+    [(KEY_INSIDE, 1), (KEY_ABOVE, 4)],
+    ids=["key-line-below-the-cut", "key-line-above-the-function"],
+)
+def test_finds_first_cut_shows_every_copy_of_a_keyed_value_masked(
+    tmp_path: Path, source: str, first: int
+) -> None:
+    # Arrange
+    code = _connect_slice(tmp_path, source, first)
+
+    # Act
+    cuts = [cut for box in BOXES if (cut := find_code.shown_for_target(code, AUTH_TARGET, InputLimits(box)))]
+
+    # Assert
+    assert cuts and all(KEYED_TOKEN not in cut.text for cut in cuts)
+    assert all(
+        cut.text.count(MASK) == cut.text.count("client.send(") + ("API_KEY = " in cut.text) for cut in cuts
+    )
+    assert sent_pieces(KEYED_TOKEN, {"slices": [cut.text for cut in cuts]}) == set()
