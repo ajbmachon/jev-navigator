@@ -11,6 +11,7 @@ as source. A file the secret scan refuses is never sent; it is named as not judg
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -19,7 +20,7 @@ from ..index import listing, tools
 from ..index.code_index import CodeIndex
 from ..index.file_shape import FileShape
 from ..index.scope import is_test_file
-from ..index.spans import TextHit
+from ..index.spans import TextWindow
 from .judge import CheckResult, Judge
 from .questions import Check, Criterion
 from .secrets import SecretInRequestError, mask_request, refuse_if_secret
@@ -32,6 +33,11 @@ NAMING_LINE_CHARS = 200
 NOT_JUDGED_SECRET = "not judged: the secret scan refused its entry"
 _PACKAGE_ENTRY_STEMS = frozenset({"index", "__init__"})
 _PATH_CHARACTERS = r"A-Za-z0-9_\-"
+# The characters of a token a secret can be written in, as the masker reads quoted values.
+_TOKEN_CHARACTERS = r"A-Za-z0-9+/=_\-"
+_TOKEN = re.compile(rf"[{_TOKEN_CHARACTERS}]+")
+_LEADING_TOKEN = re.compile(rf"^[{_TOKEN_CHARACTERS}]+")
+_TRAILING_TOKEN = re.compile(rf"[{_TOKEN_CHARACTERS}]+$")
 
 GENERATED_FILE = Check(
     name="generated_file",
@@ -71,7 +77,7 @@ def judge_generated_files(
     )
 
 
-def generated_file_entry(index: CodeIndex, path: str, shape: FileShape, naming: Sequence[TextHit]) -> dict:
+def generated_file_entry(index: CodeIndex, path: str, shape: FileShape, naming: Sequence[TextWindow]) -> dict:
     """One file as Jev sees it: path, measured facts, importers, the files naming it (``naming``, from
     ``files_naming``) and the two excerpts. Every field is a measurement or real text, never a verdict:
     no trigger names and no reasons. ``file_shape`` measures lines in bytes, so the line fields say so."""
@@ -91,7 +97,7 @@ def generated_file_entry(index: CodeIndex, path: str, shape: FileShape, naming: 
     }
 
 
-def files_naming(root: Path, paths: Sequence[str]) -> dict[str, tuple[TextHit, ...]]:
+def files_naming(root: Path, paths: Sequence[str]) -> dict[str, tuple[TextWindow, ...]]:
     """For each of ``paths``, the first line of every other file in the directory listing that names
     it as a whole path, non-test files first, then by file. One ripgrep pass, which prints only paths,
     finds the files naming any of them; each path's lines are then searched in those files alone."""
@@ -101,7 +107,7 @@ def files_naming(root: Path, paths: Sequence[str]) -> dict[str, tuple[TextHit, .
     return {path: _first_lines_naming(root, path, candidates) for path in paths}
 
 
-def _first_lines_naming(root: Path, path: str, candidates: Sequence[str]) -> tuple[TextHit, ...]:
+def _first_lines_naming(root: Path, path: str, candidates: Sequence[str]) -> tuple[TextWindow, ...]:
     """The first line of each candidate other than ``path`` that names it, as a window of up to
     ``NAMING_LINE_CHARS`` on either side of the name, so a one-line bundle never reaches Python whole."""
     others = [file for file in candidates if file != path]
@@ -129,26 +135,42 @@ def _whole_path(path: str) -> str:
     after it. ``lib/web/a.js``, ``web/a.json`` and a URL ending in ``/web/a.js`` do not name
     ``web/a.js``; neither do ``../web/a.js`` and ``$root/web/a.js``, whose folder is relative or
     variable."""
-    before = rf"(?:^|[^{_PATH_CHARACTERS}./])(?:\./|/)?"
-    after = rf"(?:$|[^{_PATH_CHARACTERS}/.]|\.(?:$|[^A-Za-z0-9]))"
+    before = rf"(?:^|[^{_PATH_CHARACTERS}./\n])(?:\./|/)?"
+    after = rf"(?:$|[^{_PATH_CHARACTERS}/.\n]|\.(?:$|[^A-Za-z0-9\n]))"
     return before + tools.literal_pattern(path) + after
 
 
-def _naming_order(hit: TextHit) -> tuple[bool, str]:
+def _naming_order(hit: TextWindow) -> tuple[bool, str]:
     return is_test_file(hit.file), hit.file
 
 
-def _naming_entry(hit: TextHit, path: str) -> dict:
-    return {"file": hit.file, "line": hit.line, "text": _window(hit.text.strip(), path)}
+def _naming_entry(window: TextWindow, path: str) -> dict:
+    return {"file": window.file, "line": window.line, "text": _naming_text(window, path)}
 
 
-def _window(text: str, path: str) -> str:
-    """``text`` when it fits ``NAMING_LINE_CHARS``, otherwise that many characters around ``path``."""
+def _naming_text(window: TextWindow, path: str) -> str:
+    """The naming line as Jev sees it: the whole line when it fits ``NAMING_LINE_CHARS``, otherwise
+    that many characters around ``path``. Where a cut splits a token, the token's part is dropped: a
+    secret cut away from its key no longer looks like one to the masker, so none of it is kept."""
+    text = _without_split_tokens(window.text, window.cut_start, window.cut_end).strip()
     if len(text) <= NAMING_LINE_CHARS:
         return text
     centre = text.index(path) + len(path) // 2
     start = min(max(0, centre - NAMING_LINE_CHARS // 2), len(text) - NAMING_LINE_CHARS)
-    return text[start : start + NAMING_LINE_CHARS]
+    end = start + NAMING_LINE_CHARS
+    return _without_split_tokens(text[start:end], _splits_token(text, start), _splits_token(text, end))
+
+
+def _splits_token(text: str, index: int) -> bool:
+    return 0 < index < len(text) and bool(_TOKEN.fullmatch(text[index - 1 : index + 1]))
+
+
+def _without_split_tokens(text: str, cut_start: bool, cut_end: bool) -> str:
+    if cut_start:
+        text = _LEADING_TOKEN.sub("", text, count=1)
+    if cut_end:
+        text = _TRAILING_TOKEN.sub("", text, count=1)
+    return text
 
 
 def _excerpts(text: str) -> dict[str, str]:

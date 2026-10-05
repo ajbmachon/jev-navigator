@@ -16,7 +16,7 @@ from typing import IO
 import msgspec
 
 from .file_shape import MAX_PARSE_PEAK_MB, Placement, placement_of
-from .spans import TextHit
+from .spans import TextHit, TextWindow
 
 AST_GREP = "ast-grep"
 RIPGREP = "rg"
@@ -272,28 +272,32 @@ def ripgrep_fixed(
     touches."""
     hit = literal_pattern(text)
     if whole_word:
-        hit = rf"(?:^|\W){hit}(?:\W|$)"
-    return ripgrep_windows(hit, files, cwd, max_hits, context_bytes)
+        hit = rf"(?:^|[^\w\n]){hit}(?:[^\w\n]|$)"
+    windows = ripgrep_windows(hit, files, cwd, max_hits, context_bytes)
+    return [TextHit(window.file, window.line, window.text) for window in windows]
 
 
 def ripgrep_windows(
     hit_pattern: str, files: Sequence[str], cwd: Path, max_hits: int, context_bytes: int
-) -> list[TextHit]:
+) -> list[TextWindow]:
     """The lines matching the ripgrep regular expression ``hit_pattern``, at most ``max_hits`` per
-    file, each as the bytes around its first hit: up to ``context_bytes`` before and after, so a
-    one-line bundle costs no more than a short line. The match runs on to the end of the line, so
-    each line matches once, and ``--replace`` prints only its window; ripgrep's JSON would carry the
-    whole line."""
+    file, each as the bytes around one hit: up to ``context_bytes`` before and after, so a one-line
+    bundle costs no more than a short line. A side holding all ``context_bytes`` may stop short of
+    the line's end there, so it counts as cut. The match runs on to the end of the line, so each line
+    matches once, and ``--replace`` prints only the hit and its context, each on its own line;
+    ripgrep's JSON would carry the whole line."""
     if not files:
         return []
-    pattern = f"(?P<window>(?-u:.){{0,{context_bytes}}}{hit_pattern}(?-u:.){{0,{context_bytes}}})(?-u:.)*"
+    context = f"(?-u:.){{0,{context_bytes}}}"
+    pattern = f"(?P<before>{context})(?P<hit>{hit_pattern})(?P<after>{context})(?-u:.)*"
     command = [*RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null"]
-    command += ["--max-count", str(max_hits), "--replace", "$window", "--regexp", pattern, "--"]
-    hits: dict[tuple[str, int], TextHit] = {}
+    command += ["--max-count", str(max_hits), "--replace", _WINDOW_FIELDS, "--regexp", pattern, "--"]
+    windows: dict[tuple[str, int], TextWindow] = {}
     for chunk in file_chunks(files, bytes_only=True):
-        for hit in _windows(command_output([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)):
-            hits.setdefault((hit.file, hit.line), hit)
-    return list(hits.values())
+        output = command_output([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
+        for window in _windows(output, context_bytes):
+            windows.setdefault((window.file, window.line), window)
+    return list(windows.values())
 
 
 def literal_pattern(text: str) -> str:
@@ -302,20 +306,33 @@ def literal_pattern(text: str) -> str:
     return "".join(char if char.isalnum() or char == "_" else f"\\x{{{ord(char):x}}}" for char in text)
 
 
-def _windows(output: bytes) -> Iterator[TextHit]:
-    """The hits of ripgrep's ``--null`` printer, ``path NUL line:window`` per line of output. A window
-    holds no newline, and a path ends at its NUL, so a newline in a path cannot split a record.
-    Bytes that are not UTF-8 are decoded the way the index reads files, with invalid bytes replaced."""
+# ripgrep ends a printed replacement with a newline unless it already ends with one, so the record
+# ends with a fixed mark: an empty ``after`` would otherwise leave the record without its own end.
+_WINDOW_FIELDS = "${before}\n${hit}\n${after}|"
+
+
+def _windows(output: bytes, context_bytes: int) -> Iterator[TextWindow]:
+    """The windows ripgrep's ``--null`` printer gives for ``_WINDOW_FIELDS``: ``path NUL line:before``,
+    then the hit, then the text after followed by ``|``, each ending in a newline. None of the three
+    holds a newline, and a path ends at its NUL, so a newline in a path cannot split a record. Bytes
+    that are not UTF-8 are decoded the way the index reads files, with invalid bytes replaced."""
     position = 0
     while position < len(output):
         path_end = output.index(b"\0", position)
         number_end = output.index(b":", path_end)
-        window_end = output.find(b"\n", number_end)
-        window_end = len(output) if window_end < 0 else window_end
-        path = output[position:path_end].decode(errors="replace").removeprefix("./")
-        window = output[number_end + 1 : window_end].decode(errors="replace").rstrip("\r")
-        yield TextHit(path, int(output[path_end + 1 : number_end]), window)
-        position = window_end + 1
+        before_end = output.index(b"\n", number_end)
+        hit_end = output.index(b"\n", before_end + 1)
+        record_end = output.index(b"|\n", hit_end + 1)
+        before = output[number_end + 1 : before_end]
+        after = output[hit_end + 1 : record_end]
+        yield TextWindow(
+            output[position:path_end].decode(errors="replace").removeprefix("./"),
+            int(output[path_end + 1 : number_end]),
+            (before + output[before_end + 1 : hit_end] + after).decode(errors="replace").rstrip("\r"),
+            cut_start=len(before) >= context_bytes,
+            cut_end=len(after) >= context_bytes,
+        )
+        position = record_end + 2
 
 
 def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -> tuple[str, ...]:

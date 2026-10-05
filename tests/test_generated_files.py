@@ -26,6 +26,7 @@ from jev_navigator.judgments.generated_files import (
     judge_generated_files,
 )
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.secrets import SecretMasker, mask_request
 from jev_navigator.testing import ScriptedJevClient
 
 BUNDLE = "".join(f"var a{number}=function(){{return {number}}};" for number in range(800)) + "\n"
@@ -177,7 +178,7 @@ def test_files_that_name_a_flagged_path_reach_jev_non_test_files_first_capped_wi
 
 
 def test_a_long_naming_line_reaches_jev_as_a_window_that_keeps_the_path(tmp_path: Path) -> None:
-    line = "a" * 500 + ' copy("web/bundle.js") ' + "b" * 500
+    line = "alpha " * 80 + 'copy("web/bundle.js") ' + "omega " * 80
     repo = _repository(tmp_path / "repo", {"web/bundle.js": BUNDLE, "scripts/copy.mjs": line + "\n"})
     index, awaiting = _awaiting(repo)
 
@@ -186,7 +187,7 @@ def test_a_long_naming_line_reaches_jev_as_a_window_that_keeps_the_path(tmp_path
         index, "web/bundle.js", awaiting["web/bundle.js"], naming["web/bundle.js"]
     )["named_by"]
 
-    assert len(named["text"]) == NAMING_LINE_CHARS
+    assert NAMING_LINE_CHARS - len("alpha") <= len(named["text"]) <= NAMING_LINE_CHARS
     assert 'copy("web/bundle.js")' in named["text"]
     assert named["text"] in line
 
@@ -313,3 +314,83 @@ def test_a_sentence_ending_with_the_path_names_it(tmp_path: Path) -> None:
 
     # Assert
     assert [(hit.file, hit.line) for hit in naming["web/bundle.js"]] == [("README.md", 1)]
+
+
+# Made-up values with a secret's shape; none was ever a credential.
+OPAQUE_VALUE = "Zq8mKx2LpR7vWn4TsB9cHd3FgJ6aE1yU" * 4
+EDGE_TOKENS = ("Q7xK2mZp9LwR4vTn8YsB3cHd6FgJ1aE5", "Yt5Rw2Nq8Lm3Kp7Vx4Bz9Cs6Dh1Fj0Gk")
+
+
+def _sent_naming_texts(repo: Path, path: str) -> list[str]:
+    """The naming text of each file naming ``path``, as the judge would send it, masked."""
+    index, awaiting = _awaiting(repo)
+    entries = [
+        generated_file_entry(index, path, awaiting[path], (hit,))["named_by"][0]
+        for hit in files_naming(repo, [path])[path]
+    ]
+    masked, _, _ = mask_request({"named_by": entries}, {}, SecretMasker())
+    return [entry["text"] for entry in masked["named_by"]]
+
+
+def _pieces(value: str, length: int) -> set[str]:
+    return {value[start : start + length] for start in range(len(value) - length + 1)}
+
+
+def test_a_secret_whose_key_falls_outside_the_naming_window_stays_masked(tmp_path: Path) -> None:
+    # Arrange: jvn-verifier's shape; masked whole, the line hides the value, but the 200-character
+    # window around the path holds the value without its key
+    line = f'{{"apiKey": "{OPAQUE_VALUE}", "padding": "{"x" * 40}", "output": "web/gen.js"}}'
+    repo = _repository(tmp_path / "repo", {"web/gen.js": BUNDLE, "app/build.js": line + "\n"})
+
+    # Act
+    [text] = _sent_naming_texts(repo, "web/gen.js")
+
+    # Assert
+    assert "web/gen.js" in text
+    assert not any(piece in text for piece in _pieces(OPAQUE_VALUE, 6))
+
+
+def test_a_token_cut_at_either_edge_of_the_naming_window_leaves_no_piece(tmp_path: Path) -> None:
+    # Arrange: the window keeps NAMING_LINE_CHARS around the path, so with these fillers its left
+    # edge sweeps across the head token and its right edge across the tail token, one character per
+    # naming line, leaving fragments of every length shorter than a token
+    head, tail = EDGE_TOKENS
+    namers = {
+        f"scripts/s{shift}.mjs": f'{head} {"w" * (56 + shift)} copy("web/gen.js") {"w" * (90 - shift)} {tail}'
+        + "\n"
+        for shift in range(31)
+    }
+    repo = _repository(tmp_path / "repo", {"web/gen.js": BUNDLE, **namers})
+
+    # Act
+    texts = _sent_naming_texts(repo, "web/gen.js")
+
+    # Assert
+    assert len(texts) == 31 and all("web/gen.js" in text for text in texts)
+    leaked = {
+        piece for text in texts for token in EDGE_TOKENS for piece in _pieces(token, 4) if piece in text
+    }
+    assert leaked == set()
+
+
+def test_a_token_cut_where_the_search_stops_reading_leaves_no_piece(tmp_path: Path) -> None:
+    # Arrange: four-byte characters make the search's 200 bytes of context fewer than
+    # NAMING_LINE_CHARS characters, so the edges where the search stopped reading reach Jev; each
+    # line shifts both edges one character further into a token
+    head, tail = EDGE_TOKENS
+    namers = {
+        f"scripts/s{shift}.mjs": f'{head} {"🙂" * 40}{"w" * shift} copy("web/gen.js") {"w" * (32 - shift)}'
+        + f"{'🙂' * 40} {tail}\n"
+        for shift in range(1, 27)
+    }
+    repo = _repository(tmp_path / "repo", {"web/gen.js": BUNDLE, **namers})
+
+    # Act
+    texts = _sent_naming_texts(repo, "web/gen.js")
+
+    # Assert
+    assert len(texts) == 26 and all("web/gen.js" in text and len(text) < NAMING_LINE_CHARS for text in texts)
+    leaked = {
+        piece for text in texts for token in EDGE_TOKENS for piece in _pieces(token, 4) if piece in text
+    }
+    assert leaked == set()
