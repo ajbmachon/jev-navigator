@@ -259,7 +259,7 @@ def test_a_file_changed_during_a_search_is_only_unavailable_and_the_scan_finishe
     assert unparsed == frozenset()
 
 
-def test_symbols_on_the_same_lines_are_ordered_by_name_on_every_scan(tmp_path: Path) -> None:
+def test_symbols_on_the_same_lines_keep_their_source_order_on_every_scan(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "chain.ts").write_text("export const o = { b() { return 1; }, a() { return 2; } };\n")
 
@@ -270,7 +270,7 @@ def test_symbols_on_the_same_lines_are_ordered_by_name_on_every_scan(tmp_path: P
 
     # Assert
     assert all(run == runs[0] for run in runs)
-    assert [span.name for span in runs[0].structure.functions] == ["a", "b"]
+    assert [span.name for span in runs[0].structure.functions] == ["b", "a"]
 
 
 def test_listing_callees_starts_no_text_search_for_the_names_called(
@@ -458,7 +458,7 @@ def test_binding_many_calls_to_one_name_checks_each_definition_once(
     assert {(site.binding.status, site.binding.target.file) for site in sites} == {
         ("resolved", "app/store.py")
     }
-    assert checked == {"app/store.py": 1, "app/backup.py": 1, "app/model.py": 1}
+    assert checked == {"app/store.py": 1}
 
 
 @pytest.mark.parametrize(

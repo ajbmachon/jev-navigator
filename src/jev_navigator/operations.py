@@ -10,7 +10,7 @@ import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from .index.bindings import Binding, BindingStatus
+from .index.bindings import Binding, BindingStatus, names_exactly
 from .index.code_index import CodeIndex
 from .index.languages import language_of
 from .index.spans import CallSite, CodeSlice, Span
@@ -296,7 +296,7 @@ def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ..
                 for target in targets
             )
     for site in index.find_callers(function.name):
-        if not _binding_can_target(site.binding, function):
+        if not names_exactly(site.binding, function):
             continue
         links.append(
             TraceLink(
@@ -346,7 +346,7 @@ def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ..
                 for target in targets
             )
     for reference in index.find_references(function.name):
-        if not _binding_can_target(reference.binding, function):
+        if not names_exactly(reference.binding, function):
             continue
         links.append(
             TraceLink(
@@ -371,10 +371,6 @@ def _other_end(function: Span, link: TraceLink) -> Span | None:
     return None
 
 
-def _binding_can_target(binding: Binding | None, function: Span) -> bool:
-    return binding is None or binding.target is None or binding.target.key == function.key
-
-
 def _link_key(link: TraceLink) -> tuple:
     return (
         link.source.key if link.source is not None else "",
@@ -392,7 +388,7 @@ def _caller_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Bind
     return [
         (site.caller, site.binding)
         for site in index.find_callers(function.name)
-        if site.caller is not None and _binding_can_target(site.binding, function)
+        if site.caller is not None and names_exactly(site.binding, function)
     ]
 
 

@@ -27,6 +27,9 @@ class Span:
     def size(self) -> int:
         return self.end - self.start + 1
 
+    def overlaps(self, other: Span) -> bool:
+        return self.file == other.file and self.start <= other.end and other.start <= self.end
+
 
 def holder_of(symbols: Iterable[Span], symbol: Span) -> Span | None:
     """The smallest of ``symbols`` whose lines contain ``symbol``'s and fill more of them: a method's

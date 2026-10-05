@@ -364,7 +364,7 @@ and turns each match into its fact as ast-grep prints it, so memory holds the fa
 parser's output, and no command line outgrows the system's argument limit. Calls are ordered by
 where they start in the file, and of two calls starting at one place (`new Foo(a).bar()` and
 `new Foo(a)`) the outer comes first, so every run returns them in the same order; symbols spanning
-the same lines are ordered by name.
+the same lines keep the order they start in.
 Exact-name lookups (definitions, callers, call counts and references) read the persistent name table
 in `$XDG_CACHE_HOME/jev-navigator/names`, which ties every name to the lines it sits on in each file
 content. A file's content is identified by its git blob id, taken from the Git listing for a clean
@@ -428,7 +428,8 @@ parsing (it prints nothing for a file that is not valid UTF-8, or for one of mor
 bytes and 200,000 lines, which a file parsed alone can be) is refused too, as `not parsed`, and is
 never taken for a file without functions. A refused file is never recorded as parsed: it stays readable and
 searchable as text, it keeps its path in import relations (also as a re-export target), a name its
-bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
+bytes mention binds `unknown`, so does any name imported from it, whether or not its bytes say the
+name (a default export never needs the word `default`), `jvn stats` names it as never scanned, and `find_comments` lists it in
 `refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
 lookup that triggered it.
 
@@ -436,7 +437,44 @@ Calls are found by name in the syntax tree, which is not a resolved binding. Eve
 `Binding(status, reason, target)`: `resolved` when a module-level definition in the same file, or one
 an import names, proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
 definition elsewhere with no import), `unresolved` when nothing in scope defines it, and `unknown` when
-the definition may sit in lines the index could not parse. References carry a binding too. A
+the definition may sit in lines the index could not parse. Inside a TypeScript namespace a use first
+names a member of the innermost namespace around it that defines the name, exported or not, so
+`config` in `namespace B` is B's own and never namespace A's, nor an import's; outside it, a member is
+no module-level definition. Lines are the unit, so a use on the namespace's first or last line stays a
+candidate, and one namespace split over two blocks is not merged. Lines the parser lost inside the
+namespace that mention the name leave the use `unknown`; lost lines elsewhere never pass the member over. A call `jwt.verify()` where module-level
+code binds `jwt` to a whole module of the scope (`import * as jwt`, `const jwt = require('./jwt')`,
+in Python `import app.jwt as jwt`, and `app.jwt.verify()` after `import app.jwt`, all read from the
+syntax tree) binds to the `verify` that module, or one it re-exports from, defines; only that module's
+facts are read. A name a function binds for its own body (a parameter, a local
+variable, a caught error or a loop variable) replaces any module-level definition or import of that
+name inside the function: `db.query()` with a parameter `db`, or `stop()` with a parameter `stop`,
+binds to no import; it is a `candidate` whose local value is not resolved. A function counts from its
+first line, so on `stream(c, async (stream) => ...)` the outer call counts as inside the callback.
+Types are looked up apart from values, so a local value never replaces a type. A call `halt()` where
+`halt` imports a definition under another name (`import { stop as halt }`, `const { stop: halt } =
+require(...)`, `from m import stop as halt`) binds the same way to `stop`, unless the file defines
+`halt` itself. A default import, under any local name, takes the module's default export; the default's own name is no named export, so `import { make }`, `defaults.make()` and `const { solo } = require(...)` of a default reach nothing. Every import, by name, under another
+name, as a default or through a module alias, is decided the same way from the module it names and
+the modules that one re-exports the name from: one definition proves the target, several leave a
+`candidate`, an exporting module that could not be parsed where it mentions the name, or that
+vanished, leaves it `unknown`, and a module with no definition exported under the name leaves a
+`candidate` that says so. A name a module imports and passes on without an `export ... from`, as a
+Python module's own `from pkg.core import compute`, is not followed. A function or class
+held by another function, a class or an object literal, or assigned to a property (`foo.bar =
+function () {}`), is no module-level definition, and neither is a function or class expression's own
+name (`run(function handler() {})`), which is bound only inside it. One assigned to `exports.x` or
+`module.exports.x`,
+or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not.
+An import reaches only what its module exports. A Python module exports its whole module scope. A
+script module exports the definitions an `export` statement or its own list names, under the name the
+list gives them (`export { inner as outer }` exports `inner` as `outer`, never a private `outer`),
+its default export
+(`export default build`, `module.exports = build`), and its CommonJS exports (`exports.query = query`,
+`module.exports = { log }`, and under another name `exports.parse = urlParse`); a module that exports
+`new Logger()` exports no `log`, and an unexported helper stays its own module's. Each name an exported
+destructuring binds, as `a` and `c` in `export const { a, b: c } = ...`, is an export. References carry
+a binding too. A
 binding counts only the definitions its site can name: a type, a class or a declaration a type can
 name, such as an interface; an export, any definition; and a call or any other reference (an
 argument, receiver, condition or decorator), a function, class or declaration a value can name, such
@@ -699,12 +737,13 @@ contain the code described in `target.description`?" and, per neighbour code lis
 callers in test files after the others; callees, proven production targets first and then the ones
 called from fewest places; code that
 refers to it or that it passes on without a call, as an argument, collection entry, assignment,
-decorator, export, return, method receiver or type; the modules it imports, re-exports or requires
-(module-level code takes its whole file's imports): the definitions of the names it takes from each,
-and the start of a module it takes whole or takes names from that it does not define itself; the
-other functions of its file, nearest first; lines anywhere in scope (docs and config too) that
-mention its environment variables or its quoted keys (six characters or more with a dot,
-underscore, colon, slash or dash), the
+decorator, export, return, method receiver, type or base class (also a qualified one, `pkg.Base`); the
+modules it imports, re-exports
+or requires (module-level code takes its whole file's imports): the definitions of the names it
+takes from each, and the start of a module it takes whole or takes names from that it does not
+define itself; the other functions of its file, nearest first; lines anywhere in scope (docs and
+config too) that mention its environment variables or its quoted keys (six characters or more with
+a dot, underscore, colon, slash or dash), the
 rarest key first, skipping a key found on more than 30 lines; co-changed files; and the lines before and
 after it), whether the target could be inside it. Places that open the same lines of the same file are
 listed once, whatever move found them, and a place wholly inside the opened code is not listed;

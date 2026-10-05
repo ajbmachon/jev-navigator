@@ -15,7 +15,17 @@ from ..cache_root import cache_root
 from ..confirmation import day_of, today
 from . import imports, languages, scope_scan, spans, tools
 from .languages import FLOW_LANGUAGE, parse_language, sgconfig_of
-from .scope_scan import READ_AGAIN_AS_FLOW, CallMatch, FileFacts, FileStructure, ReferenceMatch, fact_rules
+from .scope_scan import (
+    READ_AGAIN_AS_FLOW,
+    CallMatch,
+    FileFacts,
+    FileStructure,
+    LocalName,
+    ModuleAlias,
+    NamespaceMember,
+    ReferenceMatch,
+    fact_rules,
+)
 from .spans import Span
 from .tools import ast_grep_version
 
@@ -160,6 +170,15 @@ def _encode(facts: FileFacts) -> dict:
             "functions": [asdict(span) for span in facts.structure.functions],
             "symbols": [asdict(span) for span in facts.structure.symbols],
             "declarations": [asdict(span) for span in facts.structure.declarations],
+            "module_symbols": [asdict(span) for span in facts.structure.module_symbols],
+            "commonjs_exports": [asdict(span) for span in facts.structure.commonjs_exports],
+            "type_declarations": [asdict(span) for span in facts.structure.type_declarations],
+            "value_declarations": [asdict(span) for span in facts.structure.value_declarations],
+            "local_names": [list(local) for local in facts.structure.local_names],
+            "namespace_members": [
+                [member.first, member.last, asdict(member.span)]
+                for member in facts.structure.namespace_members
+            ],
             "decorated": [list(decorated) for decorated in facts.structure.decorated],
             "stubs": [list(stub) for stub in facts.structure.stubs],
         },
@@ -168,6 +187,9 @@ def _encode(facts: FileFacts) -> dict:
         "incomplete": facts.incomplete,
         "export_names": list(facts.export_names),
         "unparsed_lines": [list(stretch) for stretch in facts.unparsed_lines],
+        "module_aliases": [list(alias) for alias in facts.module_aliases],
+        "exported_values": list(facts.exported_values),
+        "renamed_exports": [list(pair) for pair in facts.renamed_exports],
         "language": facts.language,
     }
 
@@ -179,6 +201,15 @@ def _decode(file: str, raw: dict) -> FileFacts:
             tuple(_span(file, span) for span in structure["functions"]),
             tuple(_span(file, span) for span in structure["symbols"]),
             tuple(_span(file, span) for span in structure["declarations"]),
+            tuple(_span(file, span) for span in structure["module_symbols"]),
+            tuple(_span(file, span) for span in structure["commonjs_exports"]),
+            tuple(_span(file, span) for span in structure["type_declarations"]),
+            tuple(_span(file, span) for span in structure["value_declarations"]),
+            tuple(LocalName(int(first), int(last), name) for first, last, name in structure["local_names"]),
+            tuple(
+                NamespaceMember(int(first), int(last), _span(file, span))
+                for first, last, span in structure["namespace_members"]
+            ),
             tuple((int(start), int(end), int(line)) for start, end, line in structure["decorated"]),
             tuple((int(start), int(end)) for start, end in structure["stubs"]),
         ),
@@ -192,5 +223,8 @@ def _decode(file: str, raw: dict) -> FileFacts:
         bool(raw["incomplete"]),
         tuple(raw.get("export_names", ())),
         tuple((int(start), int(end)) for start, end in raw["unparsed_lines"]),
+        tuple(ModuleAlias(name, specifier) for name, specifier in raw["module_aliases"]),
+        tuple(raw["exported_values"]),
+        tuple((exported, own) for exported, own in raw["renamed_exports"]),
         language=raw["language"],
     )

@@ -18,9 +18,18 @@ from typing import TypeVar
 from ..judgments.masked_text import masked_lines
 from ..judgments.secrets import DEFAULT_MASKER, Masker, hidden_scope
 from . import listing, tools
-from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
+from .bindings import (
+    Binding,
+    BindingResolver,
+    CallFacts,
+    binding_from_facts,
+    binding_in_namespace,
+    local_binding,
+    unparsed_binding,
+)
 from .fact_cache import FactCache
 from .imports import (
+    ImportedName,
     ImportFact,
     imported_modules,
     imported_names,
@@ -29,14 +38,20 @@ from .imports import (
     resolve_import,
 )
 from .languages import (
-    declares_type,
-    declares_value,
     language_of,
 )
 from .memo import memoized
 from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
-from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
+from .scope_scan import (
+    CallMatch,
+    FileFacts,
+    FileStructure,
+    ReferenceMatch,
+    Unparsed,
+    first_identifier,
+    scan_facts,
+)
 from .source_files import DISAPPEARED, SourceFiles
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
@@ -55,7 +70,7 @@ _Result = TypeVar("_Result")
 CoChange = tuple[str, int]
 
 
-_NO_STRUCTURE = FileStructure((), (), ())
+_NO_STRUCTURE = FileStructure()
 _KIND_ORDER = {kind: rank for rank, kind in enumerate((*DEFINITION_KINDS, CALL, REFERENCE))}
 
 
@@ -406,11 +421,13 @@ class CodeIndex:
         return tuple(sorted(_outermost(self.symbols_in(file)), key=lambda span: (span.start, -span.end)))
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
-        """Module-level constants, assignments, types, interfaces and enums."""
+        """Constants, assignments, types, interfaces and enums at module level or directly in a
+        TypeScript namespace."""
         return self._file_structure(file).declarations
 
     def find_definition(self, name: str) -> tuple[Span, ...]:
-        """Functions, classes, and module-level constants, assignments, types, interfaces and enums."""
+        """Functions, classes, and the constants, assignments, types, interfaces and enums of
+        ``declarations_in``."""
         return self._definitions_by_name(name)
 
     def find_callers(self, name: str) -> tuple[CallSite, ...]:
@@ -453,10 +470,11 @@ class CodeIndex:
 
     def find_references(self, name: str) -> tuple[Reference, ...]:
         """Uses of ``name`` that are not calls: arguments, collection entries, assignments,
-        decorators, exports, returns, method receivers, types and conditions, each with its role,
-        holder and binding. Code reached this way (a callback, a registry entry, a parameter typed
-        with a class) has no call edge to follow. A member passed as an argument (``self.handler``)
-        is bound like a method call on an unknown receiver, never proven by a same-named function."""
+        decorators, exports, returns, method receivers, types, base classes and conditions, each
+        with its role, holder and binding. Code reached this way (a callback, a registry entry, a
+        parameter typed with a class, a subclass) has no call edge to follow. A member passed as an
+        argument (``self.handler``) is bound like a method call on an unknown receiver, never proven
+        by a same-named function."""
         matches = self._references_with_name(name)
         self._load_facts_for_bindings(name, (match.file for match in matches))
         return self._references(matches)
@@ -503,17 +521,87 @@ class CodeIndex:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
-        definitions, top_level = self._nameable_definitions(name, role)
-        facts = CallFacts(
+        if not self._binds_locally(file, line, name, receiver, role):
+            enclosing = self._binding_beyond_the_function(file, line, name, receiver, role)
+            if enclosing is not None:
+                return enclosing
+        elif receiver is None:
+            return local_binding(name)
+        return binding_from_facts(self._call_facts(file, name, receiver, role))
+
+    def _binding_beyond_the_function(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None
+    ) -> Binding | None:
+        """A use no function binds for itself names, in this order, a member of a namespace around
+        it, then what its module imports under that name; a method call names the module its
+        receiver holds."""
+        if receiver is not None:
+            return self._binding_through_module(file, name, receiver, role)
+        in_namespace = self._binding_in_namespace(file, line, name, role)
+        return in_namespace if in_namespace is not None else self._binding_through_import(file, name, role)
+
+    def _call_facts(self, file: str, name: str, receiver: str | None, role: str | None) -> CallFacts:
+        definitions, module_scope = self._nameable_definitions(name, role)
+        return CallFacts(
             file,
             name,
             receiver,
             definitions,
-            top_level,
-            self._imported_from(file, name),
+            module_scope,
+            (),
+            (),
             self._files_hiding(name),
         )
-        return binding_from_facts(facts)
+
+    def _binding_in_namespace(self, file: str, line: int, name: str, role: str | None) -> Binding | None:
+        """A use inside a TypeScript namespace names a member of the innermost namespace around it that
+        defines ``name`` before anything outside, imports included; None when no namespace around
+        the line does. Lines the index could not parse inside that namespace which mention ``name``
+        may hide a closer definition, which leaves the use unknown; lost lines outside it cannot."""
+        members = [
+            member
+            for member in self._file_structure(file).namespace_members
+            if member.first <= line <= member.last
+            and member.span.name == name
+            and self._can_name(role, member.span)
+        ]
+        if not members:
+            return None
+        first, last = max(
+            ((member.first, member.last) for member in members), key=lambda lines: (lines[0], -lines[1])
+        )
+        if self._unread_lines_mention(file, name, first, last):
+            return unparsed_binding(name, (file,))
+        innermost = [member.span for member in members if (member.first, member.last) == (first, last)]
+        return binding_in_namespace(name, line, (first, last), innermost)
+
+    def _unread_lines_mention(self, file: str, name: str, first: int, last: int) -> bool:
+        """Whether lines ``first`` to ``last`` of ``file`` that its ERROR nodes span mention ``name``."""
+        lines = self._lines_of(file)
+        return any(
+            name in _WORD.findall(text)
+            for start, end in self._facts_in(file).unparsed_lines
+            for text in lines[max(start, first) - 1 : min(end, last)]
+        )
+
+    def _binds_locally(self, file: str, line: int, name: str, receiver: str | None, role: str | None) -> bool:
+        """Whether a function holding ``line`` binds the name the use looks up first for its own body:
+        ``stop`` in ``stop()``, ``db`` in ``db.query()``. That name then holds a local value, never a
+        definition, import or module alias of its module; a method on it is still looked up by its
+        own name. A type is looked up among types, which no local value replaces, and an export names
+        module-level code. A function counts from its first line, so a call on that line before the
+        function starts counts as inside it."""
+        if role in ("type", "export"):
+            return False
+        looked_up = name if receiver is None else first_identifier(receiver)
+        return any(first <= line <= last for first, last in self._read_local_scopes(file).get(looked_up, ()))
+
+    @memoized
+    def _read_local_scopes(self, file: str) -> dict[str, tuple[tuple[int, int], ...]]:
+        scopes: dict[str, list[tuple[int, int]]] = {}
+        for local in self._file_structure(file).local_names:
+            scopes.setdefault(local.name, []).append((local.first, local.last))
+        return {name: tuple(lines) for name, lines in scopes.items()}
 
     def _load_facts_for_bindings(self, name: str, use_files: Iterable[str]) -> None:
         """Loads, in one scan, the facts that binding the uses of ``name`` reads: the files the uses
@@ -527,10 +615,10 @@ class CodeIndex:
 
     @memoized
     def _nameable_definitions(self, name: str, role: str | None) -> tuple[tuple[Span, ...], tuple[Span, ...]]:
-        """The definitions of ``name`` a use in ``role`` can name, and those of them at top level.
-        Neither depends on where the use sits, so every use of a name shares them."""
+        """The definitions of ``name`` a use in ``role`` can name, and those of them their module's
+        scope names. Neither depends on where the use sits, so every use of a name shares them."""
         definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
-        return definitions, tuple(span for span in definitions if span in self._top_level_spans(span.file))
+        return definitions, tuple(span for span in definitions if span in self._module_scope_spans(span.file))
 
     def _files_hiding(self, name: str) -> frozenset[str]:
         """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed or
@@ -572,8 +660,7 @@ class CodeIndex:
         structure = self._facts_in(span.file).structure
         if span in structure.symbols:
             return role != "type" or span not in structure.functions
-        first_line = self._lines_of(span.file)[span.start - 1]
-        return declares_type(first_line) if role == "type" else declares_value(first_line)
+        return span in (structure.type_declarations if role == "type" else structure.value_declarations)
 
     @memoized
     def _calls_with_name(self, name: str) -> tuple[CallMatch, ...]:
@@ -736,22 +823,129 @@ class CodeIndex:
                 files = available
 
     @memoized
-    def _top_level_spans(self, file: str) -> frozenset[Span]:
-        """Symbols and declarations of ``file`` that no class or other function contains. A function
-        starting on a declaration's first line is the value it declares, not its container."""
-        symbols = self.symbols_in(file)
-        top_symbols = _outermost(symbols)
-        top_declarations = (
-            span
-            for span in self.declarations_in(file)
-            if not any(other.start < span.start <= other.end for other in symbols)
-        )
-        return frozenset((*top_symbols, *top_declarations))
+    def _module_scope_spans(self, file: str) -> frozenset[Span]:
+        """Symbols and declarations that ``file``'s module scope names; the scan decides it for
+        symbols from the syntax tree."""
+        return frozenset((*self._file_structure(file).module_symbols, *self._module_declarations(file)))
 
-    def _imported_from(self, file: str, name: str) -> tuple[ImportFact, ...]:
-        specifier = self._read_imported_names(file).get(name)
-        if specifier is None:
-            return ()
+    def _module_declarations(self, file: str) -> tuple[Span, ...]:
+        """The declarations no class, function or namespace contains. A function starting on a
+        declaration's first line is the value it declares, not its container."""
+        structure = self._file_structure(file)
+        members = {member.span for member in structure.namespace_members}
+        return tuple(
+            span
+            for span in structure.declarations
+            if span not in members
+            and not any(other.start < span.start <= other.end for other in structure.symbols)
+        )
+
+    def _binding_through_module(
+        self, file: str, name: str, receiver: str, role: str | None
+    ) -> Binding | None:
+        """The binding of ``receiver.name`` when ``receiver`` holds a whole module of the scope
+        (``import * as receiver``, ``const receiver = require(...)``), decided like an import of
+        ``name`` from that module (see ``_binding_through_exporters``). None when ``receiver`` holds
+        no module of the scope."""
+        specifier = self._module_alias(file, receiver)
+        return None if specifier is None else self._binding_through_exporters(file, specifier, name, role)
+
+    def _binding_through_import(self, file: str, name: str, role: str | None) -> Binding | None:
+        """The binding of ``name()`` when ``file`` imports ``name``: by that name or under another
+        (``import { stop as name }``, ``const { stop: name } = require(...)``, ``from m import stop as
+        name``), or as a default import, which takes the module's default export. Decided from the module the
+        import names (see ``_binding_through_exporters``). None when nothing imports ``name``, when
+        ``file`` defines ``name`` itself, or when the import names no module of the scope."""
+        imported = self._read_imported_names(file).get(name)
+        if imported is None or self._defines(file, name, role):
+            return None
+        return self._binding_through_exporters(file, imported.specifier, imported.exported or "default", role)
+
+    def _binding_through_exporters(
+        self, file: str, specifier: str, name: str, role: str | None
+    ) -> Binding | None:
+        """The binding of ``name`` imported from the module ``specifier`` names, read from that
+        module's own facts and those of the modules it re-exports ``name`` from, never from a search
+        of the scope: one definition proves the target, several leave a candidate, an exporter that
+        may hide it (see ``_hides``) leaves it unknown, and no definition leaves a candidate naming
+        the modules. None when ``specifier`` names no module of the scope."""
+        exporters = self._read_exporters(file, specifier, name)
+        if not exporters:
+            return None
+        definitions = tuple(
+            span
+            for exporter in exporters
+            for span in self._read_importable_definitions(exporter.path, name, role)
+        )
+        hiding = {exporter.path for exporter in exporters if self._hides(exporter.path, name)}
+        return binding_from_facts(
+            CallFacts(file, name, None, definitions, (), definitions, exporters, hiding)
+        )
+
+    def _hides(self, exporter: str, name: str) -> bool:
+        """Whether ``exporter`` may export ``name`` where the index cannot see it: the parser refused
+        the file, so nothing it exports was read, or its unparsed lines mention ``name`` or the name
+        of a definition it exports as ``name`` (see ``_own_names``), or it vanished."""
+        if self._refused_parse(exporter):
+            return True
+        looked_up = {name, *self._own_names(exporter, name)}
+        return any(exporter in self._files_hiding(each) for each in looked_up)
+
+    def _refused_parse(self, file: str) -> bool:
+        """Whether the parser refused ``file`` (see ``refused_files``), asking for its facts first, so
+        the answer never depends on what was read before."""
+        self._facts_in(file)
+        return file in self._refused
+
+    def _defines(self, file: str, name: str, role: str | None) -> bool:
+        """Whether ``file``'s module scope defines ``name`` as a definition ``role`` can name."""
+        return any(
+            span.name == name and self._can_name(role, span) for span in self._module_scope_spans(file)
+        )
+
+    @memoized
+    def _read_importable_definitions(self, file: str, name: str, role: str | None) -> tuple[Span, ...]:
+        """The definitions another module imports from ``file`` as ``name``, symbols before
+        declarations as ``find_definition`` orders them; every importer shares them. A Python module
+        exports its whole module scope under its own names. A script module exports the module-scope
+        definition an export statement or list names, its default export or a CommonJS export of that
+        name, under its own name or the one an export list gives it (`export { inner as outer }`), and
+        the functions and classes it assigns to CommonJS exports."""
+        structure = self._file_structure(file)
+        own_names = self._own_names(file, name)
+        exported = {span for span in self._module_scope_spans(file) if span.name in own_names}
+        exported |= {span for span in structure.commonjs_exports if span.name == name}
+        return tuple(
+            span
+            for span in (*structure.symbols, *structure.declarations)
+            if span in exported and self._can_name(role, span)
+        )
+
+    def _own_names(self, file: str, name: str) -> frozenset[str]:
+        """The names of the definitions ``file`` exports as ``name``: the same name in a Python
+        module, and in a script module the ones ``_read_export_names`` gives."""
+        return (
+            frozenset((name,))
+            if language_of(file) == "python"
+            else self._read_export_names(file).get(name, frozenset())
+        )
+
+    @memoized
+    def _read_export_names(self, file: str) -> dict[str, frozenset[str]]:
+        """Each name script module ``file`` exports from its own definitions, ``default`` for its
+        default export, with the names of the definitions it may export under it: a module that
+        assigns `module.exports` twice has two."""
+        facts = self._facts_in(file)
+        renamed: dict[str, set[str]] = {}
+        for exported, own in facts.renamed_exports:
+            renamed.setdefault(exported, set()).add(own)
+        own_names = {name: frozenset((name,)) for name in (*facts.export_names, *facts.exported_values)}
+        return own_names | {exported: frozenset(owns) for exported, owns in renamed.items()}
+
+    @memoized
+    def _read_exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
+        """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
+        ``name`` from, with the evidence for each."""
         resolved = resolve_import(
             specifier, file, self._scope, self._script_paths(file), self._read_packages()
         )
@@ -762,8 +956,7 @@ class CodeIndex:
         seen = {(resolved.path, resolved.proven)}
         while pending:
             exporter = pending.pop()
-            source = "\n".join(self._lines_of(exporter.path))
-            for names, target_specifier in reexported_names(source, exporter.path):
+            for names, target_specifier in self._read_reexports(exporter.path):
                 if names is not None and name not in names:
                     continue
                 target = resolve_import(
@@ -784,8 +977,7 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                exported = self._facts_in(inherited.path).export_names
-                if inherited.path in self._refused or name in exported:
+                if self._refused_parse(inherited.path) or name in self._read_export_names(inherited.path):
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited
@@ -793,8 +985,18 @@ class CodeIndex:
         return tuple(found.values())
 
     @memoized
-    def _read_imported_names(self, file: str) -> dict[str, str]:
+    def _read_reexports(self, file: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
+        return reexported_names("\n".join(self._lines_of(file)), file)
+
+    @memoized
+    def _read_imported_names(self, file: str) -> dict[str, ImportedName]:
         return imported_names("\n".join(self._lines_of(file)), file)
+
+    def _module_alias(self, file: str, name: str) -> str | None:
+        """The module ``name`` holds when module-level code binds it to one whole module (see
+        ``ModuleAlias``); None when it binds it to none or to two."""
+        specifiers = {alias.specifier for alias in self._facts_in(file).module_aliases if alias.name == name}
+        return specifiers.pop() if len(specifiers) == 1 else None
 
     def read_slice(self, span: Span, origin: str = "") -> CodeSlice:
         """The span's code as a request may show it: cut from the file's ``lines``, which the masker

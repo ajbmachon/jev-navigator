@@ -219,6 +219,30 @@ def test_trace_graph_stops_at_the_callers_cancellation_boundary(sample_index: Co
     assert graph.links == ()
 
 
+def test_trace_links_one_call_site_once_even_from_the_declaration_holding_its_function(
+    tmp_path: Path,
+) -> None:
+    """The declaration `load` holds its arrow function: Trace links the declaration to the function
+    and the caller to the function, never the caller to the declaration as well."""
+    # Arrange
+    (tmp_path / "jobs.ts").write_text(
+        "export const load =\n  async () => {\n    return 1;\n  };\n\n"
+        "export function run() {\n  return load();\n}\n"
+    )
+    index = CodeIndex.from_directory(tmp_path)
+    declaration = next(span for span in index.find_definition("load") if span.start == 1)
+    function = next(span for span in index.find_definition("load") if span.start == 2)
+
+    # Act
+    graph = operations.trace_graph(index, [declaration])
+
+    # Assert
+    calls = [link for link in graph.links if link.relation == "call" and link.line == 7]
+    assert [(link.source.name, link.target) for link in calls] == [("run", function)]
+    contains = [link for link in graph.links if link.relation == "contains"]
+    assert [(link.source, link.target) for link in contains] == [(declaration, function)]
+
+
 @pytest.mark.parametrize("use", ["return handle(value)", "return [handle]"])
 def test_trace_does_not_follow_references_bound_to_a_different_same_named_function(
     tmp_path: Path, use: str

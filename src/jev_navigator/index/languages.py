@@ -49,8 +49,9 @@ CLASS_KINDS = {
 
 # A function or class expression is called by the name that holds it: `const save = function
 # inner() {}` is called as `save`. So an expression is named by the declarator, class field, object
-# key or assignment it is the value of, looking through the grammar's parentheses and type casts,
-# and only then by its own name. A callback passed as an argument, `it("works", () => ...)`, is held
+# key, assignment or default value (`onError = () => {}` in a parameter list or a destructuring) it
+# is the value of, looking through the grammar's parentheses and type casts, and only then by its
+# own name. A callback passed as an argument, `it("works", () => ...)`, is held
 # by no name and stays anonymous. Each grammar lists only the node kinds it has: one unknown kind
 # makes ast-grep reject the whole scan. The tables are keyed by grammar, see ``grammar_of``.
 EXPRESSION_KINDS = frozenset({"arrow_function", "function_expression", "generator_function", "class"})
@@ -59,6 +60,9 @@ _SCRIPT_HOLDERS = (
     ("public_field_definition", "name"),
     ("pair", "key"),
     ("assignment_expression", "left"),
+    ("required_parameter", "pattern"),
+    ("assignment_pattern", "left"),
+    ("object_assignment_pattern", "left"),
 )
 NAME_HOLDERS = {
     "python": (),
@@ -69,6 +73,8 @@ NAME_HOLDERS = {
         ("field_definition", "property"),
         ("pair", "key"),
         ("assignment_expression", "left"),
+        ("assignment_pattern", "left"),
+        ("object_assignment_pattern", "left"),
     ),
 }
 _TSX_WRAPPERS = ("parenthesized_expression", "as_expression", "satisfies_expression", "non_null_expression")
@@ -79,24 +85,265 @@ NAME_WRAPPERS = {
     "javascript": ("parenthesized_expression",),
 }
 
-# ast-grep prints every node a rule's relations match, so asking whether a declaration sits in the
-# program printed the whole file once per declaration. Under a double negation the condition holds
-# the same and only the declaration is printed.
-_MODULE_VARIABLES = (
-    "{kind: lexical_declaration, not: {not: {inside: {any: [{kind: program}, {kind: export_statement}]}}}}"
-)
-_SCRIPT_DECLARATIONS = f"""  any:
-    - kind: type_alias_declaration
-    - kind: interface_declaration
-    - kind: enum_declaration
-    - {_MODULE_VARIABLES}"""
+# Nodes whose functions and classes are values, never module-level definitions. An object literal's
+# are its properties: `const api = { fetch() {} }` defines `api.fetch`, never a name `fetch` that its
+# module or an importer can call. A pattern's default is one possible value of its name:
+# `const { onError = () => {} } = options` takes `onError` from `options` when it is there.
+_SCRIPT_VALUE_KINDS = ("object", "assignment_pattern", "object_assignment_pattern")
+VALUE_KINDS = {
+    "python": (),
+    "typescript": _SCRIPT_VALUE_KINDS,
+    "tsx": _SCRIPT_VALUE_KINDS,
+    "javascript": _SCRIPT_VALUE_KINDS,
+}
 
-DECLARATION_RULES = {
-    "python": """  kind: assignment
-  not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}""",
-    "typescript": _SCRIPT_DECLARATIONS,
-    "tsx": _SCRIPT_DECLARATIONS,
-    "javascript": f"  any: [{_MODULE_VARIABLES}]",
+# A TypeScript namespace or module body holds its members: `namespace A { export function read() {} }`
+# defines `A.read`, never a module-level `read`.
+_SCRIPT_NAMESPACE_KINDS = ("internal_module", "module")
+NAMESPACE_KINDS = {
+    "python": (),
+    "typescript": _SCRIPT_NAMESPACE_KINDS,
+    "tsx": _SCRIPT_NAMESPACE_KINDS,
+    "javascript": (),
+}
+
+# A module-level declaration sits in the program or in an export the program holds, never in a
+# namespace's export; in TypeScript also in a `declare` that sits there. ast-grep prints every node a
+# rule's relations match, so asking whether a declaration sits in the program printed the whole file
+# once per declaration. Under a double negation the condition holds the same and only the declaration
+# is printed.
+_IN_MODULE = "inside: {any: [{kind: program}, {kind: export_statement, inside: {kind: program}}]}"
+_IN_TYPED_MODULE = (
+    "inside: {any: [{kind: program}, {kind: export_statement, inside: {kind: program}}, "
+    f"{{kind: ambient_declaration, {_IN_MODULE}}}]}}"
+)
+_ANY_VARIABLES = "any: [{kind: lexical_declaration}, {kind: variable_declaration}]"
+_MODULE_VARIABLES = f"{{{_ANY_VARIABLES}, not: {{not: {{{_IN_MODULE}}}}}}}"
+_AMBIENT_FUNCTIONS = (
+    f"{{kind: function_signature, not: {{not: {{inside: {{kind: ambient_declaration, {_IN_MODULE}}}}}}}}}"
+)
+
+# A TypeScript namespace or module body is a scope of its own: a declaration directly in it, or in an
+# export it holds, is a member of that namespace, never of the module.
+_NAMESPACE_BODY = "{kind: statement_block, inside: {any: [{kind: internal_module}, {kind: module}]}}"
+_IN_NAMESPACE = f"inside: {{any: [{_NAMESPACE_BODY}, {{kind: export_statement, inside: {_NAMESPACE_BODY}}}]}}"
+_TYPED_SCOPE_LEVEL = f"not: {{not: {{any: [{{{_IN_TYPED_MODULE}}}, {{{_IN_NAMESPACE}}}]}}}}"
+_TYPED_SCOPE_VARIABLES = f"{{{_ANY_VARIABLES}, {_TYPED_SCOPE_LEVEL}}}"
+
+# A function or class assigned to a property, `foo.bar = function () {}`, gives its module no name.
+# Assigned to `exports.x` or `module.exports.x`, or listed in `module.exports = {...}`, it is one of
+# the module's CommonJS exports, which another module imports by its name.
+PROPERTY_TARGET = "{kind: assignment_expression, has: {field: left, kind: member_expression}}"
+_MODULE_EXPORTS = "kind: member_expression, regex: '^module[.]exports$'"
+_EXPORTS = f"[{{kind: identifier, regex: '^exports$'}}, {{{_MODULE_EXPORTS}}}]"
+COMMONJS_EXPORT_TARGET = (
+    "{kind: assignment_expression, has: {field: left, kind: member_expression, "
+    f"has: {{field: object, any: {_EXPORTS}}}}}}}"
+)
+COMMONJS_EXPORTS_OBJECT = (
+    "{kind: object, inside: {field: right, kind: assignment_expression, "
+    f"has: {{field: left, {_MODULE_EXPORTS}}}}}}}"
+)
+COMMONJS_EXPORT_PAIR = f"{{kind: pair, inside: {COMMONJS_EXPORTS_OBJECT}}}"
+
+# ast-grep prints every node a rule's relations match, so a relation to a large ancestor (the
+# program, a module statement, an object literal) printed that ancestor once per match, and the
+# parser's output grew with matches times file size. Every such relation sits under a double
+# negation, `not: {not: ...}`: it holds the same and prints only the match.
+#
+# Module-level and namespace-level declarations by what may name them, each a rule per grammar that
+# has such declarations: a type alias or interface only a type, a `const`, `let` or `var`, or a
+# TypeScript `declare function`, only a value, and an enum or a Python assignment (which may be a type
+# alias) both.
+_SCRIPT_TYPES = (
+    f"  any: [{{kind: type_alias_declaration}}, {{kind: interface_declaration}}]\n  {_TYPED_SCOPE_LEVEL}"
+)
+_SCRIPT_VALUES = f"  any: [{_MODULE_VARIABLES}]"
+_TYPED_SCRIPT_VALUES = f"  any: [{_TYPED_SCOPE_VARIABLES}, {_AMBIENT_FUNCTIONS}]"
+_SCRIPT_ENUMS = f"  kind: enum_declaration\n  {_TYPED_SCOPE_LEVEL}"
+TYPE_DECLARATIONS = {"typescript": _SCRIPT_TYPES, "tsx": _SCRIPT_TYPES}
+VALUE_DECLARATIONS = {
+    "typescript": _TYPED_SCRIPT_VALUES,
+    "tsx": _TYPED_SCRIPT_VALUES,
+    "javascript": _SCRIPT_VALUES,
+}
+TYPE_AND_VALUE_DECLARATIONS = {
+    "python": (
+        "  kind: assignment\n  not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}"
+    ),
+    "typescript": _SCRIPT_ENUMS,
+    "tsx": _SCRIPT_ENUMS,
+}
+
+# The name nodes a declaration binds, one match per name: both names of `const a = 1, b = 2`, each
+# name a destructuring pulls out, and each target of `first, second = 1, 2`. A default value, a
+# computed key, an attribute or an item binds no name, and destructuring a `require(...)` imports its
+# names rather than declaring them. The scan pairs each name with the innermost declaration holding
+# it, so a name declared inside another declaration's value stays its own.
+_DEFAULTS_AND_COMPUTED_KEYS = """      - inside:
+          stopBy: end
+          field: right
+          any: [{kind: assignment_pattern}, {kind: object_assignment_pattern}]
+      - inside: {stopBy: end, kind: computed_property_name}"""
+_PATTERN_EXCLUSIONS = f"""  not:
+    any:
+{_DEFAULTS_AND_COMPUTED_KEYS}
+      - inside:
+          stopBy: end
+          kind: variable_declarator
+          all:
+            - has: {{field: name, kind: object_pattern}}
+            - has: {{field: value, kind: call_expression, has: {{field: function, regex: '^require$'}}}}"""
+_SCRIPT_NAME_KINDS = "{kind: identifier}, {kind: shorthand_property_identifier_pattern}"
+_SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}]
+  all:
+    - not:
+        not:
+          inside:
+            stopBy: end
+            field: name
+            kind: variable_declarator
+            inside: {_MODULE_VARIABLES}
+{_PATTERN_EXCLUSIONS}"""
+_TYPED_SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}, {{kind: type_identifier}}]
+  all:
+    - not:
+        not:
+          inside:
+            stopBy: end
+            field: name
+            any:
+              - kind: variable_declarator
+                inside: {_TYPED_SCOPE_VARIABLES}
+              - {_AMBIENT_FUNCTIONS}
+              - kind: type_alias_declaration
+              - kind: interface_declaration
+              - kind: enum_declaration
+{_PATTERN_EXCLUSIONS}"""
+DECLARED_NAME_RULES = {
+    "python": """  kind: identifier
+  all:
+    - not:
+        not:
+          inside:
+            stopBy: end
+            field: left
+            kind: assignment
+            inside: {stopBy: end, kind: expression_statement, inside: {kind: module}}
+  not:
+    inside: {stopBy: end, any: [{kind: attribute}, {kind: subscript}]}""",
+    "typescript": _TYPED_SCRIPT_DECLARED_NAMES,
+    "tsx": _TYPED_SCRIPT_DECLARED_NAMES,
+    "javascript": _SCRIPT_DECLARED_NAMES,
+}
+
+# A name module-level code binds to a whole script module, with the module captured as `$SPEC`:
+# `const jwt = require('./jwt')` and `import * as jwt from './jwt'`. A require inside a function,
+# `require('./jwt').verify`, `require('./jwt')(options)` and a require of a computed or template
+# string bind none. A pattern captures its metavariables without printing the nodes it matched them
+# in, so the conditions on those nodes sit under a double negation too.
+_SCRIPT_MODULE_ALIASES = (
+    f"""  pattern: {{context: 'var $NAME = require($SPEC)', selector: variable_declarator}}
+  all:
+    - not: {{not: {{has: {{field: name, kind: identifier}}}}}}
+    - not: {{not: {{has: {{field: value, has: {{field: arguments, has: {{kind: string}}}}}}}}}}
+    - not: {{not: {{inside: {{{_ANY_VARIABLES}, {_IN_MODULE}}}}}}}""",
+    """  kind: import_statement
+  any:
+    - pattern: import * as $NAME from $SPEC
+    - pattern: import $DEFAULT, * as $NAME from $SPEC
+  not: {not: {inside: {kind: program}}}""",
+)
+# In Python, `import app.jobs as jobs` binds `jobs` to `app.jobs`, and `import app.jobs` makes the
+# dotted name `app.jobs` reach that module, outside any function or class. A plain import captures
+# no `$SPEC`: the name is the module.
+_PYTHON_OUTSIDE_SCOPES = (
+    "not: {inside: {stopBy: end, any: [{kind: function_definition}, {kind: class_definition}]}}"
+)
+_PYTHON_MODULE_ALIASES = (
+    f"""  kind: aliased_import
+  all:
+    - has: {{field: name, pattern: $SPEC}}
+    - has: {{field: alias, pattern: $NAME}}
+    - not: {{not: {{inside: {{kind: import_statement}}}}}}
+    - {_PYTHON_OUTSIDE_SCOPES}""",
+    f"""  kind: dotted_name
+  pattern: $NAME
+  all:
+    - not: {{not: {{inside: {{field: name, kind: import_statement}}}}}}
+    - {_PYTHON_OUTSIDE_SCOPES}""",
+)
+MODULE_ALIAS_RULES = {
+    "python": _PYTHON_MODULE_ALIASES,
+    "typescript": _SCRIPT_MODULE_ALIASES,
+    "tsx": _SCRIPT_MODULE_ALIASES,
+    "javascript": _SCRIPT_MODULE_ALIASES,
+}
+
+# The names a function binds for its own body, one match per name: its parameters, the names its
+# declarations and destructurings bind, a caught error, a loop variable, and in Python each
+# assignment target. A default value, a computed key, a type annotation, a decorator, an attribute or
+# an item binds no name. Block scopes count as the whole function's, and a lambda's parameters as
+# its enclosing function's. A nested function's or class's own name is no local name.
+_SCRIPT_LOCAL_POSITIONS = """            - inside: {stopBy: end, field: name, kind: variable_declarator}
+            - inside: {stopBy: end, kind: formal_parameters}
+            - inside: {field: parameter, kind: arrow_function}
+            - inside: {stopBy: end, field: parameter, kind: catch_clause}
+            - inside: {stopBy: end, field: left, kind: for_in_statement}"""
+_SCRIPT_LOCAL_EXCLUSIONS = f"""{_DEFAULTS_AND_COMPUTED_KEYS}
+      - inside: {{stopBy: end, any: [{{kind: member_expression}}, {{kind: subscript_expression}}]}}
+      - inside: {{stopBy: end, kind: decorator}}"""
+_TYPED_SCRIPT_LOCAL_EXCLUSIONS = f"""{_SCRIPT_LOCAL_EXCLUSIONS}
+      - inside: {{stopBy: end, kind: type_annotation}}
+      - inside:
+          stopBy: end
+          field: value
+          any: [{{kind: required_parameter}}, {{kind: optional_parameter}}]"""
+
+
+def _script_local_names(language: str, exclusions: str) -> str:
+    functions = ", ".join(f"{{kind: {kind}}}" for kind in FUNCTION_KINDS[language])
+    return f"""  any: [{_SCRIPT_NAME_KINDS}]
+  all:
+    - not:
+        not:
+          any:
+{_SCRIPT_LOCAL_POSITIONS}
+    - not: {{not: {{inside: {{stopBy: end, any: [{functions}]}}}}}}
+  not:
+    any:
+{exclusions}"""
+
+
+LOCAL_NAME_RULES = {
+    "python": """  kind: identifier
+  all:
+    - not:
+        not:
+          any:
+            - inside: {any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}
+            - inside:
+                field: name
+                any: [{kind: default_parameter}, {kind: typed_default_parameter}]
+            - inside:
+                any: [{kind: list_splat_pattern}, {kind: dictionary_splat_pattern}]
+                inside: {any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}
+            - inside:
+                stopBy: end
+                field: left
+                any:
+                  - kind: assignment
+                  - kind: augmented_assignment
+                  - kind: for_statement
+                  - kind: for_in_clause
+            - inside: {field: name, kind: named_expression}
+            - inside: {kind: as_pattern_target}
+    - not: {not: {inside: {stopBy: end, kind: function_definition}}}
+  not:
+    inside: {stopBy: end, any: [{kind: attribute}, {kind: subscript}, {kind: type}]}""",
+    "typescript": _script_local_names("typescript", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
+    "tsx": _script_local_names("tsx", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
+    "javascript": _script_local_names("javascript", _SCRIPT_LOCAL_EXCLUSIONS),
 }
 
 # A Python function's node starts at `def`: its decorators sit before it, beside it inside
@@ -138,7 +385,14 @@ STUB_RULES = {
 FLOW_LANGUAGE = "flow"
 FUNCTION_KINDS[FLOW_LANGUAGE] = FUNCTION_KINDS["tsx"]
 CLASS_KINDS[FLOW_LANGUAGE] = CLASS_KINDS["tsx"]
-DECLARATION_RULES[FLOW_LANGUAGE] = _SCRIPT_DECLARATIONS
+VALUE_KINDS[FLOW_LANGUAGE] = VALUE_KINDS["tsx"]
+NAMESPACE_KINDS[FLOW_LANGUAGE] = NAMESPACE_KINDS["tsx"]
+TYPE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_TYPES
+VALUE_DECLARATIONS[FLOW_LANGUAGE] = _TYPED_SCRIPT_VALUES
+TYPE_AND_VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_ENUMS
+DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
+MODULE_ALIAS_RULES[FLOW_LANGUAGE] = _SCRIPT_MODULE_ALIASES
+LOCAL_NAME_RULES[FLOW_LANGUAGE] = LOCAL_NAME_RULES["tsx"]
 DECORATED_KINDS[FLOW_LANGUAGE] = DECORATED_KINDS["tsx"]
 
 # ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,
@@ -155,13 +409,6 @@ def grammar_of(language: str) -> str:
 def sgconfig_of(language: str) -> str | None:
     """The sgconfig a scan reading ``language`` passes, or None for the neutral one."""
     return FLOW_SGCONFIG if language == FLOW_LANGUAGE else None
-
-
-_DECLARED_NAME = re.compile(
-    r"^\s*(?:export\s+)?(?:declare\s+)?(?:(?:type|interface|enum|const|let|var)\s+)?(\w+)"
-)
-_SCRIPT_VALUE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:const|let)\s+(?!enum\b)[A-Za-z_$]")
-_SCRIPT_TYPE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:type|interface)\s+[A-Za-z_$]")
 
 
 def language_of(path: str) -> str | None:
@@ -228,24 +475,6 @@ def has_flow_pragma(lines: Iterable[str]) -> bool:
     return False
 
 
-def declared_name(first_line: str) -> str:
-    """The name a module-level assignment, constant, type, interface or enum declares."""
-    match = _DECLARED_NAME.search(first_line)
-    return match.group(1) if match else "<anonymous>"
-
-
-def declares_type(first_line: str) -> bool:
-    """Whether a type can name what a module-level declaration declares: a type alias, interface or
-    enum, or a Python assignment (which may be a type alias), but not a script constant or variable."""
-    return not _SCRIPT_VALUE_DECLARATION.match(first_line)
-
-
-def declares_value(first_line: str) -> bool:
-    """Whether a value can name what a module-level declaration declares: a script constant, variable
-    or enum, or a Python assignment, but not a script type alias or interface."""
-    return not _SCRIPT_TYPE_DECLARATION.match(first_line)
-
-
 @dataclass(frozen=True)
 class ReferenceRole:
     """An identifier of ``kind`` has the role ``name`` when a node listed in ``inside`` holds it and
@@ -259,12 +488,21 @@ class ReferenceRole:
     not_regex: str = ""
 
 
+_PYTHON_SUPERCLASSES = (
+    "kind: argument_list\ninside:\n  stopBy: neighbor\n  kind: class_definition\n  field: superclasses"
+)
+
 _PYTHON_ROLES = (
-    ReferenceRole("argument", ("kind: argument_list", "kind: keyword_argument\nfield: value")),
+    ReferenceRole(
+        "argument",
+        ("kind: argument_list", "kind: keyword_argument\nfield: value"),
+        not_inside=(_PYTHON_SUPERCLASSES,),
+    ),
     ReferenceRole(
         "argument",
         ("kind: argument_list", "kind: keyword_argument\nfield: value"),
         kind="attribute",
+        not_inside=(_PYTHON_SUPERCLASSES,),
     ),
     ReferenceRole("decorator", ("kind: decorator",)),
     ReferenceRole("collection", ("kind: pair\nfield: value", "kind: list", "kind: tuple", "kind: set")),
@@ -272,6 +510,8 @@ _PYTHON_ROLES = (
     ReferenceRole("return", ("kind: return_statement",)),
     ReferenceRole("receiver", ("kind: attribute\nfield: object",), not_regex="^(self|cls)$"),
     ReferenceRole("type", ("kind: type\nstopBy: end",)),
+    ReferenceRole("base", (_PYTHON_SUPERCLASSES,)),
+    ReferenceRole("base", (_PYTHON_SUPERCLASSES,), kind="attribute"),
     ReferenceRole(
         "condition",
         (
@@ -299,6 +539,8 @@ _SCRIPT_ROLES = (
     ReferenceRole("export", ("kind: export_specifier", "kind: export_statement")),
     ReferenceRole("return", ("kind: return_statement",)),
     ReferenceRole("receiver", ("kind: member_expression\nfield: object",)),
+    ReferenceRole("base", ("kind: class_heritage",)),
+    ReferenceRole("base", ("kind: class_heritage",), kind="member_expression"),
     ReferenceRole(
         "condition",
         (
@@ -313,6 +555,8 @@ _SCRIPT_ROLES = (
 
 _TYPED_SCRIPT_ROLES = (
     *_SCRIPT_ROLES,
+    ReferenceRole("base", ("kind: extends_clause",)),
+    ReferenceRole("base", ("kind: extends_clause",), kind="member_expression"),
     ReferenceRole(
         "type",
         kind="type_identifier",
@@ -332,40 +576,123 @@ REFERENCE_ROLES = {
 REFERENCE_ROLES[FLOW_LANGUAGE] = _TYPED_SCRIPT_ROLES
 
 
-_EXPORT = "{field: declaration, kind: export_statement}"
+# A module's own export statements sit in its program; one in a namespace exports a namespace
+# member, and one in `declare module "m"` describes another module.
+_EXPORT = "{field: declaration, kind: export_statement, inside: {kind: program}}"
+_NAMED_EXPORT = (
+    "{field: declaration, kind: export_statement, not: {has: {regex: '^default$'}}, inside: {kind: program}}"
+)
 _AMBIENT_EXPORT = f"{{kind: ambient_declaration, inside: {_EXPORT}}}"
-_VARIABLES = "[{kind: lexical_declaration}, {kind: variable_declaration}]"
-_EXPORTED_NAME = f"""  inside:
-    field: name
+
+
+def _exported_names(name_kinds: str, exports: str, variable_exports: str) -> str:
+    """Name nodes that an exported declaration's own name field holds, or that the name pattern of
+    an exported variable binds (each name of `export const { a, b: c } = ...`), quietly: the
+    relations print no export statement (see the double negation above)."""
+    return f"""  any: [{name_kinds}]
+  all:
+    - any:
+        - not: {{not: {{inside: {{field: name, any: {exports}}}}}}}
+        - not:
+            not:
+              inside:
+                stopBy: end
+                field: name
+                kind: variable_declarator
+                inside: {{all: [{{{_ANY_VARIABLES}}}, {{any: {variable_exports}}}]}}
+  not:
     any:
-      - inside: {{field: declaration, kind: export_statement, not: {{has: {{regex: '^default$'}}}}}}
-      - kind: variable_declarator
-        inside: {{any: {_VARIABLES}, inside: {_EXPORT}}}"""
-_TYPED_EXPORTED_NAME = f"""{_EXPORTED_NAME}
-      - inside: {_AMBIENT_EXPORT}
-      - kind: variable_declarator
-        inside: {{any: {_VARIABLES}, inside: {_AMBIENT_EXPORT}}}"""
+{_DEFAULTS_AND_COMPUTED_KEYS}"""
+
+
+_SCRIPT_EXPORTED_NAMES = _exported_names(
+    _SCRIPT_NAME_KINDS, f"[{{inside: {_NAMED_EXPORT}}}]", f"[{{inside: {_EXPORT}}}]"
+)
+_TYPED_EXPORTED_NAMES = _exported_names(
+    f"{_SCRIPT_NAME_KINDS}, {{kind: type_identifier}}",
+    f"[{{inside: {_NAMED_EXPORT}}}, {{inside: {_AMBIENT_EXPORT}}}]",
+    f"[{{inside: {_EXPORT}}}, {{inside: {_AMBIENT_EXPORT}}}]",
+)
 # The name node of each declaration an ``export`` statement makes, one match per name, so the
 # declaration's body (a nested function, a template literal) never names the export. A default
-# export has no name of its own.
+# export has no name of its own, and a default value or computed key in a pattern none either.
 EXPORTED_NAMES = {
-    "typescript": f"  any: [{{kind: identifier}}, {{kind: type_identifier}}]\n{_TYPED_EXPORTED_NAME}",
-    "tsx": f"  any: [{{kind: identifier}}, {{kind: type_identifier}}]\n{_TYPED_EXPORTED_NAME}",
-    "javascript": f"  kind: identifier\n{_EXPORTED_NAME}",
+    "typescript": _TYPED_EXPORTED_NAMES,
+    "tsx": _TYPED_EXPORTED_NAMES,
+    "javascript": _SCRIPT_EXPORTED_NAMES,
+}
+
+# The names a module exports as values rather than by an export statement over their declaration,
+# captured as `$NAME`, with the definition each exports as `$OWN` when its name differs: its CommonJS
+# exports (`exports.query = query`, `exports.parse = urlParse`, `module.exports = { log, run: run,
+# a: b }`).
+_COMMONJS_OBJECT = (
+    "not: {not: {inside: {kind: object, inside: {field: right, kind: assignment_expression, "
+    "has: {field: left, regex: '^module[.]exports$'}}}}}"
+)
+_EXPORTED_VALUES = (
+    """  any:
+    - pattern: exports.$NAME = $OWN
+    - pattern: module.exports.$NAME = $OWN
+  not: {not: {has: {field: right, kind: identifier}}}""",
+    f"""  pattern: {{context: '({{ $NAME: $OWN }})', selector: pair}}
+  all:
+    - not: {{not: {{has: {{field: value, kind: identifier}}}}}}
+    - {_COMMONJS_OBJECT}""",
+    f"""  kind: shorthand_property_identifier
+  pattern: $NAME
+  {_COMMONJS_OBJECT}""",
+)
+EXPORTED_VALUES = {"typescript": _EXPORTED_VALUES, "tsx": _EXPORTED_VALUES, "javascript": _EXPORTED_VALUES}
+
+# The name of the definition a module exports as its default, captured as `$NAME`: `export default
+# build`, `export default function make`, and `module.exports = build`, which a whole-module
+# `require` takes.
+_DEFAULT_VALUE = """  any:
+    - pattern: module.exports = $NAME
+    - pattern: export default $NAME
+  not: {not: {any: [{has: {field: right, kind: identifier}}, {has: {field: value, kind: identifier}}]}}"""
+_DEFAULT_EXPORT = "{field: declaration, kind: export_statement, has: {regex: '^default$'}}"
+_DEFAULT_DECLARATION_NAME = f"""  pattern: $NAME
+  not: {{not: {{inside: {{field: name, inside: {_DEFAULT_EXPORT}}}}}}}"""
+_TYPED_DEFAULT_EXPORTS = (
+    _DEFAULT_VALUE,
+    f"  any: [{{kind: identifier}}, {{kind: type_identifier}}]\n{_DEFAULT_DECLARATION_NAME}",
+)
+DEFAULT_EXPORTS = {
+    "typescript": _TYPED_DEFAULT_EXPORTS,
+    "tsx": _TYPED_DEFAULT_EXPORTS,
+    "javascript": (_DEFAULT_VALUE, f"  kind: identifier\n{_DEFAULT_DECLARATION_NAME}"),
 }
 
 
+# The entries of a module's own `export { ... }` lists, quietly (see the double negation above):
+# `export { inner as outer }` exports the module's definition `inner` as `outer`. A re-export's,
+# `export { a as b } from './m'`, are another module's names (see ``reexported_names``).
+_OWN_EXPORT = "{kind: export_statement, not: {has: {field: source, kind: string}}}"
+OWN_EXPORT_SPECIFIERS = (
+    f"  kind: export_specifier\n  not: {{not: {{inside: {{kind: export_clause, inside: {_OWN_EXPORT}}}}}}}"
+)
+
+
 def export_rules(languages: Iterable[str]) -> str:
-    """ast-grep rules for the script export surface: the names exported declarations make, and the
-    ``{ ... }`` clause specifiers that carry aliased names. Python has no such kinds, so it
-    contributes no rules."""
+    """ast-grep rules for the script export surface: the names exported declarations make, the
+    entries of the module's own ``{ ... }`` lists, the names exported as values (see
+    ``EXPORTED_VALUES``) and the default export's (see ``DEFAULT_EXPORTS``). Python has no such
+    kinds, so it contributes no rules."""
     documents = []
     for language in languages:
         if language == "python":
             continue
         grammar = grammar_of(language)
         documents.append(f"id: export_surface\nlanguage: {grammar}\nrule:\n{EXPORTED_NAMES[grammar]}")
-        documents.append(f"id: export_specifier\nlanguage: {grammar}\nrule:\n  kind: export_specifier")
+        documents.append(f"id: export_specifier\nlanguage: {grammar}\nrule:\n{OWN_EXPORT_SPECIFIERS}")
+        documents += [
+            f"id: exported_value\nlanguage: {grammar}\nrule:\n{rule}" for rule in EXPORTED_VALUES[grammar]
+        ]
+        documents += [
+            f"id: default_export\nlanguage: {grammar}\nrule:\n{rule}" for rule in DEFAULT_EXPORTS[grammar]
+        ]
     return "\n---\n".join(documents)
 
 

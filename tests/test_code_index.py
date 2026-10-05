@@ -491,6 +491,50 @@ def test_a_passed_member_is_a_candidate_while_a_passed_constant_is_resolved(
     ]
 
 
+SCRIPT_BASE_AND_SUBCLASS = (
+    "export class Base {}\n",
+    'import { Base } from "./base";\n\n\nexport class Sub extends Base {}\n',
+)
+SCRIPT_BASE_AND_QUALIFIED_SUBCLASS = (
+    "export class Base {}\n",
+    'import * as base from "./base";\n\n\nexport class Sub extends base.Base {}\n',
+)
+
+
+@pytest.mark.parametrize(
+    ("suffix", "base", "subclass"),
+    [
+        (".py", "class Base:\n    pass\n", "from base import Base\n\n\nclass Sub(Base):\n    pass\n"),
+        (".ts", *SCRIPT_BASE_AND_SUBCLASS),
+        (".js", *SCRIPT_BASE_AND_SUBCLASS),
+        (".py", "class Base:\n    pass\n", "import base\n\n\nclass Sub(base.Base):\n    pass\n"),
+        (".ts", *SCRIPT_BASE_AND_QUALIFIED_SUBCLASS),
+        (".js", *SCRIPT_BASE_AND_QUALIFIED_SUBCLASS),
+    ],
+    ids=[
+        "python",
+        "typescript",
+        "javascript",
+        "qualified-python",
+        "qualified-typescript",
+        "qualified-javascript",
+    ],
+)
+def test_a_class_s_base_is_recorded_once_as_its_base(
+    tmp_path: Path, suffix: str, base: str, subclass: str
+) -> None:
+    # Arrange
+    (tmp_path / f"base{suffix}").write_text(base)
+    (tmp_path / f"sub{suffix}").write_text(subclass)
+    index = CodeIndex(tmp_path, [f"base{suffix}", f"sub{suffix}"])
+
+    # Act
+    references = index.find_references("Base")
+
+    # Assert
+    assert [(ref.file, ref.line, ref.role) for ref in references] == [(f"sub{suffix}", 4, "base")]
+
+
 USES_PY = """\
 from app.rules import ALLOWED, PATTERN, Store
 
@@ -696,6 +740,87 @@ def test_a_non_call_reference_binds_to_the_declaration_it_names(
     assert [(ref.line, ref.role, ref.binding.status, ref.binding.target) for ref in references] == [
         (line, role, "resolved", declaration) for line, role, declaration in expected
     ]
+
+
+def test_a_property_assignment_names_no_module_name_but_a_commonjs_export_stays_importable(
+    tmp_path: Path,
+) -> None:
+    """`foo.bar = function () {}` and `exports.other = () => 3` give their module no name `bar` or
+    `other`, so a bare call in that file is no proof. `exports.other`, `module.exports.stop` and the
+    members of `module.exports = {...}` are the module's exports, so importing them stays proven,
+    while importing `bar` does not. `x.other()` through `const x = require('./x')` is proven too;
+    `require('./x').stop()` names no module alias and stays a candidate."""
+    # Arrange
+    files = {
+        "x.js": (
+            "exports.other = () => 3;\n"
+            "module.exports.stop = function () { return 4; };\n"
+            "foo.bar = function namedLater() { return 5; };\n"
+            "function local() {\n  other();\n  stop();\n  bar();\n}\n"
+        ),
+        "y.js": "module.exports = {\n  run() { return 1; },\n  walk: () => 2,\n};\n",
+        "esm.mjs": (
+            "import { other, stop, bar } from './x.js';\nimport { run, walk } from './y.js';\n"
+            "export function viaImport() {\n  other();\n  stop();\n  bar();\n  run();\n  walk();\n}\n"
+        ),
+        "cjs.js": (
+            "const x = require('./x');\nfunction viaRequire() {\n  x.other();\n  require('./x').stop();\n}\n"
+        ),
+    }
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files), fact_cache_dir=tmp_path.parent / "facts")
+
+    # Act
+    bindings = {
+        (caller, edge.name): (edge.binding.status.value, edge.binding.target and edge.binding.target.key)
+        for caller in ("local", "viaImport")
+        for edge in index.callee_edges(index.find_definition(caller)[0])
+    }
+    required = {
+        site.line: site.binding.status.value
+        for site in index.find_callers("other") + index.find_callers("stop")
+        if site.file == "cjs.js"
+    }
+
+    # Assert
+    assert bindings == {
+        ("local", "other"): ("candidate", None),
+        ("local", "stop"): ("candidate", None),
+        ("local", "bar"): ("candidate", None),
+        ("viaImport", "other"): ("resolved", "x.js:1-1"),
+        ("viaImport", "stop"): ("resolved", "x.js:2-2"),
+        ("viaImport", "bar"): ("candidate", None),
+        ("viaImport", "run"): ("resolved", "y.js:2-2"),
+        ("viaImport", "walk"): ("resolved", "y.js:3-3"),
+    }
+    assert required == {3: "resolved", 4: "candidate"}
+
+
+def test_destructuring_a_require_imports_its_names_without_declaring_them(tmp_path: Path) -> None:
+    """`const { other, stop: halt } = require('./x')` imports `other` and `halt` from x.js the way
+    `import { other, stop as halt }` does: a call to `other` binds to x.js's export, a call to `halt`
+    to x.js's `stop`, never to the require line as if that line defined them, and the line declares
+    neither name."""
+    # Arrange
+    files = {
+        "x.js": "exports.other = () => 3;\nexports.stop = () => 4;\n",
+        "cjs.js": (
+            "const { other, stop: halt } = require('./x');\n\n"
+            "function viaRequire() {\n  return other() + halt();\n}\n"
+        ),
+    }
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files), fact_cache_dir=tmp_path.parent / "facts")
+
+    # Act
+    bindings = {
+        edge.name: (edge.binding.status.value, edge.binding.target and edge.binding.target.key)
+        for edge in index.callee_edges(index.find_definition("viaRequire")[0])
+    }
+
+    # Assert
+    assert bindings == {"other": ("resolved", "x.js:1-1"), "halt": ("resolved", "x.js:2-2")}
+    assert index.declarations_in("cjs.js") == ()
 
 
 @pytest.mark.parametrize(

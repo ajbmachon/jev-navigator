@@ -16,7 +16,10 @@ from .packages import Packages, package_name
 from .tsconfig import ScriptPaths, normalised
 
 _PYTHON_FROM = re.compile(r"^[ \t]*from\s+(\.*[\w.]*)\s+import\s+(\([^)]*\)|[^\n]*)", re.M)
-_PYTHON_IMPORT = re.compile(r"^[ \t]*import\s+([\w.]+)", re.M)
+_PYTHON_IMPORT = re.compile(
+    r"^[ \t]*import[ \t]+([\w.]+(?:[ \t]+as[ \t]+\w+)?(?:[ \t]*,[ \t]*[\w.]+(?:[ \t]+as[ \t]+\w+)?)*)", re.M
+)
+_PYTHON_IMPORTED_MODULE = re.compile(r"([\w.]+)(?:[ \t]+as[ \t]+(\w+))?")
 _SCRIPT_FROM = re.compile(
     r"""^[ \t]*(import|export)\s+(?:type\s+)?"""
     r"""((?:(?!\n[ \t]*(?:import|export)\b)[\w$*\s{},])*?)\s*from\s*['"]([^'"]+)['"]""",
@@ -44,6 +47,15 @@ _PYTHON_ROOTS = ("", "src/")
 
 
 @dataclass(frozen=True)
+class ImportedName:
+    """A name imported by name: the module specifier, and the name the module exports it under
+    (``stop`` for ``import { stop as halt }``). None for a default import, which names no export."""
+
+    specifier: str
+    exported: str | None
+
+
+@dataclass(frozen=True)
 class ImportFact:
     """A discoverable repository path and whether its import mapping proves that path."""
 
@@ -56,7 +68,7 @@ def imported_modules(source: str, path: str) -> list[str]:
     """The module specifiers a file imports, in source order, each once."""
     if path.endswith(".py"):
         found = [(match.start(), match.group(1)) for match in _PYTHON_FROM.finditer(source)]
-        found += [(match.start(), match.group(1)) for match in _PYTHON_IMPORT.finditer(source)]
+        found += [(position, module) for position, module, _ in _python_imports(source)]
     else:
         code = _without_script_comments(source)
         found = [(match.start(), match.group(3)) for match in _SCRIPT_FROM.finditer(code)]
@@ -73,7 +85,7 @@ def module_imports(source: str, path: str) -> tuple[tuple[str, frozenset[str] | 
             (match.start(), match.group(1), _python_names(match.group(2)))
             for match in _PYTHON_FROM.finditer(source)
         ]
-        found += [(match.start(), match.group(1), None) for match in _PYTHON_IMPORT.finditer(source)]
+        found += [(position, module, None) for position, module, _ in _python_imports(source)]
     else:
         code = _without_script_comments(source)
         found = [
@@ -90,13 +102,23 @@ def module_imports(source: str, path: str) -> tuple[tuple[str, frozenset[str] | 
     return tuple(taken.items())
 
 
+def _python_imports(source: str) -> list[tuple[int, str, str | None]]:
+    """Each module an ``import`` statement names, with its position and its ``as`` name, if any:
+    ``import json, app.billing as billing`` imports ``json`` and ``app.billing``."""
+    return [
+        (statement.start(1) + module.start(), module.group(1), module.group(2))
+        for statement in _PYTHON_IMPORT.finditer(source)
+        for module in _PYTHON_IMPORTED_MODULE.finditer(statement.group(1))
+    ]
+
+
 def _python_names(clause: str) -> frozenset[str] | None:
     parts = [
         part.strip() for part in _PYTHON_COMMENT.sub("", clause).strip("()\n ").split(",") if part.strip()
     ]
     if "*" in parts:
         return None
-    return frozenset(part.split(" as ")[0].strip() for part in parts)
+    return frozenset(_exported(part) for part in parts)
 
 
 def _script_names(keyword: str, clause: str) -> frozenset[str] | None:
@@ -104,7 +126,7 @@ def _script_names(keyword: str, clause: str) -> frozenset[str] | None:
     if "*" in clause or (keyword == "import" and _SCRIPT_DEFAULT_NAME.match(clause)):
         return None
     names = frozenset(
-        part.strip().removeprefix("type ").split(" as ")[0].strip()
+        _exported(part)
         for braces in _SCRIPT_BRACES.findall(clause)
         for part in braces.split(",")
         if part.strip()
@@ -234,31 +256,53 @@ def _script_files(base: str) -> list[str]:
 
 _PYTHON_COMMENT = re.compile(r"#[^\n]*")
 _SCRIPT_DEFAULT_NAME = re.compile(r"^\s*([\w$]+)\s*(?:,|$)")
+# `const { verify, sign: signToken } = require('./jwt')`, which imports `verify` and `signToken`, but
+# not `require('./jwt').verify` or `require('./jwt')(options)`.
+_SCRIPT_REQUIRED_NAMES = re.compile(
+    r"""\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)(?!\s*[.(\[])"""
+)
 _SCRIPT_BRACES = re.compile(r"\{([^}]*)\}")
 
 
-def imported_names(source: str, path: str) -> dict[str, str]:
-    """Local name to module specifier, for names imported by name (``from m import a as b``, also
+def imported_names(source: str, path: str) -> dict[str, ImportedName]:
+    """Local name to what it imports, for names imported by name (``from m import a as b``, also
     parenthesised over several lines; ``import { a as b } from "m"`` and ``import a from "m"``, also
-    over several lines). Type-only names are included; namespace imports are not."""
+    over several lines; ``const { a, b: c } = require("m")``). Type-only names are included;
+    namespace imports are not."""
     if path.endswith(".py"):
         return {
-            _local(part): match.group(1)
+            _local(part): ImportedName(match.group(1), _exported(part))
             for match in _PYTHON_FROM.finditer(source)
             for part in _PYTHON_COMMENT.sub("", match.group(2)).strip("()\n ").split(",")
             if part.strip() and part.strip() != "*"
         }
-    names: dict[str, str] = {}
-    for match in _SCRIPT_FROM.finditer(_without_script_comments(source)):
+    code = _without_script_comments(source)
+    names = {
+        local: ImportedName(match.group(2), exported)
+        for match in _SCRIPT_REQUIRED_NAMES.finditer(code)
+        for exported, local in _destructured_pairs(match.group(1))
+    }
+    for match in _SCRIPT_FROM.finditer(code):
         keyword, clause, specifier = match.groups()
         if keyword != "import":
             continue
         default = _SCRIPT_DEFAULT_NAME.match(clause)
         if default:
-            names[default.group(1)] = specifier
+            names[default.group(1)] = ImportedName(specifier, None)
         for braces in _SCRIPT_BRACES.findall(clause):
-            names.update({_local(part): specifier for part in braces.split(",") if part.strip()})
+            names.update(
+                {
+                    _local(part): _script_imported(specifier, _exported(part))
+                    for part in braces.split(",")
+                    if part.strip()
+                }
+            )
     return names
+
+
+def _script_imported(specifier: str, exported: str) -> ImportedName:
+    """``import { default as entry }`` is a default import: it names no export."""
+    return ImportedName(specifier, None if exported == "default" else exported)
 
 
 def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
@@ -320,5 +364,22 @@ def _lines_matched(code: str, patterns: tuple[re.Pattern[str], ...]) -> set[int]
     return covered
 
 
+def _destructured_pairs(pattern: str) -> list[tuple[str, str]]:
+    """The property each name of an object pattern takes, and the local name it binds: ``(a, a)`` and
+    ``(b, c)`` in ``a, b: c = 1, ...rest``, but not the rest element."""
+    pairs = []
+    for part in pattern.split(","):
+        key, _, local = part.split("=")[0].partition(":")
+        key, local = key.strip(), (local or key).strip()
+        if key and not key.startswith("..."):
+            pairs.append((key, local))
+    return pairs
+
+
 def _local(part: str) -> str:
     return part.split(" as ")[-1].strip().removeprefix("type ").strip()
+
+
+def _exported(part: str) -> str:
+    """The name an import part takes as its module exports it: ``a`` in ``a as b`` or ``type a as b``."""
+    return part.strip().removeprefix("type ").split(" as ")[0].strip()

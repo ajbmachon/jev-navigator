@@ -117,6 +117,41 @@ def test_an_importer_of_a_guarded_file_keeps_the_import_and_its_name_binds_unkno
     assert BUNDLE in binding.reason
 
 
+GUARDED_EXPORTS = "vendor/bundle.js"
+
+
+@pytest.mark.parametrize(
+    ("importer", "name"),
+    [
+        ("import build from '../vendor/bundle.js';\nbuild();\n", "build"),
+        ("const { start } = require('../vendor/bundle.js');\nstart();\n", "start"),
+        ("import { start } from './barrel.js';\nstart();\n", "start"),
+    ],
+    ids=["default import", "named require", "through a barrel"],
+)
+def test_a_name_imported_from_a_guarded_file_binds_unknown_where_its_bytes_never_say_the_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, importer: str, name: str
+) -> None:
+    # Arrange: the guarded file's one line exports a default and never says `default` or `start`
+    _AstGrepRecorder(monkeypatch)
+    statement = "module.exports=build;function build(){return 1};"
+    files = {
+        GUARDED_EXPORTS: (statement * (668_777 // len(statement) + 1))[:668_777],
+        "src/barrel.js": "export * from '../vendor/bundle.js';\n",
+        "src/importer.js": importer,
+    }
+    commit_files(tmp_path / "repo", files)
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    binding = index.binding_of("src/importer.js", 2, name, None)
+
+    # Assert
+    assert GUARDED_EXPORTS in index.refused_files
+    assert binding.status == BindingStatus.UNKNOWN
+    assert GUARDED_EXPORTS in binding.reason
+
+
 def test_comment_scanning_never_parses_a_guarded_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -456,7 +456,7 @@ def contents_with_calls(prefix: str, count: int, rows: int) -> dict[str, scope_s
     """``count`` file contents of ``rows`` calls each, keyed by made-up blob ids."""
     return {
         hashlib.sha1(f"{prefix}{n}".encode()).hexdigest(): scope_scan.FileFacts(
-            scope_scan.FileStructure((), (), ()),
+            scope_scan.FileStructure(),
             tuple(
                 scope_scan.CallMatch(f"f{n}.ts", line + 1, f"name{line % 4000}", None) for line in range(rows)
             ),
