@@ -26,6 +26,7 @@ from jev_navigator.index.units import OUTSIDE_SCOPE, UNSUPPORTED_LANGUAGE, Range
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError, InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
+from jev_navigator.judgments.secrets import DEFAULT_MASKER, Masker
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 LIMIT = {"limit": "the check that limits the items of an order"}
@@ -39,10 +40,10 @@ ORDERS = {
 }
 
 
-def repository(root: Path, files: Mapping[str, str] = ORDERS) -> CodeIndex:
+def repository(root: Path, files: Mapping[str, str] = ORDERS, masker: Masker = DEFAULT_MASKER) -> CodeIndex:
     for name, source in files.items():
         (root / name).write_text(source)
-    return CodeIndex(root, files)
+    return CodeIndex(root, files, masker=masker)
 
 
 def labelled(labels: Mapping[tuple[str, str], float], default: float = 0.05) -> ScriptedJevClient:
@@ -320,28 +321,28 @@ def secrets_function(lines: int) -> str:
     return "def settings():\n" + "".join(_numbered_secret(line) for line in range(lines)) + "    return 1\n"
 
 
-def test_a_unit_that_fits_its_room_only_unmasked_is_too_large_and_the_search_goes_on(tmp_path: Path) -> None:
+def test_a_unit_that_fits_its_room_only_unmasked_is_cut_into_pieces_measured_masked(tmp_path: Path) -> None:
     # Arrange: the largest function of short secrets within the room unmasked, which masking takes over
-    # the box, beside a small function
+    # the box, beside a small function; the index reads every file masked whole before any cut
     room = find_all(
         repository(tmp_path, {"settings.py": "def settings():\n    return 1\n"}), Judge(labelled({})), LIMIT
     ).room
     lines = 0
     while serialized_chars(secrets_function(lines + 1).removesuffix("\n")) <= room:
         lines += 1
-    index = repository(tmp_path, {"settings.py": secrets_function(lines), "rules.py": ORDERS["rules.py"]})
+    masker = ShortSecretMasker()
+    index = repository(tmp_path, {"settings.py": secrets_function(lines), "rules.py": ORDERS["rules.py"]}, masker)
     provider = BudgetedClient(JEV_INPUT_LIMITS.request_chars, input_box=JEV_INPUT_LIMITS.box_chars)
 
     # Act
-    result = find_all(index, Judge(provider, masker=ShortSecretMasker()), LIMIT, files=index.files)
+    result = find_all(index, Judge(provider, masker=masker), LIMIT, files=index.files)
 
     # Assert
     [settings] = [unit for unit in result.units if unit.path == "settings.py"]
-    assert settings.pieces == ()
-    assert result.not_judged == {settings.id: TOO_LARGE}
+    assert len(settings.pieces) > 1
+    assert not any(piece.too_large_to_judge for piece in settings.pieces)
+    assert TOO_LARGE not in result.not_judged.values()
     assert (result.stopped_by, result.failure, provider.refusals) == ("scope_examined", None, 0)
-    rules = [unit.id for unit in result.units if unit.path == "rules.py"]
-    assert [score.unit.id for score in result.scores("limit")] == rules
 
 
 def smallest_request_limit_fitting(checks: list, item: Mapping, shared: Mapping, box: int) -> int:

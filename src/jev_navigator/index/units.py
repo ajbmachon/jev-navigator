@@ -234,7 +234,7 @@ class _SourceFile:
         self._index = index
         self._file = file
         self._box_chars = box_chars
-        self._lines = index.lines(file)
+        self._lines = index.plain_lines(file)
         self._symbols = index.symbols_in(file)
         self._all_functions = frozenset(index.functions_in(file))
         self._decorator_starts = index.decorator_starts_in(file)
@@ -370,7 +370,7 @@ class _AnchorResolver:
 
     def _units_touching(self, file: str, start: int, end: int) -> tuple[Unit, ...]:
         source = self._source(file)
-        lines = self._index.lines(file)
+        lines = self._index.plain_lines(file)
         touched_lines = [line for line in range(start, end + 1) if lines[line - 1].strip()] or [start]
         touched = dict.fromkeys(unit for line in touched_lines if (unit := source.unit_at(line)) is not None)
         return tuple(unit for unit in touched if not any(_nests(unit, other) for other in touched))
@@ -380,7 +380,7 @@ class _AnchorResolver:
             return problem
         if start > end:
             return f"the range {start}-{end} ends before it starts"
-        line_count = len(self._index.lines(file))
+        line_count = len(self._index.plain_lines(file))
         outside = next((line for line in (start, end) if not 1 <= line <= line_count), None)
         if outside is not None:
             return f"line {outside} is outside {file}, which has {line_count} lines"

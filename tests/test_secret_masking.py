@@ -11,6 +11,7 @@ from jev_navigator.judgments.secrets import (
     HIGH_ENTROPY_MIN_CHARS,
     MASK,
     TOKEN_CHARACTER_CLASS,
+    Copies,
     SecretInRequestError,
     SecretMasker,
     SecretScanner,
@@ -878,3 +879,63 @@ def test_a_copy_pattern_finds_a_long_value_anywhere_and_a_short_one_as_a_whole_w
 
     # Assert
     assert bool(found) is hidden
+
+
+def test_one_pass_copies_find_exactly_what_each_values_pattern_finds() -> None:
+    # Arrange: long values anywhere, short ones as whole words, one value a prefix of another
+    values = frozenset({"hunter2", "abc", "Kq8mLx2PzR7v", "Kq8mLx2PzR7vWn4T", "p@ss!", "$tok"})
+    text = (
+        'a hunter2 hunter2x xabc abc_ (abc) Kq8mLx2PzR7vWn4T Kq8mLx2PzR7v9 p@ss! xp@ss! $tok a$tok "hunter2"'
+    )
+
+    # Act
+    found = Copies(values).spans(text)
+
+    # Assert
+    expected = sorted(
+        span for value in values for span in (match.span() for match in copy_pattern(value).finditer(text))
+    )
+    longest = [
+        span
+        for span in expected
+        if not any(o != span and o[0] <= span[0] and span[1] <= o[1] for o in expected)
+    ]
+    assert found == longest
+
+
+def test_a_short_value_glued_after_a_long_values_copy_is_masked_and_the_request_is_sent() -> None:
+    # Arrange: jvn-verifier's shape; masking the long copy leaves the short value after "]"
+    short, long = "hunter2", "sk_abcdefghijklmnop"
+    state = {
+        "config": {"file": "deploy/app.yml", "code": f"password: {short}\napi_key: {long}\n"},
+        "log": {"file": "notes.txt", "code": f"joined: {long}{short} end"},
+    }
+
+    # Act
+    masked, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked["log"]["code"] == f"joined: {MASK}{MASK} end"
+
+
+@pytest.mark.parametrize(
+    ("state", "role"),
+    [({"code": "send hunter2"}, "value"), ({"sk_abcdefghijklmnop": "x"}, "key")],
+    ids=["in a value", "in a key"],
+)
+def test_the_final_check_names_where_a_masked_value_still_stands(state: dict, role: str) -> None:
+    # Act
+    with pytest.raises(SecretInRequestError) as refused:
+        refuse_if_secret(state, {}, None, frozenset({"hunter2", "sk_abcdefghijklmnop"}))
+
+    # Assert
+    assert str(refused.value) == f"a masked value is still in the request, in a {role}; nothing was sent"
+
+
+def test_a_value_inside_the_mask_word_is_left_as_written() -> None:
+    # Act: masking a copy of "MASKED" would write a new one, without end
+    masked = Copies({"MASKED", "hunter2"}).sub("MASKED hunter2")
+
+    # Assert
+    assert masked == f"MASKED {MASK}"

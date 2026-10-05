@@ -231,9 +231,8 @@ def test_a_file_that_vanishes_during_the_scan_is_left_to_the_index_not_named_ski
         lambda repository: tuple(
             hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5, 200)
         ),
-        lambda repository: tuple(hit.file for hit in tools.ripgrep_lines(("needle",), ("a.py",), repository)),
     ],
-    ids=["ripgrep_files", "ripgrep_fixed", "ripgrep_lines"],
+    ids=["ripgrep_files", "ripgrep_fixed"],
 )
 def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch, search) -> None:
     # A ripgrep config in the environment (RIPGREP_CONFIG_PATH) can name `--pre=<program>`, which

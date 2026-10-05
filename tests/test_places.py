@@ -15,7 +15,6 @@ from jev_navigator.directives.places import (
     Move,
     Place,
     function_place,
-    located_file,
     neighbours,
     neighbours_and_omissions,
     place_for_line,
@@ -23,6 +22,7 @@ from jev_navigator.directives.places import (
     restored_signature,
     window_place,
 )
+from jev_navigator.directives.place_signatures import located_file
 from jev_navigator.directives.shown import cut_long_line
 from jev_navigator.index.bindings import Binding, BindingStatus
 from jev_navigator.index.code_index import CodeIndex

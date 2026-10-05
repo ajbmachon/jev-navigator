@@ -69,14 +69,18 @@ def test_a_mismatch_names_the_part_that_changed(
 
 
 def test_a_batch_whose_items_share_a_masked_value_is_rebuilt_exactly(tmp_path: Path) -> None:
-    # Arrange
+    # Arrange: the second item copies the value its file keys outside it; a key in another file
+    # only is not hidden (cross-file copies are on the later list)
     repo = tmp_path / "repo"
     repo.mkdir()
     commit_files(
         repo,
         {
             "settings.py": 'WEBHOOK_TOKEN = "order-hook-4f7a1c"\n',
-            "hooks.py": 'def send(order):\n    return post("order-hook-4f7a1c", order)\n',
+            "hooks.py": (
+                'HOOK_TOKEN = "order-hook-4f7a1c"\n\n\n'
+                'def send(order):\n    return post("order-hook-4f7a1c", order)\n'
+            ),
         },
     )
     index = CodeIndex.from_git(repo)
@@ -84,7 +88,7 @@ def test_a_batch_whose_items_share_a_masked_value_is_rebuilt_exactly(tmp_path: P
         {"file": file, "lines": [first, last], "commit": index.commit, "code": index.read_slice(span).text}
         for file, first, last, span in (
             ("settings.py", 1, 1, Span("settings.py", 1, 1)),
-            ("hooks.py", 1, 2, Span("hooks.py", 1, 2)),
+            ("hooks.py", 4, 5, Span("hooks.py", 4, 5)),
         )
     ]
     store_path = tmp_path / "answers.jsonl"

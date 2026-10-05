@@ -192,13 +192,13 @@ def test_the_line_cache_evicts_the_least_recently_read_file(
         (tmp_path / name).write_text(f"def {name[0]}():\n    return 1\n")
     index = CodeIndex(tmp_path, ["a.py", "b.py", "c.py"])
     for file in ("a.py", "b.py", "a.py", "c.py"):
-        index.lines(file)
+        index.plain_lines(file)
     for name in ("a.py", "b.py"):
         (tmp_path / name).write_text("def edited():\n    return 2\n")
 
     # Act: a.py was read more recently than b.py, so only b.py goes back to the disk
     for file in ("a.py", "b.py"):
-        index.lines(file)
+        index.plain_lines(file)
 
     # Assert
     assert set(index.unavailable_files) == {"b.py"}
@@ -505,10 +505,10 @@ def test_a_literal_search_over_more_files_than_a_parser_command_takes_starts_one
 @pytest.mark.parametrize(
     "search",
     [
-        lambda files, root: [hit.file for hit in tools.ripgrep_lines(["return"], files, root)],
+        lambda files, root: [hit.file for hit in tools.ripgrep_fixed("return", files, root, 10, 200)],
         lambda files, root: list(tools.ripgrep_files("return", files, root)),
     ],
-    ids=["ripgrep_lines", "ripgrep_files"],
+    ids=["ripgrep_fixed", "ripgrep_files"],
 )
 def test_a_pattern_file_search_over_more_files_than_a_parser_command_takes_starts_one_ripgrep(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawned: Counter[str], search

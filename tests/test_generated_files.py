@@ -4,16 +4,21 @@ everything else is the real scope, index, masker and judge."""
 
 from __future__ import annotations
 
+import json
+import tracemalloc
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
 from git_repos import commit_all, write_files
+from secret_shapes import SECRET_SHAPES, pieces
 
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.file_shape import shape_of
 from jev_navigator.index.scope import ResolvedScope, Scope, resolve_scope
 from jev_navigator.judgments.generated_files import (
     EXCERPT_CHARS,
+    FILES,
     GENERATED_FILE,
     MAX_IMPORTERS,
     MAX_NAMED_BY,
@@ -25,6 +30,7 @@ from jev_navigator.judgments.generated_files import (
     judge_generated_files,
 )
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.secrets import SecretMasker, mask_request
 from jev_navigator.testing import ScriptedJevClient
 
 BUNDLE = "".join(f"var a{number}=function(){{return {number}}};" for number in range(800)) + "\n"
@@ -59,8 +65,9 @@ def test_a_flagged_file_reaches_jev_as_its_path_measured_facts_and_two_excerpts(
     index, awaiting = _awaiting(repo)
     shape = shape_of(repo, "web/bundle.js")
     middle_start = (len(text) - EXCERPT_CHARS) // 2
+    opening, middle = text[:EXCERPT_CHARS], text[middle_start : middle_start + EXCERPT_CHARS]
 
-    entry = generated_file_entry(index, "web/bundle.js", awaiting["web/bundle.js"], naming=())
+    entry = generated_file_entry(index, "web/bundle.js", awaiting["web/bundle.js"], ())
 
     assert entry == {
         "file": "web/bundle.js",
@@ -72,8 +79,8 @@ def test_a_flagged_file_reaches_jev_as_its_path_measured_facts_and_two_excerpts(
         "importer_count": 0,
         "named_by": [],
         "named_by_count": 0,
-        "opening": text[:EXCERPT_CHARS],
-        "middle": text[middle_start : middle_start + EXCERPT_CHARS],
+        "opening": opening,
+        "middle": middle,
     }
 
 
@@ -85,7 +92,7 @@ def test_importers_are_the_files_whose_imports_resolve_to_it_capped_with_the_tru
     repo = _repository(tmp_path / "repo", {"web/bundle.js": BUNDLE, **importers, **mention_only})
     index, _ = _awaiting(repo)
 
-    entry = generated_file_entry(index, "web/bundle.js", shape_of(repo, "web/bundle.js"), naming=())
+    entry = generated_file_entry(index, "web/bundle.js", shape_of(repo, "web/bundle.js"), ())
 
     assert entry["importers"] == sorted(importers)[:MAX_IMPORTERS]
     assert entry["importer_count"] == 12
@@ -176,7 +183,7 @@ def test_files_that_name_a_flagged_path_reach_jev_non_test_files_first_capped_wi
 
 
 def test_a_long_naming_line_reaches_jev_as_a_window_that_keeps_the_path(tmp_path: Path) -> None:
-    line = "a" * 500 + ' copy("web/bundle.js") ' + "b" * 500
+    line = "alpha " * 80 + 'copy("web/bundle.js") ' + "omega " * 80
     repo = _repository(tmp_path / "repo", {"web/bundle.js": BUNDLE, "scripts/copy.mjs": line + "\n"})
     index, awaiting = _awaiting(repo)
 
@@ -185,7 +192,7 @@ def test_a_long_naming_line_reaches_jev_as_a_window_that_keeps_the_path(tmp_path
         index, "web/bundle.js", awaiting["web/bundle.js"], naming["web/bundle.js"]
     )["named_by"]
 
-    assert len(named["text"]) == NAMING_LINE_CHARS
+    assert NAMING_LINE_CHARS - len("alpha") <= len(named["text"]) <= NAMING_LINE_CHARS
     assert 'copy("web/bundle.js")' in named["text"]
     assert named["text"] in line
 
@@ -271,3 +278,201 @@ class _MarkScanner:
 def _scripted(question: Mapping, state: Mapping, by_file: Mapping[str, float]) -> float:
     slot = int(question["instructions"].split("`files[")[1].split("]")[0])
     return by_file[state["files"][slot]["file"]]
+
+
+def test_a_one_line_bundle_naming_a_path_reaches_python_only_as_a_window(tmp_path: Path) -> None:
+    # Arrange: jvn-verifier's shape, a 20 MB one-line bundle naming the path 600,000 times beside
+    # 200 small files that name it once each
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "dist").mkdir()
+    (repo / "src/util.js").write_text("export const util = 1;\n")
+    (repo / "dist/bundle.js").write_text("var a=require('./src/util.js');a.util(1);" * 600_000 + "\n")
+    for number in range(200):
+        (repo / f"src/m{number}.js").write_text(
+            f"import {{ util }} from './src/util.js';\nexport const m{number} = util;\n"
+        )
+    tracemalloc.start()
+
+    # Act
+    naming = files_naming(repo, ["src/util.js"])
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # Assert
+    [bundle_hit] = [hit for hit in naming["src/util.js"] if hit.file == "dist/bundle.js"]
+    assert len(naming["src/util.js"]) == 201
+    assert peak < 10 * 2**20
+    assert bundle_hit.line == 1 and "src/util.js" in bundle_hit.text
+    assert len(bundle_hit.text) <= 2 * NAMING_LINE_CHARS + len("src/util.js") + 2
+
+
+def test_a_sentence_ending_with_the_path_names_it(tmp_path: Path) -> None:
+    # Arrange: the full stop after the path starts no file extension
+    repo = _repository(
+        tmp_path / "repo",
+        {"web/bundle.js": BUNDLE, "README.md": "Rebuild web/bundle.js.\nSee web/bundle.json.\n"},
+    )
+
+    # Act
+    naming = files_naming(repo, ["web/bundle.js"])
+
+    # Assert
+    assert [(hit.file, hit.line) for hit in naming["web/bundle.js"]] == [("README.md", 1)]
+
+
+def test_a_naming_line_after_the_first_with_windows_line_endings_is_sent_as_written(tmp_path: Path) -> None:
+    # Arrange
+    repo = _repository(
+        tmp_path / "repo",
+        {"web/gen.js": BUNDLE, "app/load.js": "one\r\ntwo\r\nload('web/gen.js')\r\nend\r\n"},
+    )
+
+    # Act
+    index, awaiting = _awaiting(repo)
+    [named] = generated_file_entry(
+        index,
+        "web/gen.js",
+        awaiting["web/gen.js"],
+        files_naming(repo, ["web/gen.js"])["web/gen.js"],
+    )["named_by"]
+
+    # Assert
+    assert named == {"file": "app/load.js", "line": 3, "text": "load('web/gen.js')"}
+
+
+def test_the_sent_request_holds_no_piece_of_a_secret_that_a_naming_window_or_excerpt_cuts_from_its_key(
+    tmp_path: Path,
+) -> None:
+    # Arrange: the opening excerpt copies a value whose key comes after it, and the naming window
+    # starts at a value's opening quote, after its key
+    excerpt_value, naming_value = SECRET_SHAPES["alphanumeric"], SECRET_SHAPES["password-with-symbols"]
+    flagged = f'post("{excerpt_value}");\n' + BUNDLE + f'var apiKey = "{excerpt_value}";\n'
+    after_key = f'"{naming_value}", "pad": "PAD", "output": "web/gen.js"}}'
+    pad = "y" * (NAMING_LINE_CHARS - len(after_key) + len("PAD"))
+    namer = '{"token": ' + after_key.replace("PAD", pad) + "\n"
+    repo = _repository(tmp_path / "repo", {"web/gen.js": flagged, "app/build.json": namer})
+    index, awaiting = _awaiting(repo)
+    client = ScriptedJevClient(default_noul=0.9)
+
+    # Act
+    judgments = judge_generated_files(Judge(client), index, awaiting)
+
+    # Assert
+    [(state, _)] = client.requests
+    [entry] = state[FILES]
+    assert list(judgments.judged) == ["web/gen.js"] and entry["named_by"][0]["file"] == "app/build.json"
+    assert (pieces(excerpt_value) | pieces(naming_value)) & pieces(json.dumps(state)) == set()
+
+
+def test_a_naming_file_edited_after_the_search_is_left_out_and_still_counted(tmp_path: Path) -> None:
+    # Arrange: both files name the path when searched; then one is edited and one is shortened
+    repo = _repository(
+        tmp_path / "repo",
+        {"web/gen.js": BUNDLE, "app/a.js": "load('web/gen.js')\n", "app/b.js": "x\nload('web/gen.js')\n"},
+    )
+    index, awaiting = _awaiting(repo)
+    naming = files_naming(repo, ["web/gen.js"])["web/gen.js"]
+    (repo / "app/a.js").write_text("load('web/other.js')\n")
+    (repo / "app/b.js").write_text("x\n")
+
+    # Act
+    entry = generated_file_entry(index, "web/gen.js", awaiting["web/gen.js"], naming)
+
+    # Assert
+    assert (entry["named_by"], entry["named_by_count"]) == ([], 2)
+
+
+# Made-up, never a credential: the shape of the verifier's excerpt probe.
+EXCERPT_SECRET = "Vq7Lm2Xz9Rk4Tn8Wb3Yc6Hd1Fg5Jp0Ns2Qa7Ue"
+
+
+def test_an_excerpt_cut_anywhere_through_a_keyed_secret_sends_none_of_it(tmp_path: Path) -> None:
+    # Arrange: the opening excerpt's end and the middle excerpt's start each sweep across the assignment
+    assignment = f'var apiKey = "{EXCERPT_SECRET}";\n'
+    total = 12_000
+    middle_start = (total - EXCERPT_CHARS) // 2
+    texts = {
+        **{
+            f"web/open{shift}.js": "x" * (EXCERPT_CHARS - shift) + assignment + "y" * 5_000
+            for shift in range(60)
+        },
+        **{
+            f"web/mid{shift}.js": ("x" * (middle_start - 40 + shift) + assignment).ljust(total, "y")
+            for shift in range(60)
+        },
+    }
+    repo = _repository(tmp_path / "repo", texts)
+    index, _ = _awaiting(repo)
+
+    # Act
+    entries = [generated_file_entry(index, path, shape_of(repo, path), ()) for path in texts]
+    masked, _, _ = mask_request({FILES: entries}, {}, SecretMasker())
+
+    # Assert
+    sent = [entry.get("opening", "") + entry.get("middle", "") for entry in masked[FILES]]
+    leaking = [
+        path for path, text in zip(texts, sent, strict=True) if _pieces(EXCERPT_SECRET, 4) & _pieces(text, 4)
+    ]
+    assert leaking == []
+
+
+# Made-up values with a secret's shape; none was ever a credential.
+OPAQUE_VALUE = "Zq8mKx2LpR7vWn4TsB9cHd3FgJ6aE1yU" * 4
+
+
+def _sent_naming_texts(repo: Path, path: str) -> list[str]:
+    """The naming text of each file naming ``path``, as the judge would send it, masked."""
+    index, awaiting = _awaiting(repo)
+    entries = [
+        generated_file_entry(index, path, awaiting[path], (hit,))["named_by"][0]
+        for hit in files_naming(repo, [path])[path]
+    ]
+    masked, _, _ = mask_request({"named_by": entries}, {}, SecretMasker())
+    return [entry["text"] for entry in masked["named_by"]]
+
+
+def _pieces(value: str, length: int) -> set[str]:
+    return {value[start : start + length] for start in range(len(value) - length + 1)}
+
+
+def test_a_secret_whose_key_falls_outside_the_naming_window_stays_masked(tmp_path: Path) -> None:
+    # Arrange: jvn-verifier's shape; masked whole, the line hides the value, but the 200-character
+    # window around the path holds the value without its key
+    line = f'{{"apiKey": "{OPAQUE_VALUE}", "padding": "{"x" * 40}", "output": "web/gen.js"}}'
+    repo = _repository(tmp_path / "repo", {"web/gen.js": BUNDLE, "app/build.js": line + "\n"})
+
+    # Act
+    [text] = _sent_naming_texts(repo, "web/gen.js")
+
+    # Assert
+    assert "web/gen.js" in text
+    assert not any(piece in text for piece in _pieces(OPAQUE_VALUE, 6))
+
+
+# Made-up values with a JWT's and a password's shape; neither was ever a credential.
+SPLIT_VALUES = (
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0LXVzZXIiLCJyb2xlIjoibm9uZSJ9.c2lnbmF0dXJlLW9ubHktYS10ZXN0",
+    "p@ss!w0rd#Kq8$Lm2%Zx7^Vn4&Rt9*Wb3(Yc6)Hd1-Fg5+Jk0=",
+)
+
+
+@pytest.mark.parametrize("value", SPLIT_VALUES, ids=["jwt", "password-with-symbols"])
+def test_a_split_value_leaves_no_piece_whatever_its_characters(tmp_path: Path, value: str) -> None:
+    # Arrange: each naming line puts the 200-character cut one character further inside the value
+    namers = {f"app/c{inside}.json": _line_cut_inside(value, inside) for inside in range(1, len(value))}
+    repo = _repository(tmp_path / "repo", {"web/gen.js": BUNDLE, **namers})
+
+    # Act
+    texts = _sent_naming_texts(repo, "web/gen.js")
+
+    # Assert
+    assert len(texts) == len(value) - 1 and all("web/gen.js" in text for text in texts)
+    assert {piece for text in texts for piece in _pieces(value, 4) if piece in text} == set()
+
+
+def _line_cut_inside(value: str, inside: int) -> str:
+    """A naming line whose last ``NAMING_LINE_CHARS`` characters start ``inside`` into ``value``."""
+    before_pad, after_pad = '", "pad": "', '", "output": "web/gen.js"}'
+    pad = "x" * (NAMING_LINE_CHARS - (len(value) - inside) - len(before_pad) - len(after_pad))
+    return '{"token": "' + value + before_pad + pad + after_pad + "\n"

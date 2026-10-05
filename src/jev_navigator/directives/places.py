@@ -16,7 +16,6 @@ from ..index.code_index import CodeIndex
 from ..index.scope import is_test_file
 from ..index.spans import CallEdge, CodeSlice, Span, TextHit
 from ..judgments.relations import key_mention
-from .shown import LINE_CUT_MARK
 
 MAX_DEFINITION_LINES = 120
 REST_OF_FILE_LINES = 40
@@ -28,8 +27,6 @@ _ENVIRONMENT_READ = re.compile(
 _QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
 _KEY_SHAPE = re.compile(r"[._:/-]")
 _WINDOW_KEY_LINES = re.compile(r"(\d+)~\d+")
-_PLACE_LINES = re.compile(r":\d+(?:-\d+)? ")
-_WINDOW_LINE = re.compile(r"line \d+ ")
 MAX_KEY_HITS = 30
 _PASSED_ON_ROLES = frozenset(
     {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type", "base"}
@@ -136,31 +133,6 @@ def _range_signature(index: CodeIndex, span: Span, relation: str) -> str:
         next((line.strip() for line in lines if line.strip()), "") if code_line is None else lines[code_line]
     )
     return f"{span.key} `{quoted.strip()}` ({relation})"
-
-
-def located_file(signature: str) -> str | None:
-    """The file a place's signature names, parsed by the grammar the signature builders write: the
-    file, ``:lines`` and a space at each separator, then the place's text (see ``_is_place_text``).
-    None when no split fits, and when more than one does (a path or a quoted code line that holds a
-    separator itself), so a caller that needs the file reads such a signature as config."""
-    files: list[str] = []
-    for separator in _PLACE_LINES.finditer(signature):
-        if separator.start() and _is_place_text(signature[separator.end() :]):
-            files.append(signature[: separator.start()])
-            if len(files) > 1:
-                return None
-    return files[0] if files else None
-
-
-def _is_place_text(text: str) -> bool:
-    """A place's text: an optional ``line N `` then quoted code, ending with the closing quote or a
-    parenthesised relation, or anywhere when ``cut_long_line`` cut it."""
-    body = text.removesuffix(LINE_CUT_MARK)
-    window_line = _WINDOW_LINE.match(body)
-    quoted = body[window_line.end() :] if window_line else body
-    if not quoted.startswith("`"):
-        return False
-    return body != text or quoted.endswith("`") or ("` (" in quoted and quoted.endswith(")"))
 
 
 def first_code_line(lines: Sequence[str], file: str) -> int | None:
@@ -356,7 +328,8 @@ def _imported(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     name that module only passes on from elsewhere, opens the start of that module."""
     span = opened.span
     module_level = not any(symbol.contains(span.start) for symbol in index.symbols_in(span.file))
-    text = "\n".join(index.lines(span.file)) if module_level else opened.text
+    lines = index.plain_lines(span.file)
+    text = "\n".join(lines if module_level else lines[span.start - 1 : span.end])
     source = span.file if module_level else _span_label(span)
     places = []
     for fact, names in index.imports_in(span.file, text):
@@ -374,7 +347,7 @@ def _imported(index: CodeIndex, opened: CodeSlice) -> list[Place]:
         )
         places += [function_place(index, definition, relation) for definition in definitions]
         if names is None or not names <= {definition.name for definition in definitions}:
-            end = min(len(index.lines(fact.path)), IMPORTED_HEAD_LINES)
+            end = min(len(index.plain_lines(fact.path)), IMPORTED_HEAD_LINES)
             places.append(range_place(index, fact.path, 1, end, f"start of a module {relation}"))
     return places
 
@@ -449,7 +422,7 @@ def _co_changed(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     places = []
     for other, commits in index.co_changed_files(opened.span.file, limit=2):
         relation = f"start of a file committed with {opened.span.file} {commits} times"
-        end = min(len(index.lines(other)), CO_CHANGE_HEAD_LINES)
+        end = min(len(index.plain_lines(other)), CO_CHANGE_HEAD_LINES)
         places.append(range_place(index, other, 1, end, relation))
     return places
 
@@ -464,7 +437,7 @@ def _lines_before(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 def _rest_of_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     span = opened.span
-    line_count = len(index.lines(span.file))
+    line_count = len(index.plain_lines(span.file))
     if span.end >= line_count:
         return []
     end = min(line_count, span.end + REST_OF_FILE_LINES)

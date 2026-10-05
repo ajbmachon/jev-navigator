@@ -292,7 +292,7 @@ index.enclosing_symbol(file, line)
 index.symbols_in(file)
 index.decorator_starts_in(file)  # each decorated function's span and its first decorator line
 index.stubs_in(file)  # functions whose body is only ..., pass, a docstring or raise NotImplementedError
-index.read_slice(span)
+index.read_slice(span)  # masked as part of its whole file; see Secrets
 index.read_window(file, line, radius=10)
 index.search_text("orders.max_items")  # ripgrep over the narrowed files only, every hit in file and line order
 index.search_text("orders.max_items", max_hits=30)  # only the first 30 hits
@@ -550,8 +550,11 @@ else:
   true count, up to 5 files that name its path with the naming line (at most 200 characters around
   the path; files outside the scope count, non-test files come first; a path written relative to the
   naming file, such as `../src/a.js`, or joined to a variable folder, such as `$root/src/a.js`, is not
-  found) and their true count, and two 2,000-character excerpts (the opening and the middle). A file
-  the secret scan would refuse is never sent and comes back in `not_judged` with the reason. Nothing calls it yet: the
+  found) and their count when searched (a naming file edited since then is left out of the lines),
+  and two 2,000-character excerpts (the opening and the middle). Each naming line and excerpt is cut
+  from its whole file as `judgments.masked_text.masked_lines` masked it, so a secret whose key the cut
+  leaves out is still masked. A file the secret scan would refuse
+  is never sent and comes back in `not_judged` with the reason. Nothing calls it yet: the
   search that acts on the answers lands with Find v2's round controller.
 - `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are
   globs over the whole path: `**` crosses folders, and a glob without `/` matches the file name at any
@@ -663,7 +666,7 @@ on its own scope, so searches sharing one judge never use up each other's budget
   secret key is masked too (`POSTGRES_PASSWORD: example`), unless it is empty, a boolean or a whole
   `${VAR}`, `$VAR` or `${{ ... }}` reference; in code it stays (`token: str`). A request mapping's
   `file` names the file of the strings inside it, and a candidate's signature names its file the same
-  way (the signature builders in `directives/places.py` write it, and `located_file` beside them parses
+  way (the signature builders in `directives/places.py` write it, and `located_file` in `directives/place_signatures.py` parses
   exactly that grammar); a signature that names no file, or whose file is ambiguous, reads as config. An upper-case environment assignment is a value
   wherever it stands on a shell, Makefile or CI line (`run: API_TOKEN=... npm test`), unless it is a
   usage placeholder (`KEY=...`, `KEY=<credential>`). A secret flag on a command line
@@ -688,6 +691,13 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
   left in a key is refused too. Both are on by default; a host passes its own (a masker offers
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
+  Code reaches a request already masked as part of its whole file: `CodeIndex(masker=...)` (default
+  `secrets.DEFAULT_MASKER`, with no "off") masks each file once, line count kept, and `index.lines`,
+  `read_slice` and `read_window` cut from that text. So a slice, window, preview or line cut never holds
+  a value masked anywhere in its file, even when the cut leaves the key out. `index.plain_lines` is for
+  analysis only. A copy is hidden when its file, or another string of the same request, keys the
+  value; a key that only another file holds does not hide it. Copies are found in one pass however
+  many values a request masks.
 - **Batches.** A batched request carries at most `Judge(items_per_request=N)` items (default 16)
   and closes early when the next item would not fit the size budget. Batches form over every item in
   an order fixed by each unit's file and lines (by content for an item without them), so the same

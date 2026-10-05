@@ -15,6 +15,8 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
+from ..judgments.masked_text import masked_lines
+from ..judgments.secrets import DEFAULT_MASKER, Masker
 from . import listing, tools
 from .bindings import (
     Binding,
@@ -99,6 +101,7 @@ class CodeIndex:
         fact_cache_dir: Path | None = None,
         blob_ids: Mapping[str, str] | None = None,
         not_indexed: Mapping[str, str] | None = None,
+        masker: Masker = DEFAULT_MASKER,
     ) -> None:
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
@@ -118,8 +121,13 @@ class CodeIndex:
         self._unavailable: dict[str, str] = {}
         self._refused: dict[str, str] = {}
         self._not_indexed = dict(not_indexed or {})
+        self.masker = masker
         self._sources = SourceFiles(
-            self.root, self._unavailable, LINE_CACHE_FILES, _held_weakly(self._standing_first_read)
+            self.root,
+            self._unavailable,
+            LINE_CACHE_FILES,
+            lambda file, lines: masked_lines(lines, file, masker),
+            _held_weakly(self._standing_first_read),
         )
         self._unparsed = Unparsed()
         self._facts: dict[str, FileFacts] = {}
@@ -147,6 +155,7 @@ class CodeIndex:
         binding_resolver: BindingResolver | None = None,
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
+        masker: Masker = DEFAULT_MASKER,
     ) -> CodeIndex:
         """The regular files git tracks under ``prefixes`` (every one when none are given), read from the
         checkout at its commit; for a repository root with an explicit path list. Symbolic links and
@@ -167,6 +176,7 @@ class CodeIndex:
             fact_cache_dir=fact_cache_dir,
             blob_ids=blobs,
             not_indexed=listing.left_out_of_tracked(root, prefixes, blobs),
+            masker=masker,
         )
 
     @classmethod
@@ -180,6 +190,7 @@ class CodeIndex:
         binding_resolver: BindingResolver | None = None,
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
+        masker: Masker = DEFAULT_MASKER,
     ) -> CodeIndex:
         """Index current files, tracked by git or not, minus ignored ones (see ``listing.working_files``),
         with Git metadata when available.
@@ -209,6 +220,7 @@ class CodeIndex:
             fact_cache_dir=fact_cache_dir,
             blob_ids=blobs,
             not_indexed=listed.not_indexed,
+            masker=masker,
         )
 
     @classmethod
@@ -219,6 +231,7 @@ class CodeIndex:
         prefixes: Sequence[str] = (),
         *,
         max_files: int | None = None,
+        masker: Masker = DEFAULT_MASKER,
     ) -> CodeIndex:
         """The regular files under ``prefixes`` as they were at ``commit``, read from git objects into a
         private temporary directory; the checkout is never touched. History lookups still run in
@@ -235,7 +248,13 @@ class CodeIndex:
         snapshot = tempfile.TemporaryDirectory(prefix=f"jev-navigator-{sha[:8]}-")
         tools.export_blobs(repository, _blobs_to_export(repository, sha, listed), Path(snapshot.name))
         index = cls(
-            snapshot.name, listed, max_files=max_files, commit=sha, git_root=repository, blob_ids=blobs
+            snapshot.name,
+            listed,
+            max_files=max_files,
+            commit=sha,
+            git_root=repository,
+            blob_ids=blobs,
+            masker=masker,
         )
         index._snapshot = snapshot
         return index
@@ -978,7 +997,10 @@ class CodeIndex:
         return specifiers.pop() if len(specifiers) == 1 else None
 
     def read_slice(self, span: Span, origin: str = "") -> CodeSlice:
-        lines = self._lines_of(span.file)
+        """The span's code as a request may show it: cut from the file's ``lines``, which the masker
+        read whole, so no slice holds a value masked anywhere in its file. The slice's SHA-256 names
+        the source bytes it was cut from, as provenance; the request journal records the bytes sent."""
+        lines = self.lines(span.file)
         return CodeSlice(
             span,
             "\n".join(lines[span.start - 1 : span.end]),
@@ -1081,6 +1103,13 @@ class CodeIndex:
         return f"{self.commit}+worktree" if file in self._changed else self.commit
 
     def lines(self, file: str) -> tuple[str, ...]:
+        """The file's lines as a request may show them: masked as one text by ``masker``, as many
+        lines as the file has. Code that reads a file to analyse it uses ``plain_lines``."""
+        self._require_in_scope(file)
+        return self._sources.masked_lines(file)
+
+    def plain_lines(self, file: str) -> tuple[str, ...]:
+        """The file's lines as first read, unmasked: for analysis only, never for a request."""
         return self._lines_of(file)
 
     def _script_paths(self, file: str) -> ScriptPaths | None:
