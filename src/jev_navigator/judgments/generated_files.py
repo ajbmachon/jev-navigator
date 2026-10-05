@@ -33,11 +33,10 @@ NAMING_LINE_CHARS = 200
 NOT_JUDGED_SECRET = "not judged: the secret scan refused its entry"
 _PACKAGE_ENTRY_STEMS = frozenset({"index", "__init__"})
 _PATH_CHARACTERS = r"A-Za-z0-9_\-"
-# The characters of a token a secret can be written in, as the masker reads quoted values.
-_TOKEN_CHARACTERS = r"A-Za-z0-9+/=_\-"
-_TOKEN = re.compile(rf"[{_TOKEN_CHARACTERS}]+")
-_LEADING_TOKEN = re.compile(rf"^[{_TOKEN_CHARACTERS}]+")
-_TRAILING_TOKEN = re.compile(rf"[{_TOKEN_CHARACTERS}]+$")
+# A piece of a value runs to the next whitespace or quote, whatever characters the value holds.
+_PIECE = re.compile(r"""[^\s"']+""")
+_LEADING_PIECE = re.compile(r"""^[^\s"']+""")
+_TRAILING_PIECE = re.compile(r"""[^\s"']+$""")
 
 GENERATED_FILE = Check(
     name="generated_file",
@@ -150,27 +149,31 @@ def _naming_entry(window: TextWindow, path: str) -> dict:
 
 def _naming_text(window: TextWindow, path: str) -> str:
     """The naming line as Jev sees it: the whole line when it fits ``NAMING_LINE_CHARS``, otherwise
-    that many characters around ``path``. Where a cut splits a token, the token's part is dropped: a
-    secret cut away from its key no longer looks like one to the masker, so none of it is kept."""
-    text = _without_split_tokens(window.text, window.cut_start, window.cut_end).strip()
+    that many characters around ``path``. Where a cut splits a value, its piece up to the next
+    whitespace or quote is dropped, never ``path`` itself: a secret cut away from its key no longer
+    looks like one to the masker, so none of it is kept."""
+    text = _without_split_pieces(window.text, path, window.cut_start, window.cut_end).strip()
     if len(text) <= NAMING_LINE_CHARS:
         return text
     centre = text.index(path) + len(path) // 2
     start = min(max(0, centre - NAMING_LINE_CHARS // 2), len(text) - NAMING_LINE_CHARS)
     end = start + NAMING_LINE_CHARS
-    return _without_split_tokens(text[start:end], _splits_token(text, start), _splits_token(text, end))
+    return _without_split_pieces(text[start:end], path, _splits_piece(text, start), _splits_piece(text, end))
 
 
-def _splits_token(text: str, index: int) -> bool:
-    return 0 < index < len(text) and bool(_TOKEN.fullmatch(text[index - 1 : index + 1]))
+def _splits_piece(text: str, index: int) -> bool:
+    return 0 < index < len(text) and bool(_PIECE.fullmatch(text[index - 1 : index + 1]))
 
 
-def _without_split_tokens(text: str, cut_start: bool, cut_end: bool) -> str:
+def _without_split_pieces(text: str, path: str, cut_start: bool, cut_end: bool) -> str:
+    before, named, after = text.partition(path)
+    if not named:
+        before, after = "", text
     if cut_start:
-        text = _LEADING_TOKEN.sub("", text, count=1)
+        before = _LEADING_PIECE.sub("", before, count=1)
     if cut_end:
-        text = _TRAILING_TOKEN.sub("", text, count=1)
-    return text
+        after = _TRAILING_PIECE.sub("", after, count=1)
+    return before + named + after
 
 
 def _excerpts(text: str) -> dict[str, str]:

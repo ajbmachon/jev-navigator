@@ -8,6 +8,7 @@ import tracemalloc
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
 from git_repos import commit_all, write_files
 
 from jev_navigator.index.code_index import CodeIndex
@@ -316,6 +317,18 @@ def test_a_sentence_ending_with_the_path_names_it(tmp_path: Path) -> None:
     assert [(hit.file, hit.line) for hit in naming["web/bundle.js"]] == [("README.md", 1)]
 
 
+def test_a_minified_line_cut_on_both_sides_still_shows_the_path(tmp_path: Path) -> None:
+    # Arrange: no whitespace or quote stands between either cut and the path
+    line = "a=" + "b" * 300 + "=web/gen.js;c=" + "d" * 300 + "\n"
+    repo = _repository(tmp_path / "repo", {"web/gen.js": BUNDLE, "web/min.js": line})
+
+    # Act
+    texts = _sent_naming_texts(repo, "web/gen.js")
+
+    # Assert
+    assert texts == ["web/gen.js"]
+
+
 # Made-up values with a secret's shape; none was ever a credential.
 OPAQUE_VALUE = "Zq8mKx2LpR7vWn4TsB9cHd3FgJ6aE1yU" * 4
 EDGE_TOKENS = ("Q7xK2mZp9LwR4vTn8YsB3cHd6FgJ1aE5", "Yt5Rw2Nq8Lm3Kp7Vx4Bz9Cs6Dh1Fj0Gk")
@@ -394,3 +407,31 @@ def test_a_token_cut_where_the_search_stops_reading_leaves_no_piece(tmp_path: Pa
         piece for text in texts for token in EDGE_TOKENS for piece in _pieces(token, 4) if piece in text
     }
     assert leaked == set()
+
+
+# Made-up values with a JWT's and a password's shape; neither was ever a credential.
+SPLIT_VALUES = (
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0LXVzZXIiLCJyb2xlIjoibm9uZSJ9.c2lnbmF0dXJlLW9ubHktYS10ZXN0",
+    "p@ss!w0rd#Kq8$Lm2%Zx7^Vn4&Rt9*Wb3(Yc6)Hd1-Fg5+Jk0=",
+)
+
+
+@pytest.mark.parametrize("value", SPLIT_VALUES, ids=["jwt", "password-with-symbols"])
+def test_a_split_value_leaves_no_piece_whatever_its_characters(tmp_path: Path, value: str) -> None:
+    # Arrange: each naming line puts the 200-character cut one character further inside the value
+    namers = {f"app/c{inside}.json": _line_cut_inside(value, inside) for inside in range(1, len(value))}
+    repo = _repository(tmp_path / "repo", {"web/gen.js": BUNDLE, **namers})
+
+    # Act
+    texts = _sent_naming_texts(repo, "web/gen.js")
+
+    # Assert
+    assert len(texts) == len(value) - 1 and all("web/gen.js" in text for text in texts)
+    assert {piece for text in texts for piece in _pieces(value, 4) if piece in text} == set()
+
+
+def _line_cut_inside(value: str, inside: int) -> str:
+    """A naming line whose last ``NAMING_LINE_CHARS`` characters start ``inside`` into ``value``."""
+    before_pad, after_pad = '", "pad": "', '", "output": "web/gen.js"}'
+    pad = "x" * (NAMING_LINE_CHARS - (len(value) - inside) - len(before_pad) - len(after_pad))
+    return '{"token": "' + value + before_pad + pad + after_pad + "\n"
