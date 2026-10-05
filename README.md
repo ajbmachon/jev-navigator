@@ -572,7 +572,9 @@ thread. Both paths share one core: masking, the secret scan, the hash, the store
 budget, the journal and the recording are the same steps, and only the send differs (a direct call,
 or an awaited one). Batches of `check_each_async` go out concurrently, at most
 `Judge(max_concurrency=N)` at once (default 16), and the places of each `find_code_async` round are
-sent with `asyncio.gather`; the first batch of a `check_each_async` whose served model is still
+sent concurrently. A cancelled `find_code_async` lets its round finish first: the requests already
+sent settle and their answers reach the history, the journal and the store, then `CancelledError`
+propagates, so a rerun over the same store replays them instead of paying again. The first batch of a `check_each_async` whose served model is still
 unknown and which has an answer store goes out alone. Its live answer pins the served model, so the
 remaining batches can replay from the store. The sync `check_each`, `check_every` and their `iter_`
 forms send their batches on a thread pool under the same `max_concurrency` and first-batch rule; the `iter_` forms yield each batch as it completes. The

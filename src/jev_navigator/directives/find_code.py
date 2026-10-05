@@ -382,24 +382,39 @@ async def find_code_async(
     moves: Mapping[str, Move] | None = None,
     initial_candidates: Sequence[tuple[Place, float]] = (),
 ) -> FindResult:
-    """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
-    masking, the store, the journal and the history work exactly as in ``find_code``, and a failed
-    request ends the search ``failed`` the same way. Opening places
-    runs ripgrep, git and the parser, so it runs in a worker thread and the event loop stays free."""
+    """``find_code`` with each round's places sent concurrently; budgets, masking, the store, the
+    journal and the history work exactly as in ``find_code``, and a failed request ends the search
+    ``failed`` the same way. Opening places runs ripgrep, git and the parser, so it runs in a worker
+    thread and the event loop stays free.
+
+    A cancelled search first lets its round finish: the opening thread ends, the requests already
+    sent settle under their own deadlines, and their answers are merged into the history, the
+    journal and the store. Then the cancellation propagates, so a rerun over the same store replays
+    every received answer instead of paying for it again."""
     options = _SearchOptions(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
     )
     search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, index)) is None:
-        opened = await asyncio.to_thread(_open_round, index, search, judge)
+        opened = await _settled(asyncio.ensure_future(asyncio.to_thread(_open_round, index, search, judge)))
         if not opened:
             continue
-        responses = await asyncio.gather(
-            *(_ask_within_cap_async(judge, search, opening) for opening in opened)
-        )
-        _merge_round(search, opened, responses)
+        sends = [asyncio.ensure_future(_ask_within_cap_async(judge, search, opening)) for opening in opened]
+        await _settled(asyncio.gather(*sends))
+        _merge_round(search, opened, [send.result() for send in sends])
         await _apply_stop_rule_async(judge, search)
     return _result(search, stop, judge, index)
+
+
+async def _settled(work: asyncio.Future):
+    """The result of ``work``, which a cancellation of the caller never interrupts: the caller
+    waits for it to finish, then the cancellation propagates."""
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        await asyncio.wait([work])
+        work.result()
+        raise
 
 
 @dataclass(frozen=True)

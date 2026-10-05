@@ -37,7 +37,7 @@ from jev_navigator.judgments.client import InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.store import JsonlAnswerStore
-from jev_navigator.testing import ScriptedJevClient
+from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 TARGET = "the check that limits how many items an order may have"
 _SLOT = re.compile(r"candidates\[(\d+)\]")
@@ -1228,6 +1228,103 @@ def test_cancellation_keeps_a_successful_response_from_the_same_beam(tmp_path: P
     assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
         (places[1].key, "cancelled")
     ]
+
+
+class HoldsTheSecondAnswer:
+    """Answers the first place at once and holds the second place's answer until ``release``."""
+
+    def __init__(self) -> None:
+        self.script = ScriptedJevClient(default_noul=0.05)
+        self.model = self.script.model
+        self.second_in_flight = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def ask(self, state, questions):
+        if state["slice"]["code"] == "second":
+            self.second_in_flight.set()
+            await self.release.wait()
+        return self.script.ask(state, questions)
+
+
+def _two_candidates(tmp_path: Path) -> tuple[CodeIndex, list[Place]]:
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    return index, [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+
+
+def _find_two_candidates_async(index: CodeIndex, places: list[Place], judge: Judge, moves=None):
+    return find_code_async(
+        index,
+        judge,
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=2),
+        moves=moves or {},
+        initial_candidates=[(place, 1.0) for place in places],
+    )
+
+
+def test_an_async_search_cancelled_mid_round_keeps_the_answer_still_in_flight(tmp_path: Path) -> None:
+    # Arrange: the second place's request is in flight when the search is cancelled
+    index, places = _two_candidates(tmp_path)
+    store_path = tmp_path / "answers.jsonl"
+    client = HoldsTheSecondAnswer()
+
+    async def cancel_while_the_second_answer_is_in_flight() -> None:
+        search = asyncio.create_task(
+            _find_two_candidates_async(index, places, Judge(client, store=JsonlAnswerStore(store_path)))
+        )
+        await client.second_in_flight.wait()
+        search.cancel()
+        await asyncio.sleep(0)
+        client.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await search
+
+    # Act: cancel, then search again over the same store
+    asyncio.run(cancel_while_the_second_answer_is_in_flight())
+    again = AsyncScriptedJevClient(ScriptedJevClient(default_noul=0.05))
+    resumed = asyncio.run(
+        _find_two_candidates_async(
+            index, places, Judge(again, store=JsonlAnswerStore(store_path), served_model=client.model)
+        )
+    )
+
+    # Assert: both answers came from the store, and the search reached its end
+    assert again.requests == []
+    assert resumed.outcome == Outcome.NOTHING_LEFT
+    assert {visit.place_key for visit in resumed.searched} == {place.key for place in places}
+
+
+def test_an_async_search_cancelled_while_opening_a_round_ends_after_the_opening(tmp_path: Path) -> None:
+    # Arrange: opening the first place blocks in its worker thread until released
+    index, places = _two_candidates(tmp_path)
+    opening, release, opened = threading.Event(), threading.Event(), threading.Event()
+
+    def held_move(index: CodeIndex, code: CodeSlice) -> list[Place]:
+        del index, code
+        opening.set()
+        release.wait(timeout=30)
+        opened.set()
+        return []
+
+    async def cancel_while_opening() -> bool:
+        search = asyncio.create_task(
+            _find_two_candidates_async(index, places, Judge(ScriptedJevClient()), {"held": held_move})
+        )
+        await asyncio.to_thread(opening.wait, 30)
+        search.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await search
+        return opened.is_set()
+
+    # Act
+    opening_ended_first = asyncio.run(cancel_while_opening())
+
+    # Assert
+    assert opening_ended_first
 
 
 class ProviderError(RuntimeError):
