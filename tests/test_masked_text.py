@@ -68,13 +68,14 @@ def test_finding_copies_of_ten_thousand_remembered_values_stays_in_milliseconds(
     text = "x = 1\n" * 3_000 + f'send("{remembered[1234]}")\n'
 
     # Act
-    started = time.perf_counter()
+    started = time.process_time()
     masked = Copies(remembered).sub(text)
-    elapsed = time.perf_counter() - started
+    spent = time.process_time() - started
 
-    # Assert: a bound eight times what it measures, and eight times below one regex per value
+    # Assert: in this process's own CPU time, which other jobs' load leaves alone, a bound eight
+    # times what it measures and eight times below one regex per value
     assert remembered[1234] not in masked and f'send("{MASK}")' in masked
-    assert elapsed < 0.1
+    assert spent < 0.1
 
 
 def test_a_short_value_glued_after_a_long_values_copy_is_masked_in_the_masked_lines() -> None:
