@@ -12,8 +12,9 @@ as source. A file the secret scan refuses is never sent; it is named as not judg
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import cache, partial
 from pathlib import Path, PurePosixPath
 
 from ..index import listing, tools
@@ -62,8 +63,10 @@ def judge_generated_files(
     judge: Judge, index: CodeIndex, awaiting: Mapping[str, FileShape]
 ) -> GeneratedJudgments:
     naming = files_naming(index.root, sorted(awaiting))
+    namer_lines = cache(partial(_masked_namer_lines, index))
     entries = {
-        path: generated_file_entry(index, path, awaiting[path], naming[path]) for path in sorted(awaiting)
+        path: generated_file_entry(index, path, awaiting[path], naming[path], namer_lines)
+        for path in sorted(awaiting)
     }
     refused = {path for path, entry in entries.items() if _refused_by_secret_scan(judge, entry)}
     sendable = [path for path in entries if path not in refused]
@@ -73,11 +76,19 @@ def judge_generated_files(
     )
 
 
-def generated_file_entry(index: CodeIndex, path: str, shape: FileShape, naming: Sequence[TextHit]) -> dict:
+def generated_file_entry(
+    index: CodeIndex,
+    path: str,
+    shape: FileShape,
+    naming: Sequence[TextHit],
+    namer_lines: Callable[[str], tuple[str, ...]] | None = None,
+) -> dict:
     """One file as Jev sees it: path, measured facts, importers, the files naming it (``naming``, from
     ``files_naming``) and the two excerpts. Every field is a measurement or real text, never a verdict:
     no trigger names and no reasons. ``file_shape`` measures lines in bytes, so the line fields say so.
-    Each naming line and excerpt is cut from its whole file masked by the index's masker."""
+    Each naming line and excerpt is cut from its whole file masked by the index's masker;
+    ``namer_lines`` gives a naming file's masked lines, so a caller can mask each file once."""
+    lines_of = namer_lines or partial(_masked_namer_lines, index)
     importers = importers_of(index, path)
     text = "\n".join(index.lines(path))
     return {
@@ -88,7 +99,9 @@ def generated_file_entry(index: CodeIndex, path: str, shape: FileShape, naming: 
         "average_line_bytes": round(shape.chars_per_line, 1),
         "importers": list(importers[:MAX_IMPORTERS]),
         "importer_count": len(importers),
-        "named_by": [_naming_entry(index, hit, path) for hit in naming[:MAX_NAMED_BY]],
+        "named_by": [
+            _naming_entry(lines_of(hit.file)[hit.line - 1], hit, path) for hit in naming[:MAX_NAMED_BY]
+        ],
         "named_by_count": len(naming),
         **_excerpts(text),
     }
@@ -143,11 +156,15 @@ def _naming_order(hit: TextHit) -> tuple[bool, str]:
     return is_test_file(hit.file), hit.file
 
 
-def _naming_entry(index: CodeIndex, hit: TextHit, path: str) -> dict:
-    """The naming line as Jev sees it, from its whole file masked by the index's masker: the whole
-    line when it fits ``NAMING_LINE_CHARS``, otherwise that many characters around the name."""
-    source = (index.root / hit.file).read_bytes().decode(errors="replace")
-    line = masked_lines(source.split("\n"), hit.file, index.masker)[hit.line - 1]
+def _masked_namer_lines(index: CodeIndex, file: str) -> tuple[str, ...]:
+    """A naming file's lines, masked as one text by the index's masker; it may lie outside the scope."""
+    source = (index.root / file).read_bytes().decode(errors="replace")
+    return masked_lines(source.split("\n"), file, index.masker)
+
+
+def _naming_entry(line: str, hit: TextHit, path: str) -> dict:
+    """The masked naming ``line`` as Jev sees it: whole when it fits ``NAMING_LINE_CHARS``,
+    otherwise that many characters around the name."""
     named = re.compile(_whole_path(re.escape(path))).search(line)
     if named is None:
         raise ValueError(f"{hit.file}:{hit.line} no longer names {path}")

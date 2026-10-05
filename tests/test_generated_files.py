@@ -4,12 +4,14 @@ everything else is the real scope, index, masker and judge."""
 
 from __future__ import annotations
 
+import json
 import tracemalloc
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from git_repos import commit_all, write_files
+from secret_shapes import SECRET_SHAPES, pieces
 
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.file_shape import shape_of
@@ -350,6 +352,30 @@ def test_a_naming_line_after_the_first_with_windows_line_endings_is_sent_as_writ
 
     # Assert
     assert named == {"file": "app/load.js", "line": 3, "text": "load('web/gen.js')"}
+
+
+def test_the_sent_request_holds_no_piece_of_a_secret_that_a_naming_window_or_excerpt_cuts_from_its_key(
+    tmp_path: Path,
+) -> None:
+    # Arrange: the opening excerpt copies a value whose key comes after it, and the naming window
+    # starts at a value's opening quote, after its key
+    excerpt_value, naming_value = SECRET_SHAPES["alphanumeric"], SECRET_SHAPES["password-with-symbols"]
+    flagged = f'post("{excerpt_value}");\n' + BUNDLE + f'var apiKey = "{excerpt_value}";\n'
+    after_key = f'"{naming_value}", "pad": "PAD", "output": "web/gen.js"}}'
+    pad = "y" * (NAMING_LINE_CHARS - len(after_key) + len("PAD"))
+    namer = '{"token": ' + after_key.replace("PAD", pad) + "\n"
+    repo = _repository(tmp_path / "repo", {"web/gen.js": flagged, "app/build.json": namer})
+    index, awaiting = _awaiting(repo)
+    client = ScriptedJevClient(default_noul=0.9)
+
+    # Act
+    judgments = judge_generated_files(Judge(client), index, awaiting)
+
+    # Assert
+    [(state, _)] = client.requests
+    [entry] = state[FILES]
+    assert list(judgments.judged) == ["web/gen.js"] and entry["named_by"][0]["file"] == "app/build.json"
+    assert (pieces(excerpt_value) | pieces(naming_value)) & pieces(json.dumps(state)) == set()
 
 
 # Made-up, never a credential: the shape of the verifier's excerpt probe.
