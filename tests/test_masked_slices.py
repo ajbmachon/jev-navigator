@@ -11,6 +11,7 @@ import pytest
 from git_repos import commit_files, write_files
 from secret_shapes import COPY_VALUE, SECRET_SHAPES, sent_pieces
 
+from jev_navigator.adapters.routes import DREX_INPUT_LIMITS
 from jev_navigator.directives import find_code, places, shown, trace
 from jev_navigator.directives.entry import _file_description, _preview
 from jev_navigator.index.code_index import CodeIndex
@@ -45,6 +46,25 @@ def test_the_line_cut_never_splits_a_secret_out_of_its_masking(tmp_path: Path, v
 
     # Act
     cut = shown.shown_slice(index.read_slice(Span("app/config.ts", 1, len(lines))), lambda _: True)
+
+    # Assert
+    assert cut is not None and shown.LINE_CUT_MARK in cut.text
+    assert sent_pieces(value, {"slice": {"file": "app/config.ts", "code": cut.text}}) == set()
+
+
+@pytest.mark.parametrize("value", SECRET_SHAPES.values(), ids=SECRET_SHAPES.keys())
+def test_finds_first_cut_never_splits_a_secret_out_of_its_masking(tmp_path: Path, value: str) -> None:
+    # Arrange: the verifier's line_cut probe, one line per position of the 240-character cut across the value
+    lines = [
+        f'const cfg{pad} = {{ name: "{"x" * pad}", apiKey: "{value}", retries: 3 }};'
+        for pad in range(120, 240)
+    ]
+    index = _index(tmp_path, {"app/config.ts": "\n".join(lines) + "\n"})
+
+    # Act
+    cut = find_code.shown_for_target(
+        index.read_slice(Span("app/config.ts", 1, len(lines))), "the retry setting", DREX_INPUT_LIMITS
+    )
 
     # Assert
     assert cut is not None and shown.LINE_CUT_MARK in cut.text
