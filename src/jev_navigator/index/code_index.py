@@ -333,11 +333,34 @@ class CodeIndex:
         return result
 
     def enclosing_symbol(self, file: str, line: int) -> Span | None:
-        containing = [span for span in self.functions_in(file) if span.contains(line)]
-        return min(containing, key=Span.size, default=None)
+        return _innermost(self.functions_in(file), line)
+
+    def known_enclosing_symbol(self, file: str, line: int) -> Span | None:
+        """``enclosing_symbol`` from the facts already in memory, or None while there are none: it
+        never parses or loads a file, so a caller that only labels a place starts no work."""
+        facts = self._facts.get(file)
+        return None if facts is None else _innermost(facts.structure.functions, line)
 
     def functions_in(self, file: str) -> tuple[Span, ...]:
         return self._file_structure(file).functions
+
+    def decorator_starts_in(self, file: str) -> dict[Span, int]:
+        """Each function of ``file`` whose decorators sit before it, and the line of its first
+        decorator. The function's span still starts at its own first line, below its decorators."""
+        structure = self._file_structure(file)
+        starts = {(start, end): line for start, end, line in structure.decorated}
+        return {
+            span: starts[(span.start, span.end)]
+            for span in structure.functions
+            if (span.start, span.end) in starts
+        }
+
+    def stubs_in(self, file: str) -> tuple[Span, ...]:
+        """The functions of ``file`` whose body only declares a shape: ``...``, ``pass``, a docstring
+        or ``raise NotImplementedError``."""
+        structure = self._file_structure(file)
+        stubs = set(structure.stubs)
+        return tuple(span for span in structure.functions if (span.start, span.end) in stubs)
 
     def functions_in_files(self, files: Sequence[str]) -> tuple[Span, ...]:
         """Enumerate functions with one batched fact scan for the not-yet-cached source files."""
@@ -642,12 +665,15 @@ class CodeIndex:
             self._unwritten = {}
 
     def _facts_in(self, file: str) -> FileFacts:
+        """The file counts as reached once its facts are known: a parse that fails, for any reason,
+        reaches nothing."""
         self._require_in_scope(file)
+        facts = self._facts.get(file)
+        if facts is None:
+            self._ensure_facts((file,))
+            facts = self._facts.get(file, FileFacts(_NO_STRUCTURE, (), ()))
         self._reached.add(file)
-        if (known := self._facts.get(file)) is not None:
-            return known
-        self._ensure_facts((file,))
-        return self._facts.get(file, FileFacts(_NO_STRUCTURE, (), ()))
+        return facts
 
     def _ensure_facts(self, files: Sequence[str]) -> None:
         with self._facts_lock:
@@ -1043,3 +1069,7 @@ def _outermost(symbols: Sequence[Span]) -> list[Span]:
     return [
         span for span in symbols if not any(other != span and other.contains(span.start) for other in symbols)
     ]
+
+
+def _innermost(functions: Iterable[Span], line: int) -> Span | None:
+    return min((span for span in functions if span.contains(line)), key=Span.size, default=None)

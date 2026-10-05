@@ -1,20 +1,28 @@
-"""What a pack's provider block says about how far its ``input_tokens`` can be trusted, and how its
-report words that. Both packs (find and trace) write it, so it has one owner."""
+"""What a pack's provider block says about how far its ``input_tokens`` can be trusted, how many
+answers came from an answer store instead of Jev, and how its report words that. Both packs (find
+and trace) write it, so it has one owner."""
 
 from __future__ import annotations
 
-from .judgments.answers import TokenTotal
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .judgments.judge import Judge
 
 
-def usage_receipt(previous: dict | None, input_total: TokenTotal, unanswered_requests: int) -> dict:
-    """The responses that reported no usage, the requests that got no response, and whether the
-    total is complete. A count an earlier receipt predates stays unknown."""
-    without_usage = _plus_known(_carried_count(previous, "responses_without_usage"), input_total.not_reported)
-    unanswered = _plus_known(_carried_count(previous, "unanswered_requests"), unanswered_requests)
+def usage_receipt(previous: dict | None, judge: Judge) -> dict:
+    """The responses that reported no usage, the requests that got no response, whether the total is
+    complete, and the answers an answer store gave instead of Jev. A count an earlier receipt
+    predates stays unknown."""
+    without_usage = _plus_known(
+        _carried_count(previous, "responses_without_usage"), judge.input_total.not_reported
+    )
+    unanswered = _plus_known(_carried_count(previous, "unanswered_requests"), judge.unanswered_requests)
     return {
         "responses_without_usage": without_usage,
         "unanswered_requests": unanswered,
         "input_tokens_complete": without_usage == 0 and unanswered == 0,
+        "replayed_answers": _plus_known(_carried_count(previous, "replayed_answers"), judge.replayed_answers),
     }
 
 

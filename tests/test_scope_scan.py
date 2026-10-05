@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -228,6 +229,33 @@ def test_an_external_parser_failure_is_not_relabelled_as_incomplete(
 
     with pytest.raises(tools.ToolFailedError, match="real tool reason"):
         index.functions_in("module.py")
+
+
+def test_a_file_whose_parse_was_killed_is_not_counted_as_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: once the index exists, every ast-grep it starts is killed partway, as the machine's
+    # memory watchdog or a user's `kill` would stop it.
+    (tmp_path / "module.py").write_text("def run():\n    return 1\n")
+    index = CodeIndex(tmp_path, ["module.py"], fact_cache_dir=tmp_path / "cache")
+    killed = tmp_path / "killed-bin"
+    killed.mkdir()
+    (killed / tools.AST_GREP).write_text("#!/bin/sh\nkill -9 $$\n")
+    (killed / tools.AST_GREP).chmod(0o755)
+    working_path = os.environ["PATH"]
+    monkeypatch.setenv("PATH", f"{killed}{os.pathsep}{working_path}")
+
+    # Act
+    with pytest.raises(tools.ToolFailedError, match="exited -9"):
+        index.functions_in("module.py")
+
+    # Assert: the file is still unread, so no run counts it or calls the fact scan complete, and a
+    # working parser reads it later.
+    assert "module.py" not in index.parsed_files
+    assert index.parser_scans_pending == ("facts",)
+    monkeypatch.setenv("PATH", working_path)
+    assert [span.name for span in index.functions_in("module.py")] == ["run"]
+    assert "module.py" in index.parsed_files
 
 
 def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp_path: Path) -> None:

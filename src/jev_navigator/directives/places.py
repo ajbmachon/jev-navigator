@@ -26,6 +26,7 @@ _ENVIRONMENT_READ = re.compile(
 )
 _QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
 _KEY_SHAPE = re.compile(r"[._:/-]")
+_WINDOW_KEY_LINES = re.compile(r"(\d+)~\d+")
 MAX_KEY_HITS = 30
 _PASSED_ON_ROLES = frozenset(
     {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type"}
@@ -47,14 +48,11 @@ def function_place(
     index: CodeIndex, span: Span, relation: str = "", *, binding: Binding | None = None
 ) -> Place:
     """A function, class or declaration, opened whole."""
-    first_line = index.read_slice(Span(span.file, span.start, span.start)).text.strip()
     shown_relation = _with_binding(relation, binding)
-    note = f" ({shown_relation})" if shown_relation else ""
-    signature = f"{span.file}:{span.start} `{first_line}`{note}"
     return Place(
         span.key,
         "function",
-        signature,
+        _function_signature(index, span, shown_relation),
         lambda: index.read_slice(span, origin=shown_relation or "function"),
         relation or None,
         binding,
@@ -81,9 +79,7 @@ def window_place(
         window = index.read_window(file, line, radius).span
         return index.read_slice(replace(window, name=name), origin=shown_relation)
 
-    span = open_window().span
-    text_line = index.read_slice(Span(file, line, line)).text.strip()
-    signature = f"{file}:{span.start}-{span.end} line {line} `{text_line}` ({shown_relation})"
+    signature = _window_signature(index, open_window().span, line, shown_relation)
     return Place(f"{file}:{line}~{radius}", "window", signature, open_window, relation or None, binding)
 
 
@@ -91,15 +87,52 @@ def range_place(index: CodeIndex, file: str, start: int, end: int, relation: str
     """Lines chosen by their position (before or after a place, the start of a file); no single line
     made them a neighbour, so the signature quotes their first line of code and carries no binding."""
     span = Span(file, start, end)
-    lines = index.read_slice(span).text.split("\n")
-    code_line = first_code_line(lines, file)
-    quoted = (
-        next((line.strip() for line in lines if line.strip()), "") if code_line is None else lines[code_line]
-    )
-    signature = f"{span.key} `{quoted.strip()}` ({relation})"
+    signature = _range_signature(index, span, relation)
     return Place(
         span.key, "window", signature, lambda: index.read_slice(span, origin=relation), relation or None
     )
+
+
+def restored_signature(
+    index: CodeIndex, key: str, kind: str, span: Span, relation: str | None, binding: Binding | None
+) -> str:
+    """The signature the builder of a place with this ``key`` and ``kind`` gives it, from the code of
+    its opened ``span``: a saved place keeps no code, so a restored one rebuilds what the builder
+    showed. Only lines are read, nothing is parsed."""
+    if kind == "function":
+        return _function_signature(index, span, _with_binding(relation or "", binding))
+    line = _window_line(key)
+    if line is not None:
+        return _window_signature(index, span, line, _with_binding(relation or "", binding))
+    return _range_signature(index, span, relation or "")
+
+
+def _window_line(key: str) -> int | None:
+    """The line a window key, ``path:line~radius``, names; None for any other key."""
+    lines = _WINDOW_KEY_LINES.fullmatch(key.rpartition(":")[2])
+    return int(lines[1]) if lines else None
+
+
+def _function_signature(index: CodeIndex, span: Span, shown_relation: str) -> str:
+    first_line = index.read_slice(Span(span.file, span.start, span.start)).text.strip()
+    note = f" ({shown_relation})" if shown_relation else ""
+    return f"{span.file}:{span.start} `{first_line}`{note}"
+
+
+def _window_signature(index: CodeIndex, window: Span, line: int, shown_relation: str) -> str:
+    """The window's lines and the line that made it a neighbour, quoted."""
+    text_line = index.read_slice(Span(window.file, line, line)).text.strip()
+    return f"{window.file}:{window.start}-{window.end} line {line} `{text_line}` ({shown_relation})"
+
+
+def _range_signature(index: CodeIndex, span: Span, relation: str) -> str:
+    """The range's first line of code, quoted; no single line made it a neighbour."""
+    lines = index.read_slice(span).text.split("\n")
+    code_line = first_code_line(lines, span.file)
+    quoted = (
+        next((line.strip() for line in lines if line.strip()), "") if code_line is None else lines[code_line]
+    )
+    return f"{span.key} `{quoted.strip()}` ({relation})"
 
 
 def first_code_line(lines: Sequence[str], file: str) -> int | None:

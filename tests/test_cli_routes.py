@@ -15,8 +15,6 @@ from subprocess import PIPE
 import pytest
 from system_one_stand_in import stand_in
 
-pytest.importorskip("typesafe_sdk")
-
 DEAD_ENDPOINT = "http://127.0.0.1:9"
 """Where a request goes when no stand-in is named: a closed local port, never the hosted service."""
 
@@ -59,6 +57,7 @@ def journal_attempts(tmp_path: Path) -> list[dict]:
 
 def test_the_first_named_route_answers_the_first_request(tmp_path: Path) -> None:
     # Arrange
+    pytest.importorskip("typesafe_sdk")
     with stand_in("drex-test") as drex, stand_in("jev-test") as jev:
         settings = {
             "SYSTEM_ONE_ROUTES": "drex,jev",
@@ -82,6 +81,7 @@ def test_the_first_named_route_answers_the_first_request(tmp_path: Path) -> None
 
 def test_a_failing_route_falls_back_to_the_next_and_both_attempts_are_journaled(tmp_path: Path) -> None:
     # Arrange
+    pytest.importorskip("typesafe_sdk")
     with stand_in("drex-test", status=503) as drex, stand_in("jev-test") as jev:
         settings = {
             "SYSTEM_ONE_ROUTES": "drex,jev",
@@ -103,6 +103,7 @@ def test_a_failing_route_falls_back_to_the_next_and_both_attempts_are_journaled(
 
 def test_a_configured_local_decider_answers_and_the_hosted_jev_receives_nothing(tmp_path: Path) -> None:
     # Arrange: the default client's address is a stand-in for the hosted Jev
+    pytest.importorskip("typesafe_sdk")
     with stand_in("decider-test") as decider, stand_in("jev-hosted") as hosted:
         settings = {
             "SYSTEM_ONE_ROUTES": "decider",
@@ -124,6 +125,7 @@ def test_a_configured_local_decider_answers_and_the_hosted_jev_receives_nothing(
 
 def test_without_routes_the_default_jev_client_answers(tmp_path: Path) -> None:
     # Arrange
+    pytest.importorskip("typesafe_sdk")
     with stand_in("jev-test") as jev:
         # Act
         result = run_find(tmp_path, {"TYPESAFE_BASE_URL": jev.url})
@@ -150,6 +152,7 @@ def test_an_interrupt_under_routes_finishes_the_request_in_flight_and_leaves_a_r
     tmp_path: Path,
 ) -> None:
     # Arrange: Drex holds its first answer until the interrupt has been sent
+    pytest.importorskip("typesafe_sdk")
     with stand_in("drex-test", held=True) as drex, stand_in("jev-test") as jev:
         settings = {
             "SYSTEM_ONE_ROUTES": "drex,jev",
@@ -183,6 +186,7 @@ def test_an_interrupt_under_routes_finishes_the_request_in_flight_and_leaves_a_r
 
 def test_drex_never_sees_more_requests_in_flight_than_it_admits(tmp_path: Path) -> None:
     # Arrange: a hundred functions make several batches at once; this Drex answers 429 to a third in flight
+    pytest.importorskip("typesafe_sdk")
     repository = tmp_path / "repo"
     repository.mkdir()
     functions = "".join(

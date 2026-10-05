@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.scope_scan import FileFacts, FileStructure
-from ..index.spans import CodeSlice, Span
+from ..index.spans import CodeSlice, Span, holder_of
 
 SymbolKind = str
 
@@ -314,26 +314,13 @@ def symbol_spans(
         if kind not in kinds:
             continue
         for span in spans:
-            found.append(Symbol(span, kind, _holder(structure, span)))
+            found.append(Symbol(span, kind, holder_of(structure.symbols, span)))
     return tuple(found)
 
 
 def read_source(index: CodeIndex, symbol: Symbol) -> CodeSlice:
     """The source behind a measured symbol, read through the index so evidence quotes itself."""
     return index.read_slice(symbol.span, origin="statistics")
-
-
-def _holder(structure: FileStructure, symbol: Span) -> Span | None:
-    """The smallest larger symbol whose lines contain ``symbol``'s, or None when nothing does."""
-    inside = [
-        other
-        for other in structure.symbols
-        if other != symbol
-        and other.size() > symbol.size()
-        and other.contains(symbol.start)
-        and other.contains(symbol.end)
-    ]
-    return min(inside, key=Span.size, default=None)
 
 
 def largest_functions(

@@ -30,8 +30,6 @@ from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.thresholds import Thresholds
 
-pytest.importorskip("typesafe_sdk")
-
 DESCRIBES = Check(
     name="describes",
     instructions="Is `{item}.code` the implementation that `doc.sentence` describes?",
@@ -66,6 +64,7 @@ def test_a_judge_packs_batches_to_the_box_its_client_declares() -> None:
 
 def test_the_routed_client_declares_the_tightest_limits_of_its_routes() -> None:
     # Arrange
+    pytest.importorskip("typesafe_sdk")
     environment = {**KEY, "SYSTEM_ONE_ROUTES": "drex,jev", "SYSTEM_ONE_DREX": "1", "SYSTEM_ONE_JEV": "1"}
 
     # Act
@@ -95,6 +94,7 @@ def test_a_custom_route_without_its_input_tokens_is_refused_naming_the_setting()
 
 def test_a_custom_route_takes_its_box_from_its_input_tokens() -> None:
     # Arrange
+    pytest.importorskip("typesafe_sdk")
     environment = {
         **KEY,
         "SYSTEM_ONE_ROUTES": "decider",
@@ -116,6 +116,7 @@ def test_a_custom_route_takes_its_box_from_its_input_tokens() -> None:
 
 def test_a_size_refusal_is_recorded_under_the_limits_of_the_route_that_refused(tmp_path: Path) -> None:
     # Arrange: the primary is down, so the fallback answers, and it refuses the request for its size
+    pytest.importorskip("typesafe_sdk")
     with stand_in("jev-test", refuses_size=True) as jev:
         down = SystemOneClient(
             model="drex-test",

@@ -24,6 +24,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
+from functools import partial
 
 from ..history import (
     DEFAULT_STOP_SECTIONS,
@@ -49,10 +50,18 @@ from ..judgments.judge import (
     CheckResult,
     Judge,
 )
-from ..judgments.questions import ITEM_PLACEHOLDER, MAX_CHOICE_OPTIONS, Check, Criterion, Pick, content_hash
+from ..judgments.questions import (
+    ITEM_PLACEHOLDER,
+    MAX_CHOICE_OPTIONS,
+    Check,
+    Criterion,
+    Pick,
+    content_hash,
+    serialized_chars,
+)
 from ..judgments.thresholds import NoulVerdict, Thresholds
 from .places import MOVES, Move, Place, neighbours_and_omissions, place_relationship
-from .shown import MAX_LINE_CHARS, MAX_SLICE_CHARS, cut_long_line, shown_slice
+from .shown import MAX_LINE_CHARS, cut_long_line, shown_slice
 
 FOUND = Check(
     name="contains_target",
@@ -140,15 +149,14 @@ class SearchBudget:
     beam_width: int = 3
     neighbours_per_kind: int | None = None
     preview_lines: int = 8
-    max_slice_chars: int = MAX_SLICE_CHARS
     max_line_chars: int = MAX_LINE_CHARS
 
 
 @dataclass(frozen=True)
 class Visit:
-    """An opened place: the code the request showed of it (cut at ``SearchBudget.max_slice_chars``
-    on a line boundary, so ``code.span`` ends at the last shown line), the path from a start place,
-    and the found verdict."""
+    """An opened place: the code the request showed of it (all of it when its requests fit the
+    judge's input box, else cut on a line boundary, so ``code.span`` ends at the last shown line), the
+    path from a start place, and the found verdict."""
 
     place_key: str
     code: CodeSlice
@@ -448,7 +456,7 @@ def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Openin
             beam = search.next_beam(judge.calls_left())
         _record_choice(search, beam)
         for item in beam:
-            if opening := _open(index, search, item):
+            if opening := _open(index, search, judge, item):
                 opened.append(opening)
             processed += 1
         with _defer_keyboard_interrupts():
@@ -684,14 +692,15 @@ class _Opening:
     capped: tuple[NotInspected, ...] = ()
 
 
-def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
+def _open(index: CodeIndex, search: _Search, judge: Judge, item: _Queued) -> _Opening | None:
     """Opens a place in code; the same code reached by another path is not judged twice. Moves list
-    neighbours from all of the code, and only lines the request does not show can hold a new place."""
+    neighbours from all of the code, and only lines the request does not show can hold a new place.
+    The request shows all of the code when its requests fit the judge's input box."""
     code = item.place.open()
     fingerprint = content_hash(code.text)
     if fingerprint in search.judged_code:
         return None
-    shown = shown_slice(code, search.budget.max_slice_chars, search.budget.max_line_chars)
+    shown = shown_slice(code, partial(_found_request_fits, search, judge), search.budget.max_line_chars)
     if shown is None:
         search.visited.discard(item.place.key)
         search.cap_reached = True
@@ -702,11 +711,10 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     search.steps += 1
     set_aside_before = len(search.set_aside)
     try:
+        opening = _Opening(item, shown, code.key, fingerprint, [])
         if search.budget.max_depth is not None and item.depth >= search.budget.max_depth:
-            return _Opening(item, shown, code.key, fingerprint, [])
-        candidates, omitted = neighbours_and_omissions(
-            index, code, search.budget.neighbours_per_kind, search.moves, shown.span
-        )
+            return opening
+        opening, omitted = _beside_neighbours(index, search, judge, code, opening)
         capped = tuple(
             NotInspected(
                 place.key,
@@ -721,9 +729,7 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
             if place.key not in search.visited
         )
         search.set_aside.extend(capped)
-        unseen = [place for place in candidates if place.key not in search.visited]
-        available = [place for place in unseen if place.open().text.strip()]
-        return _Opening(item, shown, code.key, fingerprint, available, capped)
+        return replace(opening, capped=capped)
     except BaseException:
         del search.set_aside[set_aside_before:]
         search.judged_code.discard(fingerprint)
@@ -734,19 +740,72 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
 
 @dataclass(frozen=True)
 class _OpeningRequest:
+    """``shared`` is the part of ``state`` a split opening sends with every one of its requests."""
+
+    shared: Mapping
     state: Mapping
     questions: Mapping
     sources: Mapping
     priority_unavailable: str | None = None
 
 
+def _beside_neighbours(
+    index: CodeIndex, search: _Search, judge: Judge, code: CodeSlice, opening: _Opening
+) -> tuple[_Opening, list[Place]]:
+    """The opening with the neighbours it asks about, and the places the per-kind cap left out. A split
+    opening sends the shown code with each neighbour alone, so a neighbour too large for that request
+    cuts the code further, and a shorter cut can list more neighbours: listing repeats while each pass
+    shows fewer lines than the one before, so it ends. A cut never grows back: under a per-kind cap a
+    shorter cut can list a small neighbour in place of a large one, and growing back would list the
+    large one again. The opening returned fits, because its neighbours were listed for its cut and a
+    shorter start than the longest that fits also fits. When not even the first line fits beside the
+    largest neighbour, the opening keeps its cut, and the provider refuses that neighbour's request."""
+    while True:
+        listed, omitted = neighbours_and_omissions(
+            index, code, search.budget.neighbours_per_kind, search.moves, opening.code.span
+        )
+        unseen = [place for place in listed if place.key not in search.visited]
+        opening = replace(opening, candidates=[place for place in unseen if place.open().text.strip()])
+        fits = partial(_split_requests_fit, search, judge, _largest_neighbour(search, opening))
+        shown = shown_slice(code, fits, search.budget.max_line_chars)
+        if shown is None or shown.span.end >= opening.code.span.end:
+            return opening, omitted
+        opening = replace(opening, code=shown)
+
+
+def _found_request_fits(search: _Search, judge: Judge, shown: CodeSlice) -> bool:
+    """Whether asking only whether ``shown`` is the target fits the judge's input box: the smallest
+    request an opening sends."""
+    found = search.questions.found
+    questions = {found.question_id: found.to_question()}
+    return not judge.input_limits.exceeded_by(_opened_state(search, shown), questions)
+
+
+def _split_requests_fit(search: _Search, judge: Judge, largest: Mapping | None, shown: CodeSlice) -> bool:
+    """Whether every request of a split opening can fit the judge's input box: ``shown`` asked whether
+    it is the target, and asked about its largest neighbour alone."""
+    if not _found_request_fits(search, judge, shown):
+        return False
+    shared = _opened_state(search, shown)
+    return largest is None or judge.fits_alone(_neighbour_check(search), largest, shared, "candidates")
+
+
+def _largest_neighbour(search: _Search, opening: _Opening) -> Mapping | None:
+    """The opening's neighbour that takes the most room in a request, as a split opening sends it."""
+    items = _neighbour_items(search, _opening_request(search, opening))
+    return max(items, key=serialized_chars, default=None)
+
+
+def _opened_state(search: _Search, code: CodeSlice) -> dict:
+    """What every request about an opening carries: the target and the code it shows."""
+    shown = {"file": code.span.file, "lines": f"{code.span.start}-{code.span.end}", "code": code.text}
+    return {"target": search.target, "slice": shown}
+
+
 def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
     code, candidates = opening.code, opening.candidates
-    state = {
-        "target": search.target,
-        "slice": {"file": code.span.file, "lines": f"{code.span.start}-{code.span.end}", "code": code.text},
-        "candidates": [_candidate_state(place, search.budget) for place in candidates],
-    }
+    shared = _opened_state(search, code)
+    state = {**shared, "candidates": [_candidate_state(place, search.budget) for place in candidates]}
     asked = search.questions
     questions = {asked.found.question_id: asked.found.to_question()}
     priority_unavailable = None
@@ -774,7 +833,7 @@ def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
             for slot, place in enumerate(candidates)
         }
     )
-    return _OpeningRequest(state, questions, sources, priority_unavailable)
+    return _OpeningRequest(shared, state, questions, sources, priority_unavailable)
 
 
 def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
@@ -817,12 +876,13 @@ async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening
         return _failed(error)
 
 
-def _split_opening_state(request: _OpeningRequest) -> Mapping:
-    return {name: value for name, value in request.state.items() if name != "candidates"}
-
-
 def _neighbour_batch(search: _Search, request: _OpeningRequest) -> tuple[Check, list[Mapping]]:
-    """Bind previews to Judge's code field, which its default store excludes from source metadata.
+    return _neighbour_check(search), _neighbour_items(search, request)
+
+
+def _neighbour_check(search: _Search) -> Check:
+    """The could-contain question with previews bound to Judge's code field, which its default store
+    excludes from source metadata.
 
     Rebinding the field generates a new wording hash; executed question records stay unchanged.
     """
@@ -830,7 +890,9 @@ def _neighbour_batch(search: _Search, request: _OpeningRequest) -> tuple[Check, 
     def rebind(text: str) -> str:
         return text.replace(f"{ITEM_PLACEHOLDER}.preview", f"{ITEM_PLACEHOLDER}.{CODE_FIELD}")
 
-    def criterion(value: Criterion) -> Criterion:
+    def criterion(value: Criterion | None) -> Criterion | None:
+        if value is None:
+            return None
         return replace(
             value,
             what=rebind(value.what),
@@ -839,18 +901,22 @@ def _neighbour_batch(search: _Search, request: _OpeningRequest) -> tuple[Check, 
         )
 
     check = search.questions.could_contain
-    batched = replace(
+    return replace(
         check, instructions=rebind(check.instructions), yes=criterion(check.yes), no=criterion(check.no)
     )
-    items = [
+
+
+def _neighbour_items(search: _Search, request: _OpeningRequest) -> list[Mapping]:
+    """Each neighbour as a split opening asks about it: its source, signature and preview."""
+    question_id = search.questions.could_contain.question_id
+    return [
         {
-            **request.sources[f"{check.question_id}#{slot}"],
+            **request.sources[f"{question_id}#{slot}"],
             "signature": candidate["signature"],
             CODE_FIELD: candidate["preview"],
         }
         for slot, candidate in enumerate(request.state["candidates"])
     ]
-    return batched, items
 
 
 def _opening_priority(judge: Judge, search: _Search, request: _OpeningRequest) -> tuple[Mapping, str | None]:
@@ -875,7 +941,7 @@ def _opening_priority(judge: Judge, search: _Search, request: _OpeningRequest) -
 def _ask_split_opening(judge: Judge, search: _Search, request: _OpeningRequest) -> JevResponse:
     """Keep all independent evidence when one opened place cannot fit a single request."""
     scoped = judge.scope()
-    shared = _split_opening_state(request)
+    shared = request.shared
     found_id = search.questions.found.question_id
     found = scoped.ask(
         shared,
@@ -903,7 +969,7 @@ def _ask_split_opening(judge: Judge, search: _Search, request: _OpeningRequest) 
 
 async def _ask_split_opening_async(judge: Judge, search: _Search, request: _OpeningRequest) -> JevResponse:
     scoped = judge.scope()
-    shared = _split_opening_state(request)
+    shared = request.shared
     found_id = search.questions.found.question_id
     found = await scoped.ask_async(
         shared,

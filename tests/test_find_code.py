@@ -33,6 +33,7 @@ from jev_navigator.directives.places import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
+from jev_navigator.judgments.client import InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.store import JsonlAnswerStore
@@ -575,6 +576,47 @@ def test_the_search_wording_can_be_replaced(sample_index: CodeIndex) -> None:
     asked = client.requests[0][1]
     assert own.question_id in asked and FOUND.question_id not in asked
     assert not any(question_id.startswith("open_first") for question_id in asked)
+
+
+def test_a_neighbour_question_without_criteria_survives_an_opening_split_in_two(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    import json
+
+    from conftest import BudgetedClient
+
+    from jev_navigator.directives.find_code import SearchQuestions
+    from jev_navigator.judgments.questions import Check
+
+    plain = Check("could_hold_rule", "Could `{item}.preview` hold what `target.description` states?")
+    questions = SearchQuestions(could_contain=plain, open_first=None)
+    measured = ScriptedJevClient()
+    find_code(sample_index, Judge(measured), TARGET, start_at_place(sample_index), questions=questions)
+    state, asked = measured.requests[0]
+    whole_opening = len(json.dumps({"state": state, "questions": asked}).encode())
+    client = BudgetedClient(budget=whole_opening // 2, default_noul=0.1)
+
+    # Act
+    find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        start_at_place(sample_index),
+        questions=questions,
+        budget=SearchBudget(max_steps=1),
+    )
+
+    # Assert
+    neighbour_questions = [
+        question
+        for _, asked in client.requests
+        for question_id, question in asked.items()
+        if question_id.startswith("could_hold_rule")
+    ]
+    assert client.refusals >= 1
+    assert neighbour_questions
+    assert all("criteria" not in question for question in neighbour_questions)
 
 
 def test_a_search_counts_only_its_own_calls_when_another_search_shares_the_judge(
@@ -1692,39 +1734,23 @@ def long_function_index(root: Path) -> CodeIndex:
     return CodeIndex(root, ["handler.py"])
 
 
-def test_a_slice_longer_than_the_limit_is_cut_on_a_line_boundary(tmp_path: Path) -> None:
-    # Arrange
-    index = long_function_index(tmp_path)
-    client = ScriptedJevClient(
-        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
-        choices={"open_first": {"none": 1.0}},
-    )
-
-    # Act
-    result = find_code(index, Judge(client), TARGET, [place_for_line(index, "handler.py", 2, "start")])
-
-    # Assert
-    shown = client.requests[0][0]["slice"]
-    last_line = int(shown["lines"].split("-")[1])
-    assert len(shown["code"]) <= 12_000 + 80
-    assert shown["code"].endswith("lines at 12000 characters]")
-    assert last_line < index.find_definition("handle")[0].end
-    assert result.starts[0].code.span.end == last_line
-
-
 def test_a_place_inside_the_cut_off_tail_is_still_offered(tmp_path: Path) -> None:
-    # Arrange
+    # Arrange: a route whose input box holds about half of `handle`
     index = long_function_index(tmp_path)
     client = ScriptedJevClient(
         nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
         choices={"open_first": {"none": 1.0}},
     )
+    client.input_limits = InputLimits(box_chars=10_000)
 
     # Act
     find_code(index, Judge(client), TARGET, [place_for_line(index, "handler.py", 2, "start")])
 
     # Assert
-    offered = [candidate["signature"] for candidate in client.requests[0][0]["candidates"]]
+    offered = [
+        candidate["signature"] for state, _ in client.requests for candidate in state.get("candidates", [])
+    ]
+    assert "[cut after" in client.requests[0][0]["slice"]["code"]
     assert any("`def helper(event):`" in signature for signature in offered)
 
 

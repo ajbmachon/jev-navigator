@@ -44,7 +44,7 @@ def test_the_line_cut_never_splits_a_secret_out_of_its_masking(tmp_path: Path, v
     index = _index(tmp_path, {"app/config.ts": "\n".join(lines) + "\n"})
 
     # Act
-    cut = shown.shown_slice(index.read_slice(Span("app/config.ts", 1, len(lines))), max_chars=10**6)
+    cut = shown.shown_slice(index.read_slice(Span("app/config.ts", 1, len(lines))), lambda _: True)
 
     # Assert
     assert cut is not None and shown.LINE_CUT_MARK in cut.text
@@ -80,7 +80,7 @@ def test_a_slice_cut_to_fit_hides_a_copy_whose_key_line_is_below_the_cut(tmp_pat
     code = index.read_slice(Span("app/hooks.py", 1, source.count("\n"), name="send"))
 
     # Act
-    cut = shown.shown_slice(code, max_chars=len("\n".join(code.text.split("\n")[:6])))
+    cut = shown.shown_slice(code, lambda shown_code: shown_code.text.count("\n") < 6)
 
     # Assert
     assert cut is not None and "API_TOKEN" not in cut.text and "post(" in cut.text

@@ -14,11 +14,14 @@ import pytest
 from git_repos import commit_files
 from isolated_jvn import JVN
 
+from jev_navigator import cli
 from jev_navigator.cli_resume import load_resume, save_resume
 from jev_navigator.directives.find_code import SearchBudget, find_code
 from jev_navigator.directives.places import MOVES, function_place
+from jev_navigator.index import tools
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.run_files import PlaceLabels
 from jev_navigator.testing import ScriptedJevClient
 
 
@@ -44,7 +47,7 @@ def test_saved_find_frontier_restores_relationship_binding(tmp_path: Path) -> No
     resume_file = tmp_path / "resume.json"
 
     # Act
-    save_resume(resume_file, index, result, entry_pending=False)
+    save_resume(resume_file, index, result, labels=PlaceLabels(index), entry_pending=False)
     saved = json.loads(resume_file.read_text())
     restored = load_resume(resume_file, index)
 
@@ -61,6 +64,164 @@ def test_saved_find_frontier_restores_relationship_binding(tmp_path: Path) -> No
     assert frontier.place.move == "callees"
     assert frontier.place.binding.status == "resolved"
     assert frontier.place.binding.target.file == "app/target.py"
+
+
+def _frontier_labels(resume_file: Path) -> list[tuple[str, str]]:
+    records = json.loads(resume_file.read_text())["result"]["not_inspected"]
+    return [(record["place_key"], record["signature"]) for record in records]
+
+
+def test_a_resumed_search_that_stops_again_keeps_its_frontier_names_while_the_parser_is_killed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a stopped search leaves the caller of `check` unopened. A resumed run, whose fact cache
+    # does not hold that file, stops again before opening it, and every ast-grep it starts is killed.
+    files = {
+        "app/target.py": "def check():\n    return True\n",
+        "app/entry.py": "from app.target import check\n\n\ndef handle():\n    return check()\n",
+    }
+    repository = tmp_path / "repository"
+    commit_files(repository, files)
+    first = CodeIndex(repository, list(files), fact_cache_dir=tmp_path / "first-facts")
+    start = function_place(first, first.find_definition("check")[0])
+    client = ScriptedJevClient(nouls=lambda _question_id, _question, _state: 0.1)
+    stopped = find_code(
+        first,
+        Judge(client),
+        "the check function",
+        [start],
+        moves={"callers": MOVES["callers"]},
+        budget=SearchBudget(max_steps=1, beam_width=1),
+    )
+    save_resume(tmp_path / "first.json", first, stopped, labels=PlaceLabels(first), entry_pending=False)
+    resumed = CodeIndex(repository, list(files), fact_cache_dir=tmp_path / "resumed-facts")
+    checkpoint = load_resume(tmp_path / "first.json", resumed)
+    killed = tmp_path / "killed-bin"
+    killed.mkdir()
+    (killed / tools.AST_GREP).write_text("#!/bin/sh\nkill -9 $$\n")
+    (killed / tools.AST_GREP).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{killed}{os.pathsep}{os.environ['PATH']}")
+
+    # Act
+    save_resume(
+        tmp_path / "second.json",
+        resumed,
+        checkpoint.result,
+        labels=PlaceLabels(resumed, checkpoint.frontier_labels),
+        entry_pending=False,
+    )
+
+    # Assert: the frontier is saved again with the name the first save wrote, though the resumed index
+    # never parsed the caller's file. A place no save labelled shows only its location, never parsing.
+    assert _frontier_labels(tmp_path / "second.json") == _frontier_labels(tmp_path / "first.json")
+    assert _frontier_labels(tmp_path / "first.json") == [("app/entry.py:4-5", "app/entry.py:4 handle")]
+    assert PlaceLabels(resumed)("app/entry.py:4-5") == "app/entry.py:4"
+    assert "app/entry.py" not in resumed.parsed_files
+
+
+def test_a_restored_place_set_aside_again_carries_its_code_signature(tmp_path: Path) -> None:
+    # Arrange: a stopped search leaves the caller of `check` unopened; its resumption opens that
+    # caller and is interrupted at its first request, which sets the caller aside again.
+    files = {
+        "app/target.py": "def check():\n    return True\n",
+        "app/entry.py": "from app.target import check\n\n\ndef handle():\n    return check()\n",
+    }
+    repository = tmp_path / "repository"
+    commit_files(repository, files)
+    index = CodeIndex(repository, list(files))
+    start = function_place(index, index.find_definition("check")[0])
+    moves = {"callers": MOVES["callers"]}
+    unsure = ScriptedJevClient(nouls=lambda _question_id, _question, _state: 0.5)
+    budget = SearchBudget(max_steps=1, beam_width=1)
+    stopped = find_code(index, Judge(unsure), "the check function", [start], moves=moves, budget=budget)
+    save_resume(tmp_path / "resume.json", index, stopped, labels=PlaceLabels(index), entry_pending=False)
+    restored = load_resume(tmp_path / "resume.json", index).result
+
+    class InterruptingClient:
+        model = "interrupting"
+
+        def ask(self, state, questions):
+            del state, questions
+            raise KeyboardInterrupt
+
+    # Act
+    cancelled = find_code(
+        index, Judge(InterruptingClient()), "the check function", [], moves=moves, resume=restored
+    )
+
+    # Assert: the caller keeps the code signature the first search gave it, not the saved label.
+    (caller,) = stopped.not_inspected
+    (set_aside,) = cancelled.not_inspected
+    assert (set_aside.place_key, set_aside.reason) == ("app/entry.py:4-5", "cancelled")
+    assert set_aside.signature == set_aside.place.signature == caller.signature
+    assert caller.signature.startswith("app/entry.py:4 `def handle():`")
+
+
+def _callers_repository(root: Path) -> Path:
+    """Six callers of `admit`, which fill the frontier of a search started at it."""
+    calls_admit = "from .policy import admit\n\n\ndef call{}(item):\n    return admit(item)\n"
+    callers = {f"app/caller{number}.py": calls_admit.format(number) for number in range(6)}
+    commit_files(root, {"app/policy.py": "def admit(item):\n    return len(item) <= 3\n", **callers})
+    return root
+
+
+def _stop_twice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *resumed_options: str) -> tuple[Path, Path]:
+    """Two `jvn find` runs at `admit`, the second resuming the first. No answer is sure enough to stop
+    either, so each opens one place and stops on its budget."""
+    repository = _callers_repository(tmp_path / "repository")
+    unsure = ScriptedJevClient(nouls=lambda _question_id, _question, _state: 0.5)
+    unsure.close = lambda: None
+    clients = iter([unsure, unsure])
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: next(clients))
+    first, second = tmp_path / "first", tmp_path / "second"
+
+    def jvn_find(output: Path, *options: str) -> list[str]:
+        command = ["find", "the item limit", "--repo", str(repository), "--start", "app/policy.py:2"]
+        return [*command, "--max-calls", "1", "--out", str(output), *options]
+
+    assert cli.main(jvn_find(first)) == 0
+    assert cli.main(jvn_find(second, "--resume", str(first), *resumed_options)) == 0
+    return first, second
+
+
+def _manifest_frontier(pack: Path) -> dict[str, str]:
+    manifest = json.loads((pack / "manifest.json").read_text())
+    return {entry["place"]: entry["signature"] for entry in manifest["search"]["not_inspected"]}
+
+
+def test_a_resumed_jvn_find_that_stops_again_keeps_every_carried_over_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Act
+    first, second = _stop_twice(tmp_path, monkeypatch)
+
+    # Assert: every place carried over and still unopened keeps the label its first save wrote, in the
+    # resume state and in the manifest, and each caller's label names its function.
+    first_labels = dict(_frontier_labels(first / "resume.json"))
+    resumed_labels = dict(_frontier_labels(second / "resume.json"))
+    shown = _manifest_frontier(second)
+    carried = first_labels.keys() & resumed_labels.keys()
+    functions = carried & {f"app/caller{number}.py:4-5" for number in range(6)}
+    assert len(functions) >= 4
+    assert all(" call" in first_labels[key] for key in functions)
+    assert {key: resumed_labels[key] for key in carried} == {key: first_labels[key] for key in carried}
+    assert {key: shown[key] for key in carried} == {key: first_labels[key] for key in carried}
+
+
+def test_with_keep_requests_a_carried_over_place_shows_its_code_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Act
+    first, second = _stop_twice(tmp_path, monkeypatch, "--keep-requests")
+
+    # Assert: --keep-requests keeps each frontier place's signature, the code line Jev would read,
+    # for a place the earlier run found as for one this run found.
+    shown = _manifest_frontier(second)
+    code_lines = {f"app/caller{number}.py:4-5": f"`def call{number}(item):`" for number in range(6)}
+    functions = dict(_frontier_labels(first / "resume.json")).keys() & shown.keys() & code_lines.keys()
+    assert len(functions) >= 4
+    assert all(shown[key].startswith(f"{key.removesuffix('-5')} {code_lines[key]}") for key in functions)
 
 
 @pytest.mark.parametrize("workflow", ["find", "findall"])

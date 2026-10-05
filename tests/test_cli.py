@@ -141,6 +141,7 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
         "responses_without_usage": 0,
         "unanswered_requests": 0,
         "input_tokens_complete": True,
+        "replayed_answers": 0,
         "requested_model": "jev-scripted",
         "served_model": "jev-scripted",
     }
@@ -340,6 +341,38 @@ def _capped_pack(tmp_path: Path, name: str) -> tuple[Path, Path, SearchBudget]:
     budget = SearchBudget(max_calls=1, beam_width=1)
     create_evidence_pack(repository, (), "find one", (), tmp_path / name, budget, ScriptedJevClient())
     return repository, tmp_path / name, budget
+
+
+def test_a_find_records_how_many_answers_its_answer_store_gave_instead_of_jev(tmp_path: Path) -> None:
+    # Arrange
+    repository, first, budget = _capped_pack(tmp_path, "first")
+
+    # Act: the resume replays the first entry decision from the capped run's answers
+    resumed = create_evidence_pack(
+        repository, (), "find one", (), tmp_path / "second", budget, ScriptedJevClient(), resume_from=first
+    )
+
+    # Assert
+    assert json.loads((first / "manifest.json").read_text())["provider"]["replayed_answers"] == 0
+    assert resumed["provider"]["replayed_answers"] > 0
+
+
+def test_resuming_an_earlier_receipt_without_the_replayed_count_keeps_that_count_unknown(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    repository, first, budget = _capped_pack(tmp_path, "first")
+    manifest = json.loads((first / "manifest.json").read_text())
+    del manifest["provider"]["replayed_answers"]
+    (first / "manifest.json").write_text(json.dumps(manifest))
+
+    # Act
+    resumed = create_evidence_pack(
+        repository, (), "find one", (), tmp_path / "second", budget, ScriptedJevClient(), resume_from=first
+    )
+
+    # Assert
+    assert resumed["provider"]["replayed_answers"] is None
 
 
 def test_resuming_an_earlier_receipt_without_the_unreported_count_keeps_that_count_unknown(

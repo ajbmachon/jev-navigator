@@ -25,11 +25,13 @@ from .imports import _local
 from .languages import (
     CLASS_KINDS,
     DECLARATION_RULES,
+    DECORATED_KINDS,
     EXPRESSION_KINDS,
     FLOW_LANGUAGE,
     FUNCTION_KINDS,
     NAME_HOLDERS,
     NAME_WRAPPERS,
+    STUB_RULES,
     declared_name,
     export_rules,
     grammar_of,
@@ -66,6 +68,10 @@ class FileStructure:
     functions: tuple[Span, ...]
     symbols: tuple[Span, ...]
     declarations: tuple[Span, ...]
+    # (start, end, first decorator line) of each function whose decorators sit before its first line.
+    decorated: tuple[tuple[int, int, int], ...] = ()
+    # (start, end) of each function whose body only declares a shape (``languages.STUB_RULES``).
+    stubs: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -108,17 +114,26 @@ class _Text(TypedDict):
     text: str
 
 
+class _Start(TypedDict):
+    line: int
+
+
+class _NodeRange(TypedDict):
+    start: _Start
+
+
+class _Node(TypedDict):
+    range: _NodeRange
+
+
 class _Captured(TypedDict, total=False):
     CALLEE: _Text
     NAME: _Text
+    DECORATOR: _Node
 
 
 class _MetaVariables(TypedDict, total=False):
     single: _Captured
-
-
-class _Start(TypedDict):
-    line: int
 
 
 class _End(TypedDict):
@@ -233,6 +248,8 @@ class _FileFound:
     functions: set[Span] = field(default_factory=set)
     classes: set[Span] = field(default_factory=set)
     declarations: set[Span] = field(default_factory=set)
+    decorated: set[tuple[int, int, int]] = field(default_factory=set)
+    stubs: set[tuple[int, int]] = field(default_factory=set)
     calls: list[tuple[tuple[str, int, int], CallMatch]] = field(default_factory=list)
     receivers: dict[tuple[str, int, str, str], set[str | None]] = field(default_factory=dict)
     export_names: set[str] = field(default_factory=set)
@@ -246,6 +263,10 @@ class _FileFound:
             self.error_lines.append(_lines_of(match))
         elif rule in _STRUCTURE_RULE_IDS:
             self._add_structure(match)
+        elif rule == _DECORATED_RULE:
+            self.decorated.add((*_lines_of(match), _captured_line(match, "DECORATOR")))
+        elif rule == _STUB_RULE:
+            self.stubs.add(_lines_of(match))
         elif rule == "call":
             self._add_call(match)
         elif rule in _EXPORT_RULE_IDS:
@@ -262,6 +283,8 @@ class _FileFound:
             _ordered(functions),
             _ordered(functions | self.classes),
             tuple(sorted(self.declarations)),
+            tuple(sorted(self.decorated)),
+            tuple(sorted(self.stubs)),
         )
         calls = tuple(call for _, call in sorted(self.calls, key=lambda entry: entry[0]))
         return FileFacts(
@@ -381,11 +404,19 @@ def _captured_name(match: dict) -> str:
     return match.get("metaVariables", {}).get("single", {}).get("NAME", {}).get("text", "")
 
 
+def _captured_line(match: dict, variable: str) -> int:
+    return match["metaVariables"]["single"][variable]["range"]["start"]["line"] + 1
+
+
 _ERROR_RULE = "parse_error"
 _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
 _EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
 _STRUCTURE_RULE_IDS = ("function", "class", "declaration")
+_DECORATED_RULE = "decorated"
+_STUB_RULE = "stub"
+# A walk back from a function past its decorators stops at the first sibling that is neither.
+_END_OF_DECORATORS = "{not: {any: [{kind: decorator}, {kind: comment}]}}"
 
 
 def _structure_rules(languages: Sequence[str]) -> str:
@@ -396,8 +427,27 @@ def _structure_rules(languages: Sequence[str]) -> str:
         documents.append(
             f"id: declaration\nlanguage: {grammar_of(language)}\nrule:\n{DECLARATION_RULES[language]}"
         )
+        if DECORATED_KINDS[language]:
+            documents.append(_decorated_rule(language))
+        if language in STUB_RULES:
+            documents.append(
+                f"id: {_STUB_RULE}\nlanguage: {grammar_of(language)}\nrule:\n{STUB_RULES[language]}"
+            )
         documents.append(f"id: {_ERROR_RULE}\nlanguage: {grammar_of(language)}\nrule:\n  kind: ERROR")
     return "\n---\n".join(documents)
+
+
+def _decorated_rule(language: str) -> str:
+    """Each function whose decorators sit before it, its first decorator captured as ``$DECORATOR``:
+    among the decorators and comments just before the function, the decorator no other one precedes."""
+    first_decorator = (
+        f"{{stopBy: {_END_OF_DECORATORS}, kind: decorator, pattern: $DECORATOR, "
+        f"not: {{follows: {{stopBy: {_END_OF_DECORATORS}, kind: decorator}}}}}}"
+    )
+    return (
+        f"id: {_DECORATED_RULE}\nlanguage: {grammar_of(language)}\nrule:\n"
+        f"  any: {_kinds(DECORATED_KINDS[language])}\n  follows: {first_decorator}"
+    )
 
 
 # A component rendered as `<Name ...>` or `<ns.Name ...>` is called by the code that renders it;

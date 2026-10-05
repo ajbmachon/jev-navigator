@@ -228,7 +228,7 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   same questions replays from it after the live requests that learn the served model (one for Find
   All and Trace, one per place a Find's first round opens, up to `--beam-width`; Find All and
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
-  `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
+  `answers.jsonl`. Every pack reports those answers as `provider.replayed_answers` beside its live calls.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
 - `resume.json` (budget-stopped, cancelled or failed runs): the frontier as locations; Resume re-reads the
   code from the unchanged repository.
@@ -276,6 +276,7 @@ applies every rule now.
 ```python
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator import operations, comments
+from jev_navigator.index import units
 
 index = CodeIndex.from_directory(repo_root, prefixes=("app/", "web/"))  # tracked or not, minus ignored
 index.not_indexed_files  # {"node_modules/": "ignored", ...}: every file or folder left out, with the reason
@@ -288,12 +289,17 @@ index.find_references("send_invoice")  # Reference(name, file, line, role, holde
 index.references_in(span)  # names a function passes on without calling (callbacks, registries)
 index.enclosing_symbol(file, line)
 index.symbols_in(file)
+index.decorator_starts_in(file)  # each decorated function's span and its first decorator line
+index.stubs_in(file)  # functions whose body is only ..., pass, a docstring or raise NotImplementedError
 index.read_slice(span)  # masked as part of its whole file; see Secrets
 index.read_window(file, line, radius=10)
 index.search_text("orders.max_items")  # ripgrep over the narrowed files only
 index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
+
+units.list_units(index, files, box_chars=room)  # outermost functions and methods, top-level code; room: docs/extending.md
+units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=room)  # the units holding lines or line ranges
 
 operations.slice_around(index, file, line)  # the enclosing function, or a window
 operations.code_described_by_comment(index, file, line)  # the whole next symbol or block
@@ -756,9 +762,13 @@ holds exactly that revision (use `CodeIndex.at_commit` for history); a mismatch 
 by default, with a beam of 3. The CLI sets a default allowance of 24 model requests for Find and
 48 for Find All. Everything is a parameter: `SearchBudget` also sets
 `neighbours_per_kind`, `preview_lines`, `max_line_chars` (240: longer lines and signatures are cut and
-marked "[line cut]") and `max_slice_chars` (12,000: an opened place is cut on a line boundary with a
-note, and `Visit.code` ends at the last shown line). If the first line cannot fit, the place stays
-`not_inspected` with reason `budget`; Resume with a larger slice budget inspects that same source.
+marked "[line cut]"). An opened place goes to Jev whole when its requests fit the input box of the
+judge's client (Jev's 32,000 tokens are 76,800 characters, `judgments.client.JEV_INPUT_LIMITS`): the
+request asking whether it is the target, and, when the opening is split, the request asking about each
+neighbour alone. Larger code is cut on a line boundary with a visible note, and `Visit.code` ends at
+the last shown line. A cut never grows back: under `neighbours_per_kind` a shorter cut can list a
+small neighbour in place of a large one, so the opening keeps that cut and the neighbours listed for it. If not even its first line fits, the place stays `not_inspected` with reason
+`budget`; Resume on a route with a larger box inspects that same source.
 `questions=SearchQuestions(found=...,
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
 `places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `imported`,

@@ -10,10 +10,16 @@ import pytest
 
 from jev_navigator.judgments.answers import response_from_raw
 from jev_navigator.judgments.client import UnansweredQuestionError
-from jev_navigator.judgments.journal import JournalRequest, JsonlJournal, RawAttempt, RawResponse
+from jev_navigator.judgments.journal import (
+    JournalRequest,
+    JsonlJournal,
+    RawAttempt,
+    RawResponse,
+    keeps_request_text,
+)
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
-from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.judgments.store import AnswerRecord, JsonlAnswerStore
 from jev_navigator.judgments.thresholds import Thresholds
 from jev_navigator.testing import ScriptedJevClient
 
@@ -418,3 +424,68 @@ def test_a_request_cancelled_after_it_was_sent_is_journaled_as_cancelled_after_i
     assert failure["kind"] == "failure"
     assert failure["error_type"] == "CancelledError"
     assert failure["message"] == "the request was cancelled after it was sent"
+
+
+SENT = json.dumps({"state": STATE, "questions": QUESTIONS}).encode()
+ANSWER = RawResponse(b'{"answers": {}}', 200, "application/json", sent_body=SENT)
+RECORDS = {
+    "request": lambda journal: journal.record_request(JournalRequest("h", "jev", STATE, QUESTIONS, SENT)),
+    "attempt": lambda journal: journal.record_attempt("r1", RawAttempt(1, 5.0, SENT, response=ANSWER)),
+    "response": lambda journal: journal.record_response("r1", ANSWER),
+    "failure": lambda journal: journal.record_failure("r1", RuntimeError("refused"), ANSWER),
+}
+
+
+@pytest.mark.parametrize("record", sorted(RECORDS))
+@pytest.mark.parametrize("keep_request_text", [False, True])
+def test_a_journal_says_whether_any_record_kept_a_requests_text(
+    tmp_path: Path, record: str, keep_request_text: bool
+) -> None:
+    # Arrange
+    path = tmp_path / "journal.jsonl"
+    RECORDS[record](JsonlJournal(path, keep_request_text=keep_request_text))
+
+    # Act
+    kept = keeps_request_text(path)
+
+    # Assert
+    assert kept is keep_request_text
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"request": {"state": STATE, "questions": QUESTIONS}},
+        {"sent_body_base64": base64.b64encode(SENT).decode()},
+    ],
+    ids=["request", "sent body"],
+)
+@pytest.mark.parametrize("keep_requests", [False, True])
+def test_an_answer_store_says_whether_any_record_kept_a_requests_text(
+    tmp_path: Path, record: dict, keep_requests: bool
+) -> None:
+    # Arrange: the store keeps a record's request text only with keep_requests
+    path = tmp_path / "answers.jsonl"
+    answer = AnswerRecord(
+        "h", ("adds_one",), {"adds_one": {"type": "noul", "p": 0.9}}, "jev", 10, {}, **record
+    )
+    JsonlAnswerStore(path, keep_requests=keep_requests).put(answer)
+
+    # Act
+    kept = keeps_request_text(path)
+
+    # Assert
+    assert kept is keep_requests
+
+
+def test_a_line_a_crash_cut_off_tells_nothing_about_request_text(tmp_path: Path) -> None:
+    # Arrange: a journal without request text whose last line was cut off mid-write
+    path = tmp_path / "journal.jsonl"
+    RECORDS["response"](JsonlJournal(path))
+    path.write_text(path.read_text() + '{"kind": "request", "body_base64": "ZGVm')
+
+    # Act
+    kept = keeps_request_text(path)
+
+    # Assert
+    assert kept is False

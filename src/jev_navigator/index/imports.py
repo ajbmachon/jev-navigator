@@ -25,6 +25,12 @@ _SCRIPT_FROM = re.compile(
 _SCRIPT_COMMENT_OR_STRING = re.compile(
     r""""(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`|//[^\n]*|/\*.*?\*/""", re.S
 )
+_SCRIPT_SIDE_EFFECT_IMPORT = re.compile(r"""^[ \t]*import\s*['"][^'"]+['"][ \t]*;?[ \t]*$""", re.M)
+_SCRIPT_REQUIRE_STATEMENT = re.compile(
+    r"""^[ \t]*(?:(?:const|let|var)\s+[^=\n]+=\s*)?require\(\s*['"][^'"]+['"]\s*\)[ \t]*;?[ \t]*$""", re.M
+)
+_PYTHON_IMPORT_STATEMENTS = (_PYTHON_FROM, _PYTHON_IMPORT)
+_SCRIPT_IMPORT_STATEMENTS = (_SCRIPT_FROM, _SCRIPT_SIDE_EFFECT_IMPORT, _SCRIPT_REQUIRE_STATEMENT)
 _SCRIPT_BARE = re.compile(r"""(?:\brequire\(\s*|\bimport\s*\(\s*|^[ \t]*import\s+)['"]([^'"]+)['"]""", re.M)
 _SCRIPT_SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".mjs", ".cjs", ".jsx")
 # ESM TypeScript imports a module by the name it compiles to, so `./x.js` names `x.ts` when it exists.
@@ -280,14 +286,38 @@ def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | Non
 
 
 def _without_script_comments(source: str) -> str:
-    """The source with ``//`` and ``/* */`` comments removed; string literals are kept whole, so a
-    ``//`` inside a string is not taken for a comment."""
+    """The source with ``//`` and ``/* */`` comments removed and their line breaks kept, so every line
+    keeps its number; string literals are kept whole, so a ``//`` inside a string is not taken for a
+    comment."""
     return _SCRIPT_COMMENT_OR_STRING.sub(_keep_literal, source)
 
 
 def _keep_literal(match: re.Match) -> str:
     text = match.group(0)
-    return "" if text.startswith("/") else text
+    return "\n" * text.count("\n") if text.startswith("/") else text
+
+
+def without_comments(source: str, path: str) -> str:
+    """``source`` with its comments removed and every line break kept, so lines keep their numbers."""
+    return _PYTHON_COMMENT.sub("", source) if path.endswith(".py") else _without_script_comments(source)
+
+
+def import_lines(source: str, path: str) -> frozenset[int]:
+    """The 1-based lines import statements cover; an import over several lines covers every line it
+    spans. A script's ``require`` counts only as a whole statement (``const x = require("x")``),
+    never inside other code."""
+    statements = _PYTHON_IMPORT_STATEMENTS if path.endswith(".py") else _SCRIPT_IMPORT_STATEMENTS
+    return frozenset(_lines_matched(without_comments(source, path), statements))
+
+
+def _lines_matched(code: str, patterns: tuple[re.Pattern[str], ...]) -> set[int]:
+    covered: set[int] = set()
+    for pattern in patterns:
+        for match in pattern.finditer(code):
+            first = code.count("\n", 0, match.start()) + 1
+            last = first + match.group(0).count("\n")
+            covered.update(range(first, last + 1))
+    return covered
 
 
 def _local(part: str) -> str:

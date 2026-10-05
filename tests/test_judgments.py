@@ -128,6 +128,32 @@ def test_check_each_batches_items_into_one_request_with_three_way_verdicts() -> 
     )
 
 
+def test_a_check_without_criteria_sends_only_its_instructions_and_is_answered() -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls={"plain#0": 0.95})
+    plain = Check(name="plain", instructions="Does `{item}.code` validate orders?")
+
+    # Act
+    [result] = Judge(client).check_each(plain, [{"code": "def a(): ..."}])
+
+    # Assert
+    _, questions = client.requests[0]
+    assert list(questions.values()) == [
+        {"type": "noul", "instructions": "Does `items[0].code` validate orders?"}
+    ]
+    assert result.verdict == NoulVerdict.YES
+
+
+@pytest.mark.parametrize("given", ["yes", "no"])
+def test_a_check_with_only_one_criterion_is_refused(given: str) -> None:
+    # Arrange
+    one_side = {given: Criterion("The code validates orders.")}
+
+    # Act and assert
+    with pytest.raises(ValueError, match="both"):
+        Check(name="half", instructions="Does `{item}.code` validate orders?", **one_side)
+
+
 def test_items_judged_before_with_the_same_batch_mates_are_answered_from_the_store(tmp_path: Path) -> None:
     # Arrange
     store = JsonlAnswerStore(tmp_path / "answers.jsonl")

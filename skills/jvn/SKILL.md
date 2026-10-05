@@ -82,7 +82,7 @@ requests that learn the served model: one for Find All and Trace, one per place 
 opens. Give each experiment or eval arm its own store with `--answer-store PATH` (or
 `JEV_NAVIGATOR_ANSWER_STORE`) outside the cache folder so arms never reuse each other's answers;
 stderr names the store in use, and a store inside the cache folder is refused with exit status 2.
-`jvn trace` reports `replayed_answers` beside its live `calls`.
+Every pack reports `provider.replayed_answers`, the answers a store gave instead of Jev, beside its live calls.
 
 The first search in a scope parses every file in it once and records each name and its lines in the
 name table under the same cache folder; later searches over unchanged files look names up there

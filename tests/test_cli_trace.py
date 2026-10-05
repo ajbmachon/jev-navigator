@@ -14,7 +14,7 @@ import pytest
 from git_repos import commit_files
 
 from jev_navigator.cli_trace import SCHEMA_VERSION, create_trace_evidence_pack
-from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
+from jev_navigator.judgments.store import SHARED_STORE_VARIABLE, AnswerRecord, JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
 WORKFLOW_FILES = {
@@ -413,6 +413,54 @@ def test_second_pack_replays_the_persisted_answers_from_the_store(tmp_path: Path
         for obligation in manifest["trace"]["obligations"]
         for evidence in obligation["evidence"]
     )
+
+
+def _store_that_kept_request_text(path: Path) -> Path:
+    """An answer store a library caller wrote with keep_requests: its record keeps the request."""
+    request = {"state": {"slice": {"code": "def respond(): ..."}}, "questions": {}}
+    record = AnswerRecord(
+        "h", ("q",), {"q": {"type": "noul", "p": 0.9}}, "jev-scripted", 10, {}, request=request
+    )
+    JsonlAnswerStore(path, keep_requests=True).put(record)
+    return path
+
+
+def test_a_store_that_kept_its_request_text_seeds_no_trace_pack_without_keep_requests(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    repository = _workflow_repository(tmp_path)
+    store = _store_that_kept_request_text(tmp_path / "kept.jsonl")
+    output = tmp_path / "pack"
+
+    # Act
+    with pytest.raises(ValueError) as refusal:
+        _pack(repository, output, _evidence_client(), served_model="jev-scripted", answers_from=store)
+
+    # Assert: the pack is never written, and the refusal names the store and the flag it needs
+    assert str(store) in str(refusal.value)
+    assert "--keep-requests" in str(refusal.value)
+    assert not output.exists()
+
+
+def test_a_store_that_kept_its_request_text_seeds_a_trace_pack_that_keeps_requests(tmp_path: Path) -> None:
+    # Arrange
+    repository = _workflow_repository(tmp_path)
+    store = _store_that_kept_request_text(tmp_path / "kept.jsonl")
+    output = tmp_path / "pack"
+
+    # Act
+    _pack(
+        repository,
+        output,
+        _evidence_client(),
+        served_model="jev-scripted",
+        answers_from=store,
+        keep_requests=True,
+    )
+
+    # Assert
+    assert (output / "answers.jsonl").read_text().startswith(store.read_text())
 
 
 def test_trace_names_each_ignored_file_as_not_indexed(tmp_path: Path) -> None:

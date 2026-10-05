@@ -1,14 +1,16 @@
-"""The code a request shows: long lines cut, and a whole slice cut at a line boundary, so one line or
-one long function can never push a request past a route's state limit. Every cut stays visible."""
+"""The code a request shows: long lines cut, and a slice cut at a line boundary only when its requests
+would not fit the box of the client's input limits, so a function that fits goes whole. Every cut
+stays visible."""
 
 from __future__ import annotations
 
+from bisect import bisect_left
+from collections.abc import Callable
 from dataclasses import replace
 
 from ..index.spans import CodeSlice
 
 MAX_LINE_CHARS = 240
-MAX_SLICE_CHARS = 12_000
 LINE_CUT_MARK = " [line cut]"
 
 
@@ -17,27 +19,24 @@ def cut_long_line(line: str, max_chars: int = MAX_LINE_CHARS) -> str:
 
 
 def shown_slice(
-    code: CodeSlice, max_chars: int = MAX_SLICE_CHARS, max_line_chars: int = MAX_LINE_CHARS
+    code: CodeSlice, fits: Callable[[CodeSlice], bool], max_line_chars: int = MAX_LINE_CHARS
 ) -> CodeSlice | None:
-    """The lines of ``code`` that fit ``max_chars``, each cut at ``max_line_chars``. After a cut the
-    span ends at the last shown line and a note names what was left out. Returns None when
-    not even the first line fits, so the caller retains the source as uninspected."""
+    """``code`` with each line cut at ``max_line_chars``: whole when ``fits`` accepts it, else its
+    longest start that ``fits`` accepts, whose span ends at the last shown line and whose text ends
+    with a note naming what was left out. Returns None when not even the first line fits, so the
+    caller retains the source as uninspected. ``fits`` accepts every shorter start of a slice it
+    accepts, as a size box does."""
     lines = [cut_long_line(line, max_line_chars) for line in code.text.split("\n")]
-    kept = _lines_that_fit(lines, max_chars)
-    if not kept:
-        return None
-    text = "\n".join(kept)
-    if len(kept) < len(lines):
-        text += f"\n[cut after {len(kept)} of {len(lines)} lines at {max_chars} characters]"
-    return replace(code, span=replace(code.span, end=code.span.start + len(kept) - 1), text=text)
+    whole = _first_lines(code, lines, len(lines))
+    if fits(whole):
+        return whole
+    counts = range(1, len(lines))
+    kept = bisect_left(counts, True, key=lambda count: not fits(_first_lines(code, lines, count)))
+    return _first_lines(code, lines, kept) if kept else None
 
 
-def _lines_that_fit(lines: list[str], max_chars: int) -> list[str]:
-    kept: list[str] = []
-    used = 0
-    for line in lines:
-        used += len(line) + 1
-        if used > max_chars + 1:
-            break
-        kept.append(line)
-    return kept
+def _first_lines(code: CodeSlice, lines: list[str], count: int) -> CodeSlice:
+    text = "\n".join(lines[:count])
+    if count < len(lines):
+        text += f"\n[cut after {count} of {len(lines)} lines to fit the request size limit]"
+    return replace(code, span=replace(code.span, end=code.span.start + count - 1), text=text)

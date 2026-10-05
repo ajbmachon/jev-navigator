@@ -14,12 +14,15 @@ from jev_navigator.directives.places import (
     MOVES,
     Move,
     Place,
+    function_place,
     neighbours,
     neighbours_and_omissions,
     place_for_line,
     range_place,
+    restored_signature,
     window_place,
 )
+from jev_navigator.index.bindings import Binding, BindingStatus
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
 from jev_navigator.judgments.relations import key_mention
@@ -704,6 +707,31 @@ def test_the_lines_before_and_after_stay_off_the_opened_code_in_a_short_file(tmp
 
 def a_move_offering(*places: Place) -> Move:
     return lambda index, opened: list(places)
+
+
+@pytest.mark.parametrize("file", ["orders.py", "v~2/orders.py", "v:5~2/orders.py"])
+def test_a_restored_place_rebuilds_the_signature_its_builder_gave(tmp_path: Path, file: str) -> None:
+    # Arrange: a place from each builder, in a file whose path may hold a tilde, and a colon and a
+    # number before it, as a window key does; the function and the window carry a name-match
+    # binding, which their signatures mark.
+    source = "import os\n\n\ndef place(order):\n    limit = os.environ['LIMIT']\n    return check(order)\n"
+    index = committed_index(tmp_path, {file: source})
+    name_match = Binding(BindingStatus.CANDIDATE, "same name in another file")
+    places = [
+        function_place(index, index.find_definition("place")[0], "calls check", binding=name_match),
+        window_place(index, file, 5, "reads LIMIT", radius=2, binding=name_match),
+        range_place(index, file, 1, 2, "the start of a co-changed file"),
+    ]
+
+    # Act
+    rebuilt = [
+        restored_signature(index, place.key, place.kind, place.open().span, place.relation, place.binding)
+        for place in places
+    ]
+
+    # Assert
+    assert rebuilt == [place.signature for place in places]
+    assert all("`" in signature for signature in rebuilt)
 
 
 def test_places_that_open_the_same_lines_are_offered_once(tmp_path: Path) -> None:

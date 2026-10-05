@@ -271,6 +271,24 @@ class Judge:
             check.name
         ]
 
+    def fits_alone(self, check: Check, item: Mapping, shared: Mapping, list_name: str = "items") -> bool:
+        """Whether the smallest request ``check_each`` can send about ``item``, ``shared`` with that
+        item alone, fits this judge's input limits, masked and measured as packing measures it."""
+        hidden = self._hidden_values([check], [item], shared)
+        masked_item, masked_shared = self._masked_together([item, shared], hidden)
+        plan = _CheckPlan(
+            list_name,
+            [check],
+            [masked_item],
+            masked_shared,
+            hidden,
+            self.thresholds,
+            self.items_per_request,
+            self.input_limits,
+            masker=self.masker,
+        )
+        return _fits_in_batch(plan, [0])
+
     def check_every(
         self,
         checks: Sequence[Check],

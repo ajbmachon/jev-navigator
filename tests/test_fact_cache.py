@@ -64,6 +64,33 @@ def test_warm_index_preserves_incomplete_parser_coverage(tmp_path):
     assert warm.find_callers("broken")[0].binding.status == "unknown", "the unread lines must persist"
 
 
+def test_warm_index_preserves_decorator_starts_and_stubs(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "views.py").write_text(
+        "@app.route('/')\ndef home():\n    return page()\n\n\ndef draft():\n    ...\n"
+    )
+    cache = tmp_path / "cache"
+    cold = CodeIndex.from_directory(repository, fact_cache_dir=cache)
+    expected = ({Span("views.py", 2, 3, "home"): 1}, (Span("views.py", 6, 7, "draft"),))
+    assert (cold.decorator_starts_in("views.py"), cold.stubs_in("views.py")) == expected
+    scans = []
+    actual_scan = tools.ast_grep_rules
+
+    def observe_scan(rules, files, *arguments, **options):
+        scans.append(tuple(files))
+        return actual_scan(rules, files, *arguments, **options)
+
+    monkeypatch.setattr(tools, "ast_grep_rules", observe_scan)
+
+    # Act
+    warm = CodeIndex.from_directory(repository, fact_cache_dir=cache)
+
+    # Assert
+    assert (warm.decorator_starts_in("views.py"), warm.stubs_in("views.py")) == expected
+    assert scans == [], "the facts must come from the cache"
+
+
 @pytest.fixture
 def example(tmp_path):
     content = b"def handler():\n    return service()\n"

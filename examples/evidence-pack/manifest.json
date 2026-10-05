@@ -4,7 +4,6 @@
     "max_calls": 3,
     "max_depth": 2,
     "max_line_chars": 240,
-    "max_slice_chars": 12000,
     "max_steps": 3,
     "neighbours_per_kind": null,
     "preview_lines": 8
@@ -21,6 +20,7 @@
   "provider": {
     "input_tokens": 200,
     "input_tokens_complete": true,
+    "replayed_answers": 0,
     "requested_model": "jev-scripted",
     "responses_without_usage": 0,
     "served_model": "jev-scripted",

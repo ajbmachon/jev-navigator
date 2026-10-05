@@ -216,3 +216,40 @@ def test_listing_outside_git_ignores_a_configured_ripgrep_filter(tmp_path: Path,
     (directory / "a.py").write_text("needle = 1\n")
 
     assert listing.working_files(directory).files == ("a.py",)
+
+
+def test_a_symbolic_link_to_a_folder_is_named_a_link_not_a_separate_repository(tmp_path: Path) -> None:
+    # Arrange
+    commit_files(tmp_path, {"app.py": APP, "lib/util.py": "def util():\n    return 0\n"})
+    (tmp_path / "shared").symlink_to(tmp_path / "lib", target_is_directory=True)
+
+    # Act
+    index = CodeIndex.from_directory(tmp_path)
+
+    # Assert
+    assert index.files == ("app.py", "lib/util.py")
+    assert index.not_indexed_files == {"shared": "a symbolic link"}
+
+
+def test_a_change_outside_the_folder_never_labels_the_same_path_inside_it_a_worktree_read(
+    tmp_path: Path,
+) -> None:
+    # Arrange: git status names the edited app/a.py from the top of the repository, the same path
+    # the folder's own unchanged app/a.py has relative to the folder
+    parent = tmp_path / "parent"
+    commit_files(
+        parent,
+        {
+            "app/a.py": "def outside():\n    return 0\n",
+            "copies/project/app/a.py": "def inside():\n    return 0\n",
+        },
+    )
+    write_files(parent, {"app/a.py": "def outside():\n    return 1\n"})
+    child = parent / "copies" / "project"
+    commit = git(parent, "rev-parse", "HEAD").strip()
+
+    # Act
+    index = CodeIndex.from_directory(child)
+
+    # Assert
+    assert index.read_slice(index.find_definition("inside")[0]).commit == commit

@@ -13,7 +13,6 @@ import sys
 from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
@@ -33,9 +32,14 @@ from .environment import checkout_root, load_typesafe_environment
 from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
 from .index.code_index import CodeIndex
 from .index.languages import language_of
-from .judgments.answers import TokenTotal, answered_by
+from .judgments.answers import answered_by
 from .judgments.client import JevClient
-from .judgments.journal import ERROR_TEXT_VARIABLE, error_message, error_text_kept, message_fields
+from .judgments.journal import (
+    ERROR_TEXT_VARIABLE,
+    error_message,
+    error_text_kept,
+    message_fields,
+)
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
     SHARED_STORE_VARIABLE,
@@ -47,7 +51,14 @@ from .judgments.store import (
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import failure_digested, place_label, source_shown, step_shown
+from .run_files import (
+    PlaceLabels,
+    carried_over_journal_line,
+    failure_digested,
+    require_kept_request_text,
+    source_shown,
+    step_shown,
+)
 from .usage_receipt import usage_receipt, usage_report_lines
 
 if TYPE_CHECKING:
@@ -63,7 +74,7 @@ NO_ERROR_TEXT_HELP = (
     f"SHA-256 (default: the text, or ${ERROR_TEXT_VARIABLE}=off); stderr still shows the message"
 )
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
-POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
+POSITIVE_BUDGET_FIELDS = ("beam_width", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
@@ -303,12 +314,11 @@ def create_evidence_pack(
     _validate_budget(budget)
     thresholds = thresholds or Thresholds()
     previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
+    if resume_from is not None:
+        require_kept_request_text(resume_from.resolve() / "journal.jsonl", keep_requests)
     _prepare_output(output)
     if resume_from is not None:
-        for name in ("answers.jsonl", "journal.jsonl"):
-            source = resume_from.resolve() / name
-            if source.is_file():
-                shutil.copyfile(source, output / name)
+        _carry_over_run_logs(resume_from.resolve(), output, keep_requests, keep_error_text)
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
@@ -329,7 +339,6 @@ def create_evidence_pack(
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
-        journal.place_label = partial(place_label, index)
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
         checkpoint = SavedSearch(None)
@@ -337,6 +346,8 @@ def create_evidence_pack(
             if previous["source"]["revision"] != index.commit:
                 raise ValueError("repository revision changed since the evidence pack")
             checkpoint = load_resume(resume_from.resolve() / "resume.json", index)
+        labels = PlaceLabels(index, checkpoint.frontier_labels)
+        journal.place_label = labels
         resume = checkpoint.result
         resuming_enumeration = checkpoint.completed is not None
         if resuming_enumeration and checkpoint.check_id != CONTAINS_IMPLEMENTATION.question_id:
@@ -419,6 +430,7 @@ def create_evidence_pack(
                 output / "resume.json",
                 index,
                 result,
+                labels=labels,
                 entry_pending=entry_stop is not None,
                 completed=enumeration.judged if enumeration is not None else None,
                 check_id=CONTAINS_IMPLEMENTATION.question_id if enumeration is not None else None,
@@ -433,9 +445,7 @@ def create_evidence_pack(
             index,
             result,
             requested_model=getattr(client, "model", "unknown"),
-            served_model=judge.served_model,
-            input_total=judge.input_total,
-            unanswered_requests=judge.unanswered_requests,
+            judge=judge,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
@@ -466,7 +476,7 @@ def create_evidence_pack(
         if failure is not None:
             manifest["search"]["failure"] = _failure_record(failure, judge, journal)
         if not keep_requests:
-            _drop_code(manifest, index)
+            _drop_code(manifest, labels)
         if not journal.keeps_error_text:
             _digest_history_failures(manifest)
         _write_json(output / "manifest.json", manifest)
@@ -592,7 +602,7 @@ A completed search can have a non-found outcome; inspect search.outcome in JSON 
   jvn find "the order limit" --start app/orders.py:42 --out ./order-evidence
   jvn find "the order limit" --max-calls 8 --max-depth 3 --max-steps 8
   jvn find "the order limit" --beam-width 1 --neighbours-per-kind 8
-  jvn find "the order limit" --preview-lines 8 --max-slice-chars 12000 --max-line-chars 240
+  jvn find "the order limit" --preview-lines 8 --max-line-chars 240
   jvn find "the order limit" --verbose
 
 All flags are optional. Live calls stop at 24 unless --max-calls sets another cap ('none' lifts it);
@@ -793,12 +803,6 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         help="Leading lines shown for each candidate preview (default: 8; 0 hides preview code)",
     )
     evidence.add_argument(
-        "--max-slice-chars",
-        type=int,
-        default=defaults.max_slice_chars,
-        help="Characters allowed in one opened code slice (default: 12000; not the whole request)",
-    )
-    evidence.add_argument(
         "--max-line-chars",
         type=int,
         default=defaults.max_line_chars,
@@ -989,6 +993,23 @@ def _previous_pack(
     return previous
 
 
+def _carry_over_run_logs(source: Path, output: Path, keep_requests: bool, keep_error_text: bool) -> None:
+    """The earlier pack's answers and journal continue in this pack. With ``keep_requests`` the journal
+    is copied whole; otherwise each line goes through ``run_files.carried_over_journal_line``, which
+    also applies this pack's error-text setting."""
+    answers = source / "answers.jsonl"
+    if answers.is_file():
+        shutil.copyfile(answers, output / "answers.jsonl")
+    journal = source / "journal.jsonl"
+    if not journal.is_file():
+        return
+    if keep_requests:
+        shutil.copyfile(journal, output / "journal.jsonl")
+        return
+    with journal.open() as lines, (output / "journal.jsonl").open("w") as kept:
+        kept.writelines(carried_over_journal_line(line, keep_error_text=keep_error_text) for line in lines)
+
+
 def _default_output(repository: Path) -> Path:
     return default_run_folder(repository, datetime.now(UTC))
 
@@ -1023,9 +1044,7 @@ def _manifest(
     result: FindResult,
     *,
     requested_model: str,
-    served_model: str | None,
-    input_total: TokenTotal,
-    unanswered_requests: int,
+    judge: Judge,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -1056,9 +1075,10 @@ def _manifest(
         "thresholds": thresholds.as_dict(),
         "provider": {
             "requested_model": requested_model,
-            "served_model": served_model,
-            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
-            **usage_receipt(previous, input_total, unanswered_requests),
+            "served_model": judge.served_model,
+            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0)
+            + judge.input_total.reported,
+            **usage_receipt(previous, judge),
         },
         "search": {
             "outcome": result.outcome,
@@ -1111,38 +1131,38 @@ def _digest_history_failures(manifest: dict) -> None:
         search["history"] = [failure_digested(step) for step in search.get("history", [])]
 
 
-def _drop_code(manifest: dict, index: CodeIndex) -> None:
+def _drop_code(manifest: dict, labels: PlaceLabels) -> None:
     """Leave each place as its location: the code it held stays in the repository."""
-    _drop_entry_code(manifest.get("entry_selection") or {}, index)
+    _drop_entry_code(manifest.get("entry_selection") or {}, labels)
     for name in ("search", "seed_search"):
-        _drop_search_code(manifest.get(name) or {}, index)
+        _drop_search_code(manifest.get(name) or {}, labels)
 
 
-def _drop_entry_code(entry_selection: dict, index: CodeIndex) -> None:
+def _drop_entry_code(entry_selection: dict, labels: PlaceLabels) -> None:
     for decision in entry_selection.get("decisions", []):
         for option in decision.get("options", []):
             option.pop("description", None)
     for candidate in entry_selection.get("candidates", []):
-        candidate["signature"] = place_label(index, candidate["place"])
+        candidate["signature"] = labels(candidate["place"])
 
 
-def _drop_search_code(search: dict, index: CodeIndex) -> None:
+def _drop_search_code(search: dict, labels: PlaceLabels) -> None:
     visits = [visit for group in ("found", "starts", "searched", "unsure") for visit in search.get(group, [])]
     for visit in visits:
         visit.pop("code", None)
         if "place" in visit:
             visit["source"] = source_shown(visit["source"], visit["place"])
     for entry in search.get("not_inspected", []):
-        entry["signature"] = place_label(index, entry["place"])
-    search["history"] = [_step_without_code(step, index) for step in search.get("history", [])]
+        entry["signature"] = labels(entry["place"])
+    search["history"] = [_step_without_code(step, labels) for step in search.get("history", [])]
 
 
-def _step_without_code(step: dict, index: CodeIndex) -> dict:
+def _step_without_code(step: dict, labels: PlaceLabels) -> dict:
     shown = step_shown(step)
     for fetched in shown["fetched"]:
         fetched.pop("code", None)
     for offered in shown["judgments"].get("could_contain", []):
-        offered["signature"] = place_label(index, offered["place"])
+        offered["signature"] = labels(offered["place"])
     return shown
 
 

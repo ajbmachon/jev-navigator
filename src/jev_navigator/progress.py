@@ -131,8 +131,8 @@ class TerminalProgress:
 
 class ProgressJournal(JsonlJournal):
     """Without ``keep_request_text`` a history step shows each neighbour by ``place_label`` (the CLI
-    sets one that adds the symbol name once the index exists) and every relation as a run file keeps
-    it."""
+    sets the run's ``run_files.PlaceLabels`` once the index and any resumed frontier exist) and every
+    relation as a run file keeps it."""
 
     def __init__(
         self,

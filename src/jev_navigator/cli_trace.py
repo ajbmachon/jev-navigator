@@ -24,6 +24,7 @@ from .judgments.judge import CheckResult, Judge
 from .judgments.store import run_answer_store
 from .judgments.thresholds import Thresholds
 from .progress import ProgressJournal, TerminalProgress
+from .run_files import require_kept_request_text
 from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.trace-evidence-pack/v1"
@@ -58,9 +59,10 @@ def create_trace_evidence_pack(
     as there; ``depth`` and ``cancelled`` pass through to the static walk. ``served_model`` pins the
     model identity that ``answers.jsonl`` replays against, as a resumed pack does; ``answers_from``
     seeds this pack's answer store from a prior pack's, so identical questions about identical code
-    replay without a new request. ``answer_store`` is the shared store file behind the pack
-    (default ``shared_store_path()``). ``question`` is
-    the workflow question every obligation is asked about. By default the pack keeps code locations
+    replay without a new request; a store that kept its requests' text seeds only a pack with
+    ``keep_requests``, and is refused before ``output`` is made. ``answer_store`` is the shared store
+    file behind the pack (default ``shared_store_path()``). ``question`` is the workflow question every
+    obligation is asked about. By default the pack keeps code locations
     and request hashes; ``keep_requests`` also keeps the code and request text. Error messages and
     error bodies are kept unless ``keep_error_text`` is False.
 
@@ -79,12 +81,10 @@ def create_trace_evidence_pack(
     output = output.resolve()
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"output directory is not empty: {output}")
+    seed = _seed_store(answers_from, keep_requests) if answers_from is not None else None
     output.mkdir(parents=True, exist_ok=True)
-    if answers_from is not None:
-        source = answers_from.resolve()
-        if not source.is_file():
-            raise ValueError(f"no answer store to replay at {source}")
-        shutil.copyfile(source, output / "answers.jsonl")
+    if seed is not None:
+        shutil.copyfile(seed, output / "answers.jsonl")
     thresholds = thresholds or Thresholds()
     journal_path = output / "journal.jsonl"
     journal_path.touch()
@@ -132,6 +132,16 @@ def create_trace_evidence_pack(
         progress.close(outcome)
 
 
+def _seed_store(answers_from: Path, keep_requests: bool) -> Path:
+    """The answer store to seed the pack's own from. A store that kept its requests' text seeds only a
+    pack that keeps them too (``run_files.require_kept_request_text``)."""
+    source = answers_from.resolve()
+    if not source.is_file():
+        raise ValueError(f"no answer store to replay at {source}")
+    require_kept_request_text(source, keep_requests)
+    return source
+
+
 def _start_span(index: CodeIndex, start: str) -> Span:
     """The concrete function span that contains the caller's ``PATH:LINE`` start."""
     path, separator, raw_line = start.rpartition(":")
@@ -177,9 +187,8 @@ def _manifest(
             "requested_model": getattr(judge.client, "model", "unknown"),
             "served_model": judge.served_model,
             "calls": judge.calls,
-            "replayed_answers": judge.replayed_answers,
             "input_tokens": judge.input_total.reported,
-            **usage_receipt(None, judge.input_total, judge.unanswered_requests),
+            **usage_receipt(None, judge),
         },
         "trace": {
             "outcome": _outcome(result),

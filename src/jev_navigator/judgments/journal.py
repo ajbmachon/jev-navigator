@@ -23,7 +23,7 @@ import json
 import os
 import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import CancelledError
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -213,11 +213,22 @@ def _response_fields(response: RawResponse, *, keep_error_body: bool) -> dict:
     fields = {"status": response.status, "content_type": response.content_type, "exact": response.exact}
     if keep_error_body or not _is_error_status(response.status):
         return {**fields, "body_base64": _base64(response.body)}
-    return {
-        **fields,
-        "body_length": len(response.body),
-        "body_sha256": hashlib.sha256(response.body).hexdigest(),
-    }
+    return {**fields, **_body_digest(response.body)}
+
+
+def error_text_digested(record: Mapping) -> dict:
+    """A written journal record as it reads with error text off: an error message keeps only its
+    length and SHA-256, and so does a body with an error status. A record without either is unchanged."""
+    digested = dict(record)
+    if "message" in digested:
+        digested.update(message_fields(digested.pop("message"), keep_text=False))
+    if "body_base64" in digested and _is_error_status(digested.get("status")):
+        digested.update(_body_digest(base64.b64decode(digested.pop("body_base64"))))
+    return digested
+
+
+def _body_digest(body: bytes) -> dict:
+    return {"body_length": len(body), "body_sha256": hashlib.sha256(body).hexdigest()}
 
 
 def _is_error_status(status: int | None) -> bool:
@@ -250,3 +261,26 @@ def _request_without_text(request: JournalRequest) -> dict:
         "question_ids": list(request.questions),
         "state_sha256": content_hash(request.state),
     }
+
+
+def keeps_request_text(path: Path) -> bool:
+    """Whether the run file at ``path`` holds the text of any request: a journal written with
+    ``keep_request_text`` (a request's state and body, or a body as sent) or an answer store written
+    with ``keep_requests`` (a record's request, or its body as sent). A line that is not a JSON
+    record, such as one a crash cut off, tells nothing."""
+    with path.open() as lines:
+        return any(_holds_request_text(record) for record in _records(lines))
+
+
+def _holds_request_text(record: Mapping) -> bool:
+    if record.get("sent_body_base64") is not None or record.get("request") is not None:
+        return True
+    return record.get("kind") == "request" and "body_base64" in record
+
+
+def _records(lines: Iterable[str]) -> Iterator[Mapping]:
+    for line in lines:
+        try:
+            yield json.loads(line)
+        except ValueError:
+            continue
