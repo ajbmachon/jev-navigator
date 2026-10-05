@@ -1,9 +1,10 @@
 """Which ast-grep language parses a file, which syntax nodes are functions, and how to read their names.
 
 A ``.js`` file whose leading comments carry the ``@flow`` pragma parses as ``flow``: flow uses
-ast-grep's available ``tsx`` grammar, selected
-per scan through a ``languageGlobs`` sgconfig. What that grammar cannot recover still surfaces as
-ERROR nodes, so incomplete coverage stays visible."""
+ast-grep's available ``tsx`` grammar, selected per scan through a ``languageGlobs`` sgconfig. A
+JavaScript file without the pragma that the JavaScript grammar only partly reads is read as flow
+once more (``scope_scan``). What neither grammar can recover still surfaces as ERROR nodes, so
+incomplete coverage stays visible."""
 
 from __future__ import annotations
 
@@ -114,6 +115,11 @@ FLOW_SGCONFIG = 'languageGlobs:\n  tsx:\n    - "*.js"\n    - "*.jsx"\n    - "*.m
 def grammar_of(language: str) -> str:
     """The ast-grep language whose grammar parses ``language`` (flow rides on the tsx grammar)."""
     return "tsx" if language == FLOW_LANGUAGE else language
+
+
+def sgconfig_of(language: str) -> str | None:
+    """The sgconfig a scan reading ``language`` passes, or None for the neutral one."""
+    return FLOW_SGCONFIG if language == FLOW_LANGUAGE else None
 
 
 _DECLARED_NAME = re.compile(

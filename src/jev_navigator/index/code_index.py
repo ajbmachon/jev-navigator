@@ -339,6 +339,12 @@ class CodeIndex:
         self._reached.update(files)
         return {file: self._facts[file] for file in files if file in self._facts}
 
+    def read_language(self, file: str) -> str | None:
+        """The language ``file``'s facts were read as, so every later scan of the file reads it with
+        the same grammar; None when no grammar read it."""
+        facts = self.facts_in_files([file]).get(file)
+        return facts.language if facts is not None else None
+
     def definitions_in(self, file: str) -> tuple[Span, ...]:
         """The named functions, classes and declarations in ``file``, from the name table, so a
         warm index answers without loading the file's facts."""
@@ -633,8 +639,7 @@ class CodeIndex:
 
     def _parse(self, contents: Mapping[str, bytes]) -> None:
         """Parses the files whose bytes are ``contents``; the caller holds the facts lock."""
-        to_scan = tuple(contents)
-        scanned = self._run_scan("facts", lambda: self._scan_available_facts(to_scan), len(to_scan))
+        scanned = self._run_scan("facts", lambda: self._scan_available_facts(contents), len(contents))
         for file, facts in scanned.items():
             if self._read_bytes(file) is None:
                 continue
@@ -664,9 +669,12 @@ class CodeIndex:
                 self._unparsed.add("facts", (file,))
         return to_parse
 
-    def _scan_available_facts(self, files: Sequence[str]) -> dict[str, FileFacts]:
+    def _scan_available_facts(self, contents: Mapping[str, bytes]) -> dict[str, FileFacts]:
         return self._on_available(
-            tuple(files), lambda remaining: scan_facts(remaining, self.root, self._unparsed)
+            tuple(contents),
+            lambda remaining: scan_facts(
+                {file: contents[file] for file in remaining}, self.root, self._unparsed
+            ),
         )
 
     def _on_available(self, files: tuple[str, ...], run: Callable[[tuple[str, ...]], _Result]) -> _Result:

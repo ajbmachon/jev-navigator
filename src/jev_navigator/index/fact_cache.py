@@ -14,8 +14,8 @@ from pathlib import Path
 from ..cache_root import cache_root
 from ..confirmation import day_of, today
 from . import imports, languages, scope_scan, spans, tools
-from .languages import FLOW_LANGUAGE, FLOW_SGCONFIG, parse_language
-from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch, fact_rules
+from .languages import FLOW_LANGUAGE, parse_language, sgconfig_of
+from .scope_scan import READ_AGAIN_AS_FLOW, CallMatch, FileFacts, FileStructure, ReferenceMatch, fact_rules
 from .spans import Span
 from .tools import ast_grep_version
 
@@ -131,9 +131,12 @@ def facts_identity() -> str:
 @cache
 def _rules_identity(language: str) -> str:
     """Computed once per language and process: the rules and the code that reads matches do not
-    change while it runs. A test that patches a rule clears it with ``_rules_identity.cache_clear``."""
+    change while it runs. JavaScript facts may come from the flow rules too, so those count for it.
+    A test that patches a rule clears it with ``_rules_identity.cache_clear``."""
     rules = fact_rules([language]) if language in languages.FUNCTION_KINDS else ""
-    config = FLOW_SGCONFIG if language == FLOW_LANGUAGE else ""
+    config = sgconfig_of(language) or ""
+    if language == READ_AGAIN_AS_FLOW:
+        rules, config = f"{rules}\0{fact_rules([FLOW_LANGUAGE])}", sgconfig_of(FLOW_LANGUAGE)
     return hashlib.sha256(f"{rules}\0{config}\0{_match_reader_source()}".encode()).hexdigest()
 
 
@@ -163,6 +166,7 @@ def _encode(facts: FileFacts) -> dict:
         "incomplete": facts.incomplete,
         "export_names": list(facts.export_names),
         "unparsed_lines": [list(stretch) for stretch in facts.unparsed_lines],
+        "language": facts.language,
     }
 
 
@@ -184,4 +188,5 @@ def _decode(file: str, raw: dict) -> FileFacts:
         bool(raw["incomplete"]),
         tuple(raw.get("export_names", ())),
         tuple((int(start), int(end)) for start, end in raw["unparsed_lines"]),
+        language=raw["language"],
     )

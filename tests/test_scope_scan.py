@@ -4,14 +4,15 @@ import json
 from pathlib import Path
 
 import pytest
-from git_repos import commit_files, write_files
+from git_repos import commit_files, read_files, write_files
 
+from jev_navigator.comments import find_comments
 from jev_navigator.directives.find_code import Outcome, find_code
 from jev_navigator.directives.places import neighbours_and_omissions, place_for_line
 from jev_navigator.index import listing, scope_scan, tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.index.languages import has_flow_pragma, language_of
+from jev_navigator.index.languages import FLOW_LANGUAGE, FLOW_SGCONFIG, has_flow_pragma, language_of
 from jev_navigator.index.scope_scan import OPAQUE_RECEIVER, FileFacts, FileStructure, Unparsed, scan_facts
 from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
@@ -235,8 +236,8 @@ def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp
 
     empty = FileFacts(FileStructure((), (), ()), (), ())
 
-    unsupported = scan_facts(["notes.md"], tmp_path, Unparsed())
-    mixed = scan_facts(["module.py", "notes.md"], tmp_path, Unparsed())
+    unsupported = scan_facts(read_files(tmp_path, ["notes.md"]), tmp_path, Unparsed())
+    mixed = scan_facts(read_files(tmp_path, ["module.py", "notes.md"]), tmp_path, Unparsed())
 
     assert unsupported == {"notes.md": empty}
     assert mixed["module.py"].structure.functions == (Span("module.py", 1, 1, "greet"),)
@@ -282,9 +283,9 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
     )
     files = [file for file in listing.working_files(sample_repo).files if language_of(file)]
 
-    narrow = scan_facts(files, sample_repo, Unparsed())
+    narrow = scan_facts(read_files(sample_repo, files), sample_repo, Unparsed())
     monkeypatch.setattr(scope_scan, "decode_match", json.loads)
-    whole = scan_facts(files, sample_repo, Unparsed())
+    whole = scan_facts(read_files(sample_repo, files), sample_repo, Unparsed())
 
     assert {language_of(file) for file in files} == {"python", "typescript", "tsx", "javascript"}
     assert any(facts.incomplete for facts in whole.values())
@@ -317,7 +318,7 @@ def test_a_module_declaration_is_printed_without_the_whole_file(
     monkeypatch.setattr(tools, "ast_grep_rules", recorded_rules)
 
     # Act
-    facts = scan_facts([file], tmp_path, Unparsed())
+    facts = scan_facts(read_files(tmp_path, [file]), tmp_path, Unparsed())
 
     # Assert
     declarations = [match for match in printed if match["ruleId"] == "declaration"]
@@ -365,7 +366,7 @@ def test_calls_on_one_line_keep_their_source_order_on_every_scan(tmp_path: Path)
     orders = {
         tuple(
             (call.line, call.name)
-            for call in scan_facts(["order.js"], tmp_path, Unparsed())["order.js"].calls
+            for call in scan_facts(read_files(tmp_path, ["order.js"]), tmp_path, Unparsed())["order.js"].calls
         )
         for _ in range(50)
     }
@@ -695,6 +696,123 @@ def test_an_unsupported_flow_construct_keeps_its_file_incomplete(tmp_path: Path)
     assert index.unparsed_files == {"src/native/RootTag.js"}
 
 
+# Parse Server's shape: Babel strips Flow types from every file, so most of its typed files carry no
+# `@flow` pragma (src/Config.js, src/triggers.js and src/LiveQuery/Subscription.js at 8.6.95).
+UNMARKED_FLOW = {
+    "src/Config.js": (
+        "import AppCache from './cache';\n"
+        "import type { Subscription } from './Subscription';\n"
+        "\n"
+        "export class Config {\n"
+        "  static get(applicationId: string, mount: string) {\n"
+        "    return AppCache.get(applicationId);\n"
+        "  }\n"
+        "}\n"
+    ),
+    "src/triggers.js": (
+        "export function triggerExists(className: string, type: string, applicationId: string): boolean {\n"
+        "  return getTrigger(className, type, applicationId) != undefined;\n"
+        "}\n"
+        "\n"
+        "export function getTrigger(className, type, applicationId) {\n"
+        "  return null;\n"
+        "}\n"
+    ),
+    "src/Subscription.js": (
+        "export type QueryData = { [attr: string]: any };\n"
+        "\n"
+        "export class Subscription {\n"
+        "  // It is query condition eg query.where\n"
+        "  query: QueryData;\n"
+        "  className: string;\n"
+        "\n"
+        "  hasSubscribingClient(clientId: number): boolean {\n"
+        "    return true;\n"
+        "  }\n"
+        "}\n"
+    ),
+}
+
+
+def test_javascript_with_flow_types_and_no_pragma_parses_fully(tmp_path: Path) -> None:
+    # Arrange
+    index = committed(tmp_path, UNMARKED_FLOW)
+
+    # Act
+    names = {file: {span.name for span in index.symbols_in(file)} for file in UNMARKED_FLOW}
+
+    # Assert
+    assert index.unparsed_files == set()
+    assert names == {
+        "src/Config.js": {"Config", "get"},
+        "src/triggers.js": {"triggerExists", "getTrigger"},
+        "src/Subscription.js": {"Subscription", "hasSubscribingClient"},
+    }
+    assert [site.file for site in index.find_callers("getTrigger")] == ["src/triggers.js"]
+
+
+def test_javascript_the_flow_reading_reads_worse_keeps_its_own_facts(tmp_path: Path) -> None:
+    # Arrange: a syntax error no grammar reads, and a variable named `as`, which minified JavaScript
+    # uses and the flow reading cannot read
+    source = (
+        "export function count(n) {\n  let as = n;\n  return as;\n}\n\n"
+        "export function broken() {\n  return 1 +* 2;\n}\n"
+    )
+    index = committed(tmp_path, {"src/broken.js": source})
+
+    # Act
+    [facts] = index.facts_in_files(["src/broken.js"]).values()
+
+    # Assert
+    assert index.unparsed_files == {"src/broken.js"}
+    assert facts.unparsed_lines == ((7, 7),)
+    assert [span.name for span in index.functions_in("src/broken.js")] == ["count", "broken"]
+
+
+def test_javascript_both_readings_leave_equally_unread_stays_javascript(tmp_path: Path) -> None:
+    # Arrange: a syntax error each grammar leaves one line unread at
+    source = {"src/broken.js": "export function broken() {\n  return 1 +* 2;\n}\n"}
+    write_files(tmp_path, source)
+
+    # Act
+    facts = scan_facts(read_files(tmp_path, source), tmp_path, Unparsed())
+
+    # Assert
+    assert (facts["src/broken.js"].language, facts["src/broken.js"].unparsed_lines) == (
+        "javascript",
+        ((2, 2),),
+    )
+
+
+def test_comments_in_flow_typed_javascript_without_the_pragma_are_read_as_flow(
+    tmp_path: Path, ast_grep_runs
+) -> None:
+    # Arrange: on Parse Server's src/GraphQL/ParseGraphQLSchema.js the JavaScript grammar swallowed
+    # lines 65 to 500 and 7 of its 24 comments; the comment scan reads a file as its facts were read
+    index = committed(tmp_path, UNMARKED_FLOW)
+
+    # Act
+    found = find_comments(index, ["src/Subscription.js"])
+
+    # Assert
+    comment_runs = [config for rule, config, _ in ast_grep_runs if rule == "id: comment"]
+    assert comment_runs == [FLOW_SGCONFIG]
+    assert [block.span.start for block in found.kept] == [4]
+    assert found.refused_files == {}
+
+
+def test_whether_a_file_is_flow_is_judged_by_its_first_read_bytes(tmp_path: Path) -> None:
+    # Arrange: the index first read the pragma; the disk now holds plain JavaScript
+    (tmp_path / "typed.js").write_text("export function typed(value) {\n  return value;\n}\n")
+    first_read = {"typed.js": b"// @flow\nexport function typed(value) {\n  return value;\n}\n"}
+
+    # Act
+    facts = scan_facts(first_read, tmp_path, Unparsed())
+
+    # Assert
+    assert facts["typed.js"].language == FLOW_LANGUAGE
+
+
 BROKEN_FLOW = "// @flow\nexport class Broken {\n  find(a: string:\n"
 
 
@@ -845,7 +963,7 @@ def test_a_receiver_is_kept_only_as_a_plain_chain_of_names(tmp_path: Path) -> No
     commit_files(tmp_path, RECEIVERS)
 
     # Act
-    facts = scan_facts(sorted(RECEIVERS), tmp_path, Unparsed())
+    facts = scan_facts(read_files(tmp_path, sorted(RECEIVERS)), tmp_path, Unparsed())
 
     # Assert
     calls = {(call.name, call.receiver) for fact in facts.values() for call in fact.calls}

@@ -12,7 +12,7 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_files, read_files
 
 from jev_navigator.index import code_index, languages, tools
 from jev_navigator.index.code_index import CodeIndex
@@ -49,9 +49,10 @@ def callback_tree(root: Path, file_count: int) -> tuple[list[str], int]:
 
 
 def peak_bytes_while_scanning(root: Path, files: list[str]) -> int:
+    contents = read_files(root, files)
     tracemalloc.start()
     tracemalloc.reset_peak()
-    scan_facts(files, root, Unparsed())
+    scan_facts(contents, root, Unparsed())
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     return peak
@@ -59,7 +60,7 @@ def peak_bytes_while_scanning(root: Path, files: list[str]) -> int:
 
 def scanned(root: Path) -> tuple[dict, frozenset[str]]:
     unparsed = Unparsed()
-    facts = scan_facts(sorted(MIXED_SCOPE), root, unparsed)
+    facts = scan_facts(read_files(root, sorted(MIXED_SCOPE)), root, unparsed)
     return facts, unparsed.files
 
 
@@ -263,7 +264,9 @@ def test_symbols_on_the_same_lines_are_ordered_by_name_on_every_scan(tmp_path: P
     (tmp_path / "chain.ts").write_text("export const o = { b() { return 1; }, a() { return 2; } };\n")
 
     # Act: a fresh parse each time, since ast-grep may print matches in any order.
-    runs = [scan_facts(["chain.ts"], tmp_path, Unparsed())["chain.ts"] for _ in range(5)]
+    runs = [
+        scan_facts(read_files(tmp_path, ["chain.ts"]), tmp_path, Unparsed())["chain.ts"] for _ in range(5)
+    ]
 
     # Assert
     assert all(run == runs[0] for run in runs)
@@ -413,7 +416,7 @@ def test_a_declaration_on_a_first_line_after_a_byte_order_mark_keeps_its_name(tm
     (tmp_path / "flags.ts").write_bytes("\ufeffexport const enabled = true;\n".encode())
 
     # Act
-    facts = scan_facts(["settings.py", "flags.ts"], tmp_path, Unparsed())
+    facts = scan_facts(read_files(tmp_path, ["settings.py", "flags.ts"]), tmp_path, Unparsed())
 
     # Assert
     assert [span.name for span in facts["settings.py"].structure.declarations] == ["LIMIT", "OTHER"]

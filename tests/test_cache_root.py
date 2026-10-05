@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from git_repos import read_files
 
 from jev_navigator.cache_root import cache_root
 from jev_navigator.index.code_index import CodeIndex
@@ -97,7 +98,7 @@ def test_facts_planted_in_the_suites_own_cache_never_reach_a_tests_index(
     content = f"def real():\n    return {uuid.uuid4().int}\n"
     (tmp_path / "module.py").write_text(content)
     (tmp_path / "planted.py").write_text("def planted():\n    return 1\n")
-    wrong = scan_facts(["planted.py"], tmp_path, Unparsed())["planted.py"]
+    wrong = scan_facts(read_files(tmp_path, ["planted.py"]), tmp_path, Unparsed())["planted.py"]
     planted = FactCache(outer_cache_root / "facts")
     before = set(planted.root.rglob("*.json"))
     planted.save("module.py", content.encode(), wrong)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 
@@ -37,3 +37,8 @@ def commit_all(root: Path) -> None:
 def commit_files(root: Path, files: Mapping[str, str]) -> None:
     write_files(root, files)
     commit_all(root)
+
+
+def read_files(root: Path, files: Iterable[str]) -> dict[str, bytes]:
+    """Each file's bytes as an index first reads them, for calling the fact scan directly."""
+    return {file: (root / file).read_bytes() for file in files}

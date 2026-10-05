@@ -13,7 +13,7 @@ from . import operations
 from .facts import DEFAULT_COMMENT_RULES, Fact, FactRule, find_facts
 from .index import tools
 from .index.code_index import CodeIndex
-from .index.languages import language_of
+from .index.languages import grammar_of, language_of, sgconfig_of
 from .index.spans import CodeSlice, Span
 
 
@@ -169,9 +169,13 @@ def comment_facts(text: str, rules: Sequence[FactRule] = DEFAULT_COMMENT_RULES) 
 def _comments_in_file(
     index: CodeIndex, file: str, rules: Sequence[FactRule]
 ) -> tuple[list[CommentBlock], str | None]:
-    """The file's comment blocks, or no blocks and the reason when the parse guard refused the file."""
+    """The file's comment blocks, read with the grammar its facts were read with, or no blocks and the
+    reason when the index could not read the file."""
+    language = index.read_language(file)
+    if language is None:
+        return [], index.unavailable_files.get(file)
     refused: dict[str, str] = {}
-    raw = _comment_ranges(_comment_nodes(index, file, refused))
+    raw = _comment_ranges(_comment_nodes(index, file, language, refused))
     if file in refused:
         return [], refused[file]
     lines = index.lines(file)
@@ -179,12 +183,10 @@ def _comments_in_file(
     return sorted(blocks + _docstrings(index, file, lines, rules), key=lambda block: block.span.start), None
 
 
-def _comment_nodes(index: CodeIndex, file: str, refused: dict[str, str]) -> list[dict]:
-    language = language_of(file)
-    if language is None:
-        return []
-    rule = f"id: comment\nlanguage: {language}\nrule:\n  kind: comment"
-    return list(tools.ast_grep_rules(rule, [file], index.root, refused=refused))
+def _comment_nodes(index: CodeIndex, file: str, language: str, refused: dict[str, str]) -> list[dict]:
+    rule = f"id: comment\nlanguage: {grammar_of(language)}\nrule:\n  kind: comment"
+    config = sgconfig_of(language)
+    return list(tools.ast_grep_rules(rule, [file], index.root, config=config, refused=refused))
 
 
 def _comment_ranges(matches: Sequence[dict]) -> list[tuple[int, int]]:
