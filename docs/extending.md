@@ -170,6 +170,15 @@ omitted. Each run retains its report, manifest and request journal. An `--out` f
 searched directory is excluded from the CLI's source inventory so repeated searches do not search
 their own evidence. Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
 
+The CLI indexes every file under the search root whether git tracks it or not, minus ignored ones: in a
+Git worktree by git's ignore rules, including the lines of an enclosing repository's .gitignore that
+match the root, and outside Git by ripgrep's ignore files. Each file or folder left out (ignored, a
+separate git repository, a symbolic link) is named with its reason in `search.not_indexed_files`,
+`trace.not_indexed_files` or the statistics pack's `coverage.not_indexed`; the reports count them by
+reason and top folder, so thousands of ignored build outputs stay one row. A left-out folder that holds
+no indexed file is named once, ending in `/`. A file that is new or edited since the last commit is
+read from the disk, and its slices carry the commit plus `+worktree`.
+
 Agents can pass the same CLI request as JSON with `jvn --json request.json`, an inline JSON object,
 or `jvn --json -` for stdin. `jvn schema find` emits its JSON Schema without model calls. The CLI parser remains the single owner of options, types and defaults. `target` is
 required; `command` defaults to `find`. JSON mode emits the result and evidence-pack paths on

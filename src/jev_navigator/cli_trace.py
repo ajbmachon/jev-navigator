@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +47,7 @@ def create_trace_evidence_pack(
     answers_from: Path | None = None,
     answer_store: Path | None = None,
     keep_requests: bool = False,
+    keep_error_text: bool = True,
 ) -> dict:
     """Trace the workflow around ``starts`` and write the reviewable evidence pack to ``output``.
 
@@ -59,7 +61,8 @@ def create_trace_evidence_pack(
     replay without a new request. ``answer_store`` is the shared store file behind the pack
     (default ``shared_store_path()``). ``question`` is
     the workflow question every obligation is asked about. By default the pack keeps code locations
-    and request hashes; ``keep_requests`` also keeps the code and request text.
+    and request hashes; ``keep_requests`` also keeps the code and request text. Error messages and
+    error bodies are kept unless ``keep_error_text`` is False.
 
     Returns the manifest that is persisted as ``manifest.json`` next to ``report.md``,
     ``answers.jsonl`` (the shared answer store) and ``journal.jsonl`` (the shared request journal
@@ -86,7 +89,9 @@ def create_trace_evidence_pack(
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
-    journal = ProgressJournal(journal_path, progress, keep_request_text=keep_requests)
+    journal = ProgressJournal(
+        journal_path, progress, keep_request_text=keep_requests, keep_error_text=keep_error_text
+    )
     progress.start()
     outcome = "failed"
     try:
@@ -164,7 +169,7 @@ def _manifest(
             "repository": str(repository),
             "revision": index.commit,
             "prefixes": list(prefixes),
-            "tracked_files": len(index.files),
+            "indexed_files": len(index.files),
         },
         "thresholds": thresholds.as_dict(),
         "depth": depth,
@@ -188,6 +193,7 @@ def _manifest(
             "excluded": [_span_json(span) for span in result.excluded],
             "unresolved_links": [_link_json(link) for link in result.unresolved_links],
             "unavailable_files": index.unavailable_files,
+            "not_indexed_files": index.not_indexed_files,
         },
     }
 
@@ -260,6 +266,26 @@ def unavailable_file_lines(files: Mapping[str, str]) -> list[str]:
     return [f"- `{file}`: {reason}" for file, reason in sorted(files.items())]
 
 
+def not_indexed_lines(entries: Mapping[str, str], listed_in: str) -> list[str]:
+    """The files and folders the listing left out, counted by reason and top folder, so a build output of
+    thousands of ignored files stays one row; ``listed_in`` names where every one is listed by name."""
+    if not entries:
+        return []
+    counts = Counter((reason, _top_folder(path)) for path, reason in entries.items())
+    return [
+        f"{len(entries):,} files and folders were not indexed; {listed_in} names each one.",
+        "",
+        "| Reason | Folder | Entries |",
+        "| --- | --- | ---: |",
+        *(f"| {reason} | {folder} | {count:,} |" for (reason, folder), count in sorted(counts.items())),
+    ]
+
+
+def _top_folder(path: str) -> str:
+    folder, separator, _ = path.partition("/")
+    return f"`{folder}/`" if separator else "top level"
+
+
 def _report(manifest: dict) -> str:
     trace = manifest["trace"]
     lines = [
@@ -311,6 +337,9 @@ def _report(manifest: dict) -> str:
             ]
     if trace["unavailable_files"]:
         lines += ["", "## Files without facts", "", *unavailable_file_lines(trace["unavailable_files"])]
+    if trace["not_indexed_files"]:
+        listed_in = "`trace.not_indexed_files` in `manifest.json`"
+        lines += ["", "## Files not indexed", "", *not_indexed_lines(trace["not_indexed_files"], listed_in)]
     lines += ["", "## Unresolved static links", ""]
     if not trace["unresolved_links"]:
         lines.append("Every static link in the walked component is resolved.")

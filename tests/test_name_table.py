@@ -9,13 +9,14 @@ import sqlite3
 import threading
 import time
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 from git_repos import commit_files, git
 
 from jev_navigator.confirmation import day_of, today
-from jev_navigator.index import fact_cache, languages, name_table, tools
+from jev_navigator.index import fact_cache, languages, name_table, scope_scan, tools
 from jev_navigator.index.code_index import CodeIndex
 
 REPOSITORY = {
@@ -423,6 +424,80 @@ def test_processes_building_the_table_at_once_leave_it_whole(
         for path in (cache / "jev-navigator" / "names").glob("*.sqlite"):
             with sqlite3.connect(path) as database:
                 assert database.execute("pragma integrity_check").fetchone() == ("ok",)
+
+
+def test_a_cold_scope_writes_its_rows_in_a_few_transactions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: 450 file contents, each waiting for a disk sync when its transaction commits
+    files = {f"app/m{n}.py": f"def f{n}():\n    return {n}\n" for n in range(450)}
+    commit_files(tmp_path, files)
+    commits: list[str] = []
+    real_open = name_table.open_shared_database
+
+    def traced_open(*arguments):
+        database = real_open(*arguments)
+        database.set_trace_callback(
+            lambda statement: commits.append(statement) if statement == "COMMIT" else None
+        )
+        return database
+
+    monkeypatch.setattr(name_table, "open_shared_database", traced_open)
+
+    # Act
+    definitions = [CodeIndex.from_git(tmp_path).find_definition(f"f{n}") for n in (0, 449)]
+
+    # Assert
+    assert [[span.file for span in found] for found in definitions] == [["app/m0.py"], ["app/m449.py"]]
+    assert len(commits) == 1
+
+
+def contents_with_calls(prefix: str, count: int, rows: int) -> dict[str, scope_scan.FileFacts]:
+    """``count`` file contents of ``rows`` calls each, keyed by made-up blob ids."""
+    return {
+        hashlib.sha1(f"{prefix}{n}".encode()).hexdigest(): scope_scan.FileFacts(
+            scope_scan.FileStructure((), (), ()),
+            tuple(
+                scope_scan.CallMatch(f"f{n}.ts", line + 1, f"name{line % 4000}", None) for line in range(rows)
+            ),
+            (),
+        )
+        for n in range(count)
+    }
+
+
+def _begin_a_write_while_another_writes(path: str, started, outcome) -> None:
+    started.wait()
+    time.sleep(0.2)
+    with closing(sqlite3.connect(path, timeout=1)) as database:
+        try:
+            database.execute("begin immediate")
+            database.commit()
+            outcome.put("written")
+        except sqlite3.OperationalError as error:
+            outcome.put(str(error))
+
+
+def test_a_second_process_writes_while_a_large_scope_is_added(private_cache_root: Path) -> None:
+    # Arrange: 300,000 rows to add; another process may wait one second for the write lock (JVN
+    # waits 30), so it fails if one transaction held the lock for the whole add
+    table = name_table.NameTable()
+    large = contents_with_calls("large", 60, 5_000)
+    context = multiprocessing.get_context("spawn")
+    started, outcome = context.Event(), context.Queue()
+    other = context.Process(
+        target=_begin_a_write_while_another_writes, args=(str(table.path), started, outcome)
+    )
+    other.start()
+
+    # Act
+    started.set()
+    table.add(large)
+    other.join(timeout=60)
+
+    # Assert
+    assert outcome.get(timeout=5) == "written"
+    assert len(table.rows("name0")) == 60 * 2
 
 
 def test_the_table_lives_in_the_cache_root(private_cache_root: Path) -> None:

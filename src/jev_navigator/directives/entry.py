@@ -15,6 +15,7 @@ from pathlib import PurePosixPath
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import Span
+from ..judgments.answers import AnswerSource, answered_by
 from ..judgments.judge import Judge, PickResult
 from ..judgments.questions import Pick, serialized_chars
 from .places import Place, function_place, range_place
@@ -62,6 +63,8 @@ class EntryDecision:
     probabilities: dict[str, float]
     request_sha256: str | None
     options: tuple[dict, ...]
+    answered_by: AnswerSource | None = None
+    """The request and question that chose; None for a level with one option, which asks nothing."""
 
     def to_json(self) -> dict:
         return {
@@ -72,6 +75,7 @@ class EntryDecision:
             "probabilities": self.probabilities,
             "request_sha256": self.request_sha256,
             "options": list(self.options),
+            **answered_by(self.answered_by),
         }
 
 
@@ -531,5 +535,6 @@ def _pick(judge, question, target, level, parent, entries, descriptions, identif
         dict(result.probabilities),
         result.request_sha256,
         option_rows,
+        result.answered_by,
     )
     return entries[position], decision, dict(result.probabilities)

@@ -9,7 +9,10 @@ own journal (their runtime's, an evaluation journal); ``JsonlJournal`` is a simp
 
 A request holds code, and the library cannot know whose code it is. So by default ``JsonlJournal``
 keeps only the request hash, the question ids and a hash of the state; the full request text is kept
-only with ``keep_request_text=True``, which is meant for your own or open-source code.
+only with ``keep_request_text=True``, which is meant for your own or open-source code. An error can
+echo its request (a 422 validation body often does). Its message and the body of a response with an
+error status are kept as they are, unless ``keep_error_text=False`` (the CLI's ``--no-error-text`` or
+``JEV_NAVIGATOR_ERROR_TEXT=off``) keeps only their length and SHA-256 (``message_fields``).
 """
 
 from __future__ import annotations
@@ -17,9 +20,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import threading
 import uuid
 from collections.abc import Mapping
+from concurrent.futures import CancelledError
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -77,6 +82,36 @@ class RawAttempt:
     route: str | None = None
 
 
+ERROR_TEXT_VARIABLE = "JEV_NAVIGATOR_ERROR_TEXT"
+"""``on`` (the default) keeps error messages and error bodies in run files; ``off`` keeps their digests."""
+
+
+def error_text_kept(no_error_text: bool) -> bool:
+    """Whether a run keeps error text: not with ``--no-error-text``, else as ``ERROR_TEXT_VARIABLE``
+    says."""
+    if no_error_text:
+        return False
+    setting = os.environ.get(ERROR_TEXT_VARIABLE, "on")
+    if setting not in ("on", "off"):
+        raise ValueError(f"{ERROR_TEXT_VARIABLE}={setting!r} must be on or off")
+    return setting == "on"
+
+
+def error_message(error: BaseException) -> str:
+    """The message an error is recorded with; a bare ``CancelledError`` says what it means."""
+    if isinstance(error, CancelledError) and not str(error):
+        return "the request was cancelled after it was sent"
+    return str(error)
+
+
+def message_fields(message: str, *, keep_text: bool) -> dict:
+    """An error message as a run file stores it: the text only when ``keep_text``, otherwise its
+    length and SHA-256, so a reader can still match two records of one error without the text."""
+    if keep_text:
+        return {"message": message}
+    return {"message_length": len(message), "message_sha256": hashlib.sha256(message.encode()).hexdigest()}
+
+
 class AttemptJournalCallbackError(RuntimeError):
     """Prevents the provider SDK from retrying after its attempt sink failed to persist."""
 
@@ -94,13 +129,16 @@ class Journal(Protocol):
 
     def record_attempt(self, request_id: str, attempt: RawAttempt) -> None: ...
 
-    def record_failure(self, request_id: str, error: str, response: RawResponse | None = None) -> None: ...
+    def record_failure(
+        self, request_id: str, error: BaseException, response: RawResponse | None = None
+    ) -> None: ...
 
 
 class JsonlJournal:
-    def __init__(self, path: Path, *, keep_request_text: bool = False) -> None:
+    def __init__(self, path: Path, *, keep_request_text: bool = False, keep_error_text: bool = True) -> None:
         self.path = Path(path)
         self.keep_request_text = keep_request_text
+        self.keeps_error_text = keep_request_text or keep_error_text
         self._write_lock = threading.Lock()
 
     def record_request(self, request: JournalRequest) -> str:
@@ -127,29 +165,36 @@ class JsonlJournal:
         if attempt.route is not None:
             fields["route"] = attempt.route
         if attempt.response is not None:
-            fields.update(_response_fields(attempt.response))
+            fields.update(_response_fields(attempt.response, keep_error_body=self.keeps_error_text))
             fields["outcome"] = "response"
         else:
-            fields.update(
-                {
-                    "outcome": "failure",
-                    "error_type": attempt.error_type,
-                    "error": attempt.error,
-                }
-            )
+            fields.update({"outcome": "failure", "error_type": attempt.error_type})
+            if attempt.error is not None:
+                fields.update(message_fields(attempt.error, keep_text=self.keeps_error_text))
         self._append(fields)
 
     def record_step(self, step: Mapping) -> None:
         """Lets a ``History`` record every appended step in the same file."""
         self._append({"kind": "history_step", "step": dict(step)})
 
-    def record_failure(self, request_id: str, error: str, response: RawResponse | None = None) -> None:
+    def record_failure(
+        self, request_id: str, error: BaseException, response: RawResponse | None = None
+    ) -> None:
         fields = self._response_fields(response) if response is not None else {}
-        self._append({"kind": "failure", "request_id": request_id, "error": error, **fields})
+        message = message_fields(error_message(error), keep_text=self.keeps_error_text)
+        self._append(
+            {
+                "kind": "failure",
+                "request_id": request_id,
+                "error_type": type(error).__name__,
+                **message,
+                **fields,
+            }
+        )
 
     def _response_fields(self, response: RawResponse) -> dict:
         """The sent body holds code, so it is kept only with ``keep_request_text``."""
-        fields = _response_fields(response)
+        fields = _response_fields(response, keep_error_body=self.keeps_error_text)
         if self.keep_request_text and response.sent_body is not None:
             fields["sent_body_base64"] = _base64(response.sent_body)
         return fields
@@ -162,13 +207,21 @@ class JsonlJournal:
                 lines.write(json.dumps(line, sort_keys=True, default=str) + "\n")
 
 
-def _response_fields(response: RawResponse) -> dict:
+def _response_fields(response: RawResponse, *, keep_error_body: bool) -> dict:
+    """An answer's body is kept to replay it; a body with an error status may echo the request, so
+    without ``keep_error_body`` only its length and SHA-256 are."""
+    fields = {"status": response.status, "content_type": response.content_type, "exact": response.exact}
+    if keep_error_body or not _is_error_status(response.status):
+        return {**fields, "body_base64": _base64(response.body)}
     return {
-        "body_base64": _base64(response.body),
-        "status": response.status,
-        "content_type": response.content_type,
-        "exact": response.exact,
+        **fields,
+        "body_length": len(response.body),
+        "body_sha256": hashlib.sha256(response.body).hexdigest(),
     }
+
+
+def _is_error_status(status: int | None) -> bool:
+    return status is not None and status >= 400
 
 
 def _reported_input_tokens(body: bytes) -> int | None:

@@ -15,6 +15,7 @@ import re
 from collections.abc import Mapping
 
 from .index.code_index import CodeIndex
+from .judgments.journal import message_fields
 from .judgments.relations import without_quoted_code
 
 _LINE_RANGE = re.compile(r"[-~]")
@@ -64,6 +65,16 @@ def step_shown(step: Mapping) -> dict:
     }
     fetched = [source_shown(source, step["arguments"]["place"]) for source in step.get("fetched", [])]
     return {**step, "judgments": judgments, "fetched": fetched}
+
+
+def failure_digested(step: Mapping) -> Mapping:
+    """A history step whose failure keeps its message only as a digest (``--no-error-text``). A step
+    read back from a saved pack may already hold the digest, and stays as it is."""
+    failure = step.get("judgments", {}).get("failure", {})
+    if "message" not in failure:
+        return step
+    digest = {"type": failure["type"], **message_fields(failure["message"], keep_text=False)}
+    return {**step, "judgments": {**step["judgments"], "failure": digest}}
 
 
 def _entry_shown(entry: Mapping) -> Mapping:

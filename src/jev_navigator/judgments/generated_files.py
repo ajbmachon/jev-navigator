@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from ..index import tools
+from ..index import listing, tools
 from ..index.code_index import CodeIndex
 from ..index.file_shape import FileShape
 from ..index.scope import is_test_file
@@ -97,7 +97,7 @@ def files_naming(root: Path, paths: Sequence[str]) -> dict[str, tuple[TextHit, .
     finds the files naming any of them; each path's lines are then searched in those files alone."""
     if not paths:
         return {}
-    candidates = tools.ripgrep_files(paths, tools.listed_files(root), root)
+    candidates = tools.ripgrep_files(paths, listing.working_files(root).files, root)
     return {path: _first_lines_naming(root, path, candidates) for path in paths}
 
 

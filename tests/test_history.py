@@ -442,7 +442,9 @@ def test_each_search_step_records_judgments_candidates_and_why_the_next_place_wa
     assert [entry["operation"] for entry in steps] == ["choose_next", "open", "choose_next", "open", "stop"]
     first_choice, first_open, second_choice = steps[0], steps[1], steps[2]
     assert first_choice["arguments"]["chosen"][0]["reason"] == "start"
-    assert first_open["judgments"]["contains_target"] == {"probability": 0.1, "verdict": "no"}
+    contains_target = first_open["judgments"]["contains_target"]
+    assert (contains_target["probability"], contains_target["verdict"]) == (0.1, "no")
+    assert contains_target["answered_by"]["question_id"].startswith("contains_target@")
     offered = first_open["judgments"]["could_contain"]
     assert offered and {"place", "signature", "probability", "verdict"} <= set(offered[0])
     assert first_open["decision"] == "start judged no"

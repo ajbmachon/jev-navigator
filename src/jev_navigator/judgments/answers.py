@@ -65,11 +65,58 @@ NOT_REPORTED_TEXT = "not reported"
 
 
 @dataclass(frozen=True)
+class AnswerSource:
+    """Where one answer came from: the request's hash and the question id it was asked under, which
+    a journal's request row lists, and whether the store replayed it."""
+
+    request_sha256: str
+    question_id: str
+    from_store: bool
+
+    def to_json(self) -> dict:
+        return {
+            "request_sha256": self.request_sha256,
+            "question_id": self.question_id,
+            "from_store": self.from_store,
+        }
+
+
+ANSWERED_BY = "answered_by"
+SCORED_BY = "scored_by"
+ANSWER_SOURCE_FIELDS = frozenset({ANSWERED_BY, SCORED_BY})
+"""Run-file join keys, never shown to Jev: ``from_store`` differs between a run and its replay."""
+
+
+def answered_by(source: AnswerSource | None) -> dict:
+    """A record's ``answered_by`` field, or nothing when no request is known: the one form every run
+    file uses to join a judgment to its journal answer."""
+    return {ANSWERED_BY: source.to_json()} if source is not None else {}
+
+
+def scored_by(source: AnswerSource | None) -> dict:
+    """A queued place's ``scored_by`` field: the answer whose probability became its priority."""
+    return {SCORED_BY: source.to_json()} if source is not None else {}
+
+
+def without_answer_sources(value: object) -> object:
+    """``value`` with every answer source field removed, at any depth."""
+    if isinstance(value, Mapping):
+        return {
+            key: without_answer_sources(item)
+            for key, item in value.items()
+            if key not in ANSWER_SOURCE_FIELDS
+        }
+    if isinstance(value, list | tuple):
+        return [without_answer_sources(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
 class JevResponse:
     """``input_tokens`` is what the provider reported for the request, ``None`` when it reported
     nothing; a missing count is never 0. ``from_store`` marks a replay: it sent nothing and carries
     no count. A response composed from several requests carries none either; totals count only
-    requests sent."""
+    requests sent. Its ``sources`` name the request and question behind each of its answers."""
 
     answers: Mapping[str, Answer]
     model: str
@@ -77,6 +124,15 @@ class JevResponse:
     request_sha256: str = ""
     from_store: bool = False
     extra: Mapping[str, object] = field(default_factory=dict)
+    sources: Mapping[str, AnswerSource] = field(default_factory=dict)
+
+    def source(self, question_id: str) -> AnswerSource | None:
+        """The request and question that answered ``question_id``; None when no request is known."""
+        if question_id in self.sources:
+            return self.sources[question_id]
+        if not self.request_sha256:
+            return None
+        return AnswerSource(self.request_sha256, question_id, self.from_store)
 
     def choice(self, question_id: str) -> ChoiceAnswer:
         answer = self.answers[question_id]

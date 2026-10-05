@@ -8,7 +8,7 @@ from git_repos import commit_files, write_files
 
 from jev_navigator.directives.find_code import Outcome, find_code
 from jev_navigator.directives.places import neighbours_and_omissions, place_for_line
-from jev_navigator.index import scope_scan, tools
+from jev_navigator.index import listing, scope_scan, tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.languages import has_flow_pragma, language_of
@@ -280,7 +280,7 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             "js/index.js": ADAPTER_CALLER,
         },
     )
-    files = [file for file in tools.listed_files(sample_repo) if language_of(file)]
+    files = [file for file in listing.working_files(sample_repo).files if language_of(file)]
 
     narrow = scan_facts(files, sample_repo, Unparsed())
     monkeypatch.setattr(scope_scan, "decode_match", json.loads)

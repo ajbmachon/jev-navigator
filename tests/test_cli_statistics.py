@@ -137,7 +137,7 @@ def test_a_pack_writes_both_files_and_measures_the_whole_scope_in_one_parser_pas
     assert pack["scope"]["measured"] == ["app/basket.py", "web/cart.ts"]
     assert pack["scope"]["skipped"] == ["docs/notes.md"]
     assert pack["scope"]["unmeasured"] == [] and pack["scope"]["unparsed"] == []
-    assert pack["coverage"] == {"complete": True, "statement": "", "unavailable": {}}
+    assert pack["coverage"] == {"complete": True, "statement": "", "unavailable": {}, "not_indexed": {}}
     assert pack["limits"][0].startswith("Symbols come from the index's own parser")
 
     # Assert: what was measured stays whole in the document, while the count of it is only a summary
@@ -368,6 +368,25 @@ def test_a_file_that_could_not_be_measured_stays_a_gap_and_not_a_zero(tmp_path: 
     assert pack["counts"]["per_file"]["ops/broken.ts"]["symbol_lines"] == 3
     assert "so the count is a floor" in document
     assert pack["largest"]["caveat"] == pack["coverage"]["statement"]
+
+
+def test_the_manifest_names_every_file_left_out_and_the_report_counts_them(tmp_path: Path) -> None:
+    # Arrange: TypeScript built in place, its output ignored beside the sources it came from
+    built = {f"src/module{n}.js{suffix}": "built\n" for n in range(400) for suffix in ("", ".map")}
+    root = _write(
+        tmp_path, {".ignore": "*.js\n*.js.map\ndist/\n", "src/ties.ts": TIES, "dist/a.ts": TIES, **built}
+    )
+
+    # Act
+    pack = create_statistics_pack(root, (), tmp_path / "pack", fact_cache_dir=tmp_path / "facts")
+    report = (tmp_path / "pack" / "statistics.md").read_text()
+
+    # Assert
+    assert pack["coverage"]["not_indexed"] == {"dist/": "ignored", **dict.fromkeys(built, "ignored")}
+    assert "| ignored | `dist/` | 1 |" in report
+    assert "| ignored | `src/` | 800 |" in report
+    assert "`coverage.not_indexed` in `statistics.json`" in report
+    assert "module7.js" not in report
 
 
 def test_an_empty_scope_measures_nothing_and_fills_no_gap(

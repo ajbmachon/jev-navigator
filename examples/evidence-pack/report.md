@@ -14,6 +14,7 @@
 - Navigation elapsed: 0.043 seconds (indexing and entry selection excluded)
 - Coverage caveat: 2 candidates were not independently opened; 0 files failed a completed parser scan. Pending parser scans: none.
 - Files unavailable (disappeared or changed on disk, or refused by the parser): 0.
+- Files and folders not indexed (ignored, or otherwise left out of the listing): 0.
 
 ## Opened code
 

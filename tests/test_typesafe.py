@@ -343,8 +343,8 @@ def test_optional_priority_keeps_size_failure_but_an_auth_failure_ends_the_searc
         _stop(server)
 
     records = [json.loads(line) for line in journal_path.read_text().splitlines()]
-    cause = "max_tokens_exceeded" if status == 400 else "invalid_api_key"
-    assert any(cause in record.get("error", "") for record in records if record["kind"] == "failure")
+    cause = "InputBudgetExceededError" if status == 400 else "TypeSafeAuthenticationError"
+    assert cause in [record["error_type"] for record in records if record["kind"] == "failure"]
 
 
 @pytest.mark.parametrize("async_checks", [False, True])
@@ -707,7 +707,7 @@ def test_a_max_tokens_exceeded_response_is_typed_and_the_batch_splits_at_the_bou
     records = [json.loads(line) for line in journal_path.read_text().splitlines()]
     failures = [record for record in records if record["kind"] == "failure"]
     responses = [record for record in records if record["kind"] == "response"]
-    assert len(failures) == 1 and "max_tokens_exceeded" in failures[0]["error"]
+    assert len(failures) == 1 and failures[0]["error_type"] == "InputBudgetExceededError"
     assert len(responses) == 2 and all(record["status"] == 200 for record in responses)
     for record in responses:
         assert len(base64.b64decode(record["sent_body_base64"])) <= 40_000
@@ -852,4 +852,4 @@ def test_terminal_sdk_failure_keeps_all_attempt_responses_before_failure(
         served for _, _, _, served in exchanges
     ]
     assert failure["request_id"] == request["request_id"]
-    assert "TypeSafeInternalServerError" in failure["error"]
+    assert failure["error_type"] == "TypeSafeInternalServerError"

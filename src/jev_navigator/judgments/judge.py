@@ -17,7 +17,7 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_co
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
-from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
+from .answers import AnswerSource, JevResponse, NoulAnswer, TokenTotal, response_to_raw
 from .client import (
     AsyncJevClient,
     InputBudgetExceededError,
@@ -47,7 +47,7 @@ from .secrets import (
     refuse_if_secret,
     safe_options,
 )
-from .store import AnswerRecord, AnswerStore
+from .store import AnswerRecord, AnswerStore, StoredItemAnswer
 from .thresholds import NoulVerdict, Thresholds
 
 DEFAULT_ITEMS_PER_REQUEST = 16
@@ -83,13 +83,20 @@ class CallCapReachedError(RuntimeError):
 class CheckResult:
     """``probability`` is Jev's raw P(yes); ``verdict`` applies the current yes/no band. Callers may
     apply any band of their own to ``probability``. ``request_sha256`` identifies the masked request
-    that answered it, also when the answer came from the store."""
+    that answered it, also when the answer came from the store, and ``question_id`` the question it
+    was asked under there (None in a result saved before it was recorded)."""
 
     item: Mapping
     probability: float
     verdict: NoulVerdict
     from_store: bool
     request_sha256: str
+    question_id: str | None = None
+
+    def source(self) -> AnswerSource | None:
+        if self.question_id is None:
+            return None
+        return AnswerSource(self.request_sha256, self.question_id, self.from_store)
 
 
 @dataclass(frozen=True)
@@ -102,6 +109,7 @@ class PickResult:
     probabilities: Mapping[str, float]
     confident: bool
     request_sha256: str
+    answered_by: AnswerSource | None = None
 
 
 @dataclass(frozen=True)
@@ -773,7 +781,7 @@ class Judge:
 
     def _journal_failure(self, request_id: str | None, error: Exception, raw: RawResponse | None) -> None:
         if self.journal is not None and request_id is not None:
-            self.journal.record_failure(request_id, _failure_text(error), raw)
+            self.journal.record_failure(request_id, error, raw)
             self._failed_requests.append((error, request_id))
 
     def _propagate_attempt_journal_error(
@@ -939,10 +947,18 @@ class Judge:
     def _stored_item(self, check: Check, item: Mapping, shared: Mapping, mates: str) -> _ItemAnswer | None:
         if self.store is None or not self._knows_model():
             return None
-        stored = self.store.by_item(self._item_key(check, item, shared, mates), self._model_filter())
+        item_key = self._item_key(check, item, shared, mates)
+        stored = self.store.by_item(item_key, self._model_filter())
         if stored is None or not isinstance(stored.answer, NoulAnswer):
             return None
-        return _ItemAnswer(stored.answer.probability, True, stored.request_sha256)
+        return _ItemAnswer(
+            stored.answer.probability, True, stored.request_sha256, self._asked_as(stored, item_key)
+        )
+
+    def _asked_as(self, stored: StoredItemAnswer, item_key: str) -> str | None:
+        """The question id the stored item was asked under, from its request's record."""
+        record = self.store.by_request(stored.request_sha256, stored.model)
+        return record.item_keys.get(item_key) if record is not None else None
 
     def _item_key(self, check: Check, item: Mapping, shared: Mapping, mates: str) -> str:
         """Item content, the shared state the question refers to, the question with its wording, and
@@ -1008,6 +1024,7 @@ class _ItemAnswer:
     probability: float
     from_store: bool
     request_sha256: str
+    question_id: str | None
 
 
 @dataclass(frozen=True)
@@ -1158,7 +1175,7 @@ class _CheckPlan:
         for question_id, position in batch.slots.items():
             answer = response.noul(question_id)
             self.answered[(position, question_id)] = _ItemAnswer(
-                answer.probability, response.from_store, response.request_sha256
+                answer.probability, response.from_store, response.request_sha256, question_id
             )
 
     def answers(self) -> dict[str, list[CheckResult]]:
@@ -1180,6 +1197,7 @@ class _CheckPlan:
             self.thresholds.noul_verdict(answer.probability),
             answer.from_store,
             answer.request_sha256,
+            answer.question_id,
         )
 
 
@@ -1270,7 +1288,12 @@ async def _awaited(method, *arguments, **keywords):
 def _check_result(response: JevResponse, check: Check, state: Mapping, thresholds: Thresholds) -> CheckResult:
     probability = response.noul(check.question_id).probability
     return CheckResult(
-        state, probability, thresholds.noul_verdict(probability), response.from_store, response.request_sha256
+        state,
+        probability,
+        thresholds.noul_verdict(probability),
+        response.from_store,
+        response.request_sha256,
+        check.question_id,
     )
 
 
@@ -1313,17 +1336,12 @@ def _pick_result(response: JevResponse, question_id: str, thresholds: Thresholds
         answer.probabilities,
         thresholds.choice_is_confident(answer.confidence),
         response.request_sha256,
+        response.source(question_id),
     )
 
 
 def _argument_id(operation: str, offer: CallOffer) -> str:
     return f"{operation}.{offer.argument.question_id}"
-
-
-def _failure_text(error: Exception) -> str:
-    if isinstance(error, CancelledError) and not str(error):
-        return f"{type(error).__name__}: the request was cancelled after it was sent"
-    return f"{type(error).__name__}: {error}"
 
 
 def _batches(plan: _CheckPlan) -> list[list[int]]:

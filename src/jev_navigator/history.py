@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
-from .judgments.answers import JevResponse
+from .judgments.answers import AnswerSource, JevResponse, without_answer_sources
 from .judgments.judge import Judge
 from .judgments.questions import Check, content_hash, serialized_chars
 from .judgments.thresholds import NoulVerdict
@@ -93,16 +93,18 @@ class HistoryStep:
         }
 
     def history_json(self) -> dict:
-        """The step without its judgments or decision: what the ``history`` section shows."""
+        """The step without its judgments or decision: what the ``history`` section shows. Like every
+        section Jev reads, it leaves out the answer sources a run file keeps."""
         full = self.to_json()
-        return {"operation": full["operation"], "arguments": full["arguments"], "fetched": full["fetched"]}
+        arguments = without_answer_sources(full["arguments"])
+        return {"operation": full["operation"], "arguments": arguments, "fetched": full["fetched"]}
 
     def decision_json(self) -> dict:
-        """The step without its code: what the ``decisions`` section shows."""
+        """The step without its code or answer sources: what the ``decisions`` section shows."""
         return {
             "operation": self.operation,
-            "arguments": dict(self.arguments),
-            "judgments": dict(self.judgments),
+            "arguments": without_answer_sources(self.arguments),
+            "judgments": without_answer_sources(self.judgments),
             "decision": self.decision,
         }
 
@@ -286,6 +288,7 @@ class HistoryJudgment:
     chars: int
     evictions: tuple[dict, ...]
     sections: tuple[str, ...] = DEFAULT_STOP_SECTIONS
+    answered_by: AnswerSource | None = None
 
 
 @dataclass(frozen=True)
@@ -398,7 +401,8 @@ def _judged(
         chars = history.size(group.state)
         for name, check in group.checks.items():
             probability = response.noul(check.question_id).probability
-            results[name] = _judgment(judge, probability, chars, history, group.sections, exhausted)
+            judgment = _judgment(judge, probability, chars, history, group.sections, exhausted)
+            results[name] = replace(judgment, answered_by=response.source(check.question_id))
     history.previous_judgments.update(results)
     return results
 

@@ -247,7 +247,7 @@ def test_direct_system_one_journal_keeps_attempts_before_terminal_sdk_failure(tm
     assert all(record["status"] == 503 for record in attempts)
     assert all(record["request_id"] == request["request_id"] for record in attempts)
     assert failure["request_id"] == request["request_id"]
-    assert "TypeSafeInternalServerError" in failure["error"]
+    assert failure["error_type"] == "TypeSafeInternalServerError"
 
 
 def test_routed_journal_keeps_failed_primary_and_successful_backup_under_one_request(tmp_path):
@@ -348,7 +348,7 @@ def test_routed_journal_records_all_routes_before_terminal_failure(tmp_path):
     assert all(record["status"] == 503 for record in attempts)
     assert all(record["request_id"] == request["request_id"] for record in attempts)
     assert failure["request_id"] == request["request_id"]
-    assert "every route failed" in failure["error"]
+    assert failure["error_type"] == "ConnectionError"
 
 
 def test_routed_parse_failure_keeps_fallback_behavior_and_both_attempts(tmp_path):

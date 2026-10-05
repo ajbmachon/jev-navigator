@@ -905,7 +905,7 @@ def test_unsplittable_single_question_is_reported_honestly_after_a_real_attempt(
         if json.loads(line)["kind"] == "failure"
     ]
     assert len(failures) == 1
-    assert "max_tokens_exceeded" in failures[0]["error"]
+    assert failures[0]["error_type"] == "InputBudgetExceededError"
 
 
 def test_split_answers_replay_from_the_store_without_new_calls(tmp_path: Path) -> None:

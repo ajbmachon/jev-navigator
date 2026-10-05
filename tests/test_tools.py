@@ -7,7 +7,7 @@ from typing import TypedDict
 
 import msgspec
 import pytest
-from git_repos import commit_files, git
+from git_repos import git
 
 from jev_navigator.index import file_shape, tools
 from jev_navigator.index.file_shape import Placement
@@ -71,32 +71,6 @@ def test_a_failing_tool_keeps_its_whole_error_output(tmp_path: Path) -> None:
 
     # Assert
     assert str(raised.value).endswith(cause)
-
-
-def test_a_repository_git_refuses_is_reported_instead_of_listed_as_a_plain_directory(
-    tmp_path: Path, monkeypatch
-) -> None:
-    # Arrange: git refuses a repository it believes another user owns
-    repository = tmp_path / "repository"
-    commit_files(repository, {"a.py": "needle = 1\n"})
-    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
-
-    # Act and assert
-    with pytest.raises(tools.ToolFailedError, match="dubious ownership"):
-        tools.listed_files(repository)
-
-
-def test_a_plain_directory_is_listed_whatever_language_git_speaks(tmp_path: Path, monkeypatch) -> None:
-    # Arrange: a translated "not a git repository" must still mean a plain directory
-    directory = tmp_path / "plain"
-    directory.mkdir()
-    (directory / "a.py").write_text("needle = 1\n")
-    monkeypatch.setenv("LANG", "de_DE.UTF-8")
-    monkeypatch.setenv("LANGUAGE", "de")
-    monkeypatch.delenv("LC_ALL", raising=False)
-
-    # Act and assert
-    assert tools.listed_files(directory) == ("a.py",)
 
 
 INVALID_RULE = "id: broken\nlanguage: python\nrule:\n  kind: not_a_real_kind\n"
@@ -280,16 +254,3 @@ def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch, 
 
     assert found == ("a.py",)  # the search still works
     assert not marker.exists()  # but the configured preprocessor never ran
-
-
-def test_listing_outside_git_ignores_a_configured_ripgrep_filter(tmp_path: Path, monkeypatch) -> None:
-    # Outside a Git worktree the file inventory comes from `rg --files`; a ripgrep config must not
-    # change which files the index sees there either.
-    config = tmp_path / "rg.conf"
-    config.write_text("--glob=!a.py\n")
-    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
-    directory = tmp_path / "plain"
-    directory.mkdir()
-    (directory / "a.py").write_text("needle = 1\n")
-
-    assert tools.listed_files(directory) == ("a.py",)

@@ -1,6 +1,6 @@
 """Which files a search covers, decided from paths, git and file contents, never by parsing.
 
-A scope starts from the directory's file listing (``tools.listed_files``) and keeps only files JVN
+A scope starts from the directory's file listing (``listing.working_files``) and keeps only files JVN
 parses, plus markup when docs are asked for. Tests, generated code, vendored code and docs are left
 out unless asked for:
 
@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path, PurePosixPath
 
-from . import tools
+from . import listing, tools
 from .file_shape import FileShape, shape_of
 from .languages import LANGUAGE_BY_SUFFIX, language_of
 
@@ -223,7 +223,7 @@ def _is_output_folder(folder: str) -> bool:
 
 
 def _listed(root: Path, scope: Scope, changed_since_commit: str | None) -> list[str]:
-    files = [path for path in tools.listed_files(root) if _kept_by_path(scope, path)]
+    files = [path for path in listing.working_files(root).files if _kept_by_path(scope, path)]
     return files if changed_since_commit is None else _changed(root, changed_since_commit, files)
 
 

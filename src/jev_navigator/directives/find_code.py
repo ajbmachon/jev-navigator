@@ -39,8 +39,9 @@ from ..history import (
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import CodeSlice
-from ..judgments.answers import JevResponse, NoulAnswer
+from ..judgments.answers import AnswerSource, JevResponse, NoulAnswer, answered_by, scored_by
 from ..judgments.client import InputBudgetExceededError
+from ..judgments.journal import error_message
 from ..judgments.judge import (
     ABORTED_SEND_ERRORS,
     CODE_FIELD,
@@ -239,6 +240,7 @@ class _Queued:
     depth: int = field(compare=False)
     path: tuple[str, ...] = field(compare=False)
     probability: float = field(compare=False)
+    scored_by: AnswerSource | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -275,6 +277,7 @@ class _Search:
         depth: int,
         path: tuple[str, ...],
         tier: QueueTier = QueueTier.MOVE,
+        scored_by: AnswerSource | None = None,
     ) -> None:
         if place.key in self.visited:
             return
@@ -284,7 +287,8 @@ class _Search:
             )
             return
         rank = -probability if tier in (QueueTier.DISCOVERED, QueueTier.MOVE) else 0.0
-        heapq.heappush(self.queue, _Queued(tier, rank, next(self.counter), place, depth, path, probability))
+        item = _Queued(tier, rank, next(self.counter), place, depth, path, probability, scored_by)
+        heapq.heappush(self.queue, item)
 
     def next_beam(self, calls_left: int | None) -> list[_Queued]:
         beam = []
@@ -934,15 +938,21 @@ def _combine_opening_answers(
     unavailable: str | None,
 ) -> JevResponse:
     """Compose search answers; raw sub-request identities remain in the store and journal."""
+    parts = [found, *([priority] if priority is not None else [])]
     answers = {
         **found.answers,
         **{
-            f"{search.questions.could_contain.question_id}#{slot}": NoulAnswer(answer.probability)
+            _could_contain_id(search, slot): NoulAnswer(answer.probability)
             for slot, answer in enumerate(neighbours)
         },
         **(priority.answers if priority is not None else {}),
     }
-    combined = JevResponse(answers, judge.served_model or found.model)
+    sources = {
+        **{question_id: part.source(question_id) for part in parts for question_id in part.answers},
+        **{_could_contain_id(search, slot): answer.source() for slot, answer in enumerate(neighbours)},
+    }
+    known = {question_id: source for question_id, source in sources.items() if source is not None}
+    combined = JevResponse(answers, judge.served_model or found.model, sources=known)
     return _priority_diagnostic(combined, unavailable)
 
 
@@ -1012,9 +1022,9 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
         probability = _could_contain(search, response, slot)
         verdict = search.thresholds.noul_verdict(probability)
         path = (*item.path, place.key)
-        search.push(
-            place, probability, item.depth + 1, path, QueueTier.PICK if slot == picked else QueueTier.MOVE
-        )
+        source = response.source(_could_contain_id(search, slot))
+        tier = QueueTier.PICK if slot == picked else QueueTier.MOVE
+        search.push(place, probability, item.depth + 1, path, tier, source)
         offered.append(
             {
                 "place": place.key,
@@ -1022,6 +1032,7 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
                 "probability": probability,
                 "verdict": verdict,
                 "relationship": place_relationship(place),
+                **answered_by(source),
             }
         )
     not_opened = [*opening.capped, *search.set_aside[set_aside_before:]]
@@ -1052,8 +1063,13 @@ def _open_step(
     not_opened: list[NotInspected],
 ) -> HistoryStep:
     """What was opened, what Jev answered about it and its neighbours, and what code set aside."""
+    found = response.source(search.questions.found.question_id)
     judgments: dict[str, object] = {
-        "contains_target": {"probability": visit.probability, "verdict": visit.verdict},
+        "contains_target": {
+            "probability": visit.probability,
+            "verdict": visit.verdict,
+            **answered_by(found),
+        },
         "could_contain": offered,
     }
     pick = search.questions.open_first
@@ -1063,6 +1079,7 @@ def _open_step(
             "choice": _picked_place(answer.choice, opening.candidates),
             "confidence": answer.confidence,
             "used": _picked_slot(search, response) is not None,
+            **answered_by(response.source(pick.question_id)),
         }
     elif (unavailable := response.extra.get("open_first_unavailable")) is not None:
         judgments["open_first"] = {"used": False, "unavailable": unavailable}
@@ -1092,6 +1109,7 @@ def _record_choice(search: _Search, beam: list[_Queued]) -> None:
             "priority": item.probability,
             "depth": item.depth,
             "reason": _choice_reason(item),
+            **scored_by(item.scored_by),
         }
         for item in beam
     ]
@@ -1134,7 +1152,11 @@ def _picked_slot(search: _Search, response) -> int | None:
 
 
 def _could_contain(search: _Search, response, slot: int) -> float:
-    return response.noul(f"{search.questions.could_contain.question_id}#{slot}").probability
+    return response.noul(_could_contain_id(search, slot)).probability
+
+
+def _could_contain_id(search: _Search, slot: int) -> str:
+    return f"{search.questions.could_contain.question_id}#{slot}"
 
 
 def _candidate_state(place: Place, budget: SearchBudget) -> dict:
@@ -1216,7 +1238,10 @@ def _stop_step(
 ) -> HistoryStep:
     judgments: dict[str, object] = {"not_inspected": [_frontier_entry(entry) for entry in not_inspected]}
     if search.failure is not None:
-        judgments["failure"] = f"{type(search.failure).__name__}: {search.failure}"
+        judgments["failure"] = {
+            "type": type(search.failure).__name__,
+            "message": error_message(search.failure),
+        }
     if unparsed:
         judgments["unparsed_files"] = sorted(unparsed)
     judgments["parser_scans"] = {
@@ -1229,6 +1254,7 @@ def _stop_step(
         judgments["last_stop_check"] = {
             "probability": search.stop_judgment.probability,
             "outcome": search.stop_judgment.outcome,
+            **answered_by(search.stop_judgment.answered_by),
         }
     arguments = {"outcome": outcome, "moves": list(search.moves)}
     return HistoryStep("stop", arguments, (), judgments, f"stopped: {outcome}")

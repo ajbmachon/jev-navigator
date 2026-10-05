@@ -6,10 +6,11 @@ no text search and no parse. Rows hold names and line numbers, never code: a rec
 chain of names or ``scope_scan.OPAQUE_RECEIVER``, as the facts hold it.
 
 One table file serves one ``table_identity``: a change to the parser, to any language's rules or to
-the code that turns facts into rows starts a new table. A file's rows are written in one transaction
-with its entry in ``files``, so two processes writing at once leave the table whole and a reader
-never sees half a file. Each entry carries the day a run last confirmed it, by covering a scope that
-holds the file; housekeeping forgets a file's rows and entry together once it goes unconfirmed.
+the code that turns facts into rows starts a new table. A file's rows are written in the same
+transaction as its entry in ``files``, with other files up to a bound on rows, so two processes
+writing at once leave the table whole and a reader never sees half a file. Each entry carries the
+day a run last confirmed it, by covering a scope that holds the file; housekeeping forgets a file's
+rows and entry together once it goes unconfirmed.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from functools import cache
 from itertools import islice
@@ -39,6 +40,7 @@ DEFINITION_KINDS = (SYMBOL, DECLARATION)
 _ANONYMOUS = "<anonymous>"
 _logger = logging.getLogger(__name__)
 _QUERY_CHUNK = 500
+ROWS_PER_TRANSACTION = 10_000
 
 
 @dataclass(frozen=True)
@@ -134,20 +136,25 @@ class NameTable:
         return confirmed
 
     def add(self, facts_by_blob: Mapping[str, FileFacts]) -> None:
-        """Writes the rows of each file content the table does not hold yet, one transaction per
-        content. Contents already held take no write lock, so warm runs never wait on each other;
-        a content another process wrote meanwhile is left as it is."""
+        """Writes the rows of each file content the table does not hold yet, about
+        ``ROWS_PER_TRANSACTION`` rows per transaction. Each commit waits for a disk sync, so a
+        transaction holds many contents; the write lock is held for the whole transaction, so the
+        rows bound how long another process waits to write. A content is never split, and the table
+        is a cache, so a crash loses at most one transaction, which the next run rebuilds. Contents
+        already held take no write lock, so warm runs never wait on each other; a content another
+        process wrote meanwhile is left as it is."""
         held = self.entries(facts_by_blob.keys())
+        missing = ((blob, facts) for blob, facts in facts_by_blob.items() if blob not in held)
         with self._lock:
-            for blob, facts in facts_by_blob.items():
-                if blob not in held:
-                    self._write(blob, facts)
+            for transaction in _transactions(missing):
+                self._write(transaction)
 
-    def _write(self, blob: str, facts: FileFacts) -> None:
+    def _write(self, contents: list[tuple[str, FileFacts, list[tuple]]]) -> None:
         with self._db:
             self._db.execute("begin immediate")
-            if self._add_entry(blob, facts):
-                self._db.executemany("insert into names values (?, ?, ?, ?, ?, ?, ?, ?)", _rows(blob, facts))
+            for blob, facts, rows in contents:
+                if self._add_entry(blob, facts):
+                    self._db.executemany("insert into names values (?, ?, ?, ?, ?, ?, ?, ?)", rows)
 
     def rows(self, name: str) -> tuple[NameRow, ...]:
         with self._lock:
@@ -211,6 +218,24 @@ def _rows(blob: str, facts: FileFacts) -> Iterator[tuple]:
     for position, reference in enumerate(facts.references):
         line, role = reference.line, reference.role
         yield reference.name, blob, REFERENCE, position, line, line, role, reference.receiver
+
+
+def _transactions(
+    contents: Iterable[tuple[str, FileFacts]],
+) -> Iterator[list[tuple[str, FileFacts, list[tuple]]]]:
+    """The contents with their rows, grouped so a group's rows, one per content's entry included,
+    stay within ``ROWS_PER_TRANSACTION``; a content larger than that is a group of its own."""
+    group: list[tuple[str, FileFacts, list[tuple]]] = []
+    group_rows = 0
+    for blob, facts in contents:
+        rows = list(_rows(blob, facts))
+        if group and group_rows + len(rows) + 1 > ROWS_PER_TRANSACTION:
+            yield group
+            group, group_rows = [], 0
+        group.append((blob, facts, rows))
+        group_rows += len(rows) + 1
+    if group:
+        yield group
 
 
 def _chunks(values: list[str]) -> Iterator[list[str]]:
