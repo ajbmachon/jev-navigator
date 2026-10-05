@@ -31,7 +31,7 @@ from jev_navigator.index.spans import Span
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
-from jev_navigator.judgments.secrets import DEFAULT_MASKER, MASK
+from jev_navigator.judgments.secrets import DEFAULT_MASKER, MASK, Masker
 from jev_navigator.testing import ScriptedJevClient
 
 NEIGHBOUR_CAP_SEARCH = Path(__file__).with_name("neighbour_cap_search.py")
@@ -57,9 +57,11 @@ def _calling_nothing(characters: int) -> str:
     return "def place(order):\n" + "".join(lines[: characters // len(lines[0]) + 1]) + "    return order\n"
 
 
-def _index(tmp_path: Path, files: dict[str, str]) -> CodeIndex:
+def _index(tmp_path: Path, files: dict[str, str], masker: Masker = DEFAULT_MASKER) -> CodeIndex:
     commit_files(tmp_path / "repository", {"app/audit.py": AUDIT, **files})
-    return CodeIndex(tmp_path / "repository", ["app/audit.py", *files], fact_cache_dir=tmp_path / "facts")
+    return CodeIndex(
+        tmp_path / "repository", ["app/audit.py", *files], fact_cache_dir=tmp_path / "facts", masker=masker
+    )
 
 
 def _box_measure(state: dict, questions: dict) -> int:
@@ -229,6 +231,16 @@ def test_find_shows_what_shown_for_target_shows(tmp_path: Path, found, character
     assert (opened.code.span, opened.code.text) == (shown.span, shown.text)
 
 
+class SparingMasker:
+    """A host's own masker that finds nothing, so the index shows these values as written."""
+
+    def mask(self, text: str, path: str | None = None) -> str:
+        return text
+
+    def masked_values(self, text: str, path: str | None = None) -> list[str]:
+        return []
+
+
 class ShortSecretMasker:
     """The rule #99 adds to the masker: the quoted value of every assignment to a name holding
     PASSWORD is masked however short it is, so a value shorter than the 8-character mask makes the
@@ -291,8 +303,11 @@ def test_the_first_cut_measures_the_request_as_masked(tmp_path: Path, characters
 def test_a_function_whose_masked_request_is_over_the_box_is_cut_shorter_than_its_text_allows(
     tmp_path: Path,
 ) -> None:
-    # Arrange: the largest function whose unmasked request fits Drex's box whole
-    index = _index(tmp_path, {"app/orders.py": _holding_short_secrets(17_000, calls_audit=False)})
+    # Arrange: the largest function whose unmasked request fits Drex's box whole, in an index whose
+    # host masker spares the short values that the request's masker hides
+    index = _index(
+        tmp_path, {"app/orders.py": _holding_short_secrets(17_000, calls_audit=False)}, masker=SparingMasker()
+    )
     start = place_for_line(index, "app/orders.py", 1, "start")
     code = start.open()
 
