@@ -141,6 +141,7 @@ class CodeIndex:
         binding_resolver: BindingResolver | None = None,
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
+        masker: Masker = DEFAULT_MASKER,
     ) -> CodeIndex:
         """The regular files git tracks under ``prefixes`` (every one when none are given), read from the
         checkout at its commit; for a repository root with an explicit path list. Symbolic links and
@@ -161,6 +162,7 @@ class CodeIndex:
             fact_cache_dir=fact_cache_dir,
             blob_ids=blobs,
             not_indexed=listing.left_out_of_tracked(root, prefixes, blobs),
+            masker=masker,
         )
 
     @classmethod
@@ -174,6 +176,7 @@ class CodeIndex:
         binding_resolver: BindingResolver | None = None,
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
+        masker: Masker = DEFAULT_MASKER,
     ) -> CodeIndex:
         """Index current files, tracked by git or not, minus ignored ones (see ``listing.working_files``),
         with Git metadata when available.
@@ -203,6 +206,7 @@ class CodeIndex:
             fact_cache_dir=fact_cache_dir,
             blob_ids=blobs,
             not_indexed=listed.not_indexed,
+            masker=masker,
         )
 
     @classmethod
@@ -213,6 +217,7 @@ class CodeIndex:
         prefixes: Sequence[str] = (),
         *,
         max_files: int | None = None,
+        masker: Masker = DEFAULT_MASKER,
     ) -> CodeIndex:
         """The regular files under ``prefixes`` as they were at ``commit``, read from git objects into a
         private temporary directory; the checkout is never touched. History lookups still run in
@@ -229,7 +234,13 @@ class CodeIndex:
         snapshot = tempfile.TemporaryDirectory(prefix=f"jev-navigator-{sha[:8]}-")
         tools.export_blobs(repository, _blobs_to_export(repository, sha, listed), Path(snapshot.name))
         index = cls(
-            snapshot.name, listed, max_files=max_files, commit=sha, git_root=repository, blob_ids=blobs
+            snapshot.name,
+            listed,
+            max_files=max_files,
+            commit=sha,
+            git_root=repository,
+            blob_ids=blobs,
+            masker=masker,
         )
         index._snapshot = snapshot
         return index

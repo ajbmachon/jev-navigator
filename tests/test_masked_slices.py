@@ -4,16 +4,18 @@ reaches a request, however the slice, window, preview or line cut falls."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from git_repos import write_files
+from git_repos import commit_files, write_files
 from secret_shapes import COPY_VALUE, SECRET_SHAPES, sent_pieces
 
 from jev_navigator.directives import find_code, places, shown, trace
 from jev_navigator.directives.entry import _file_description, _preview
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import Span
+from jev_navigator.judgments.secrets import MASK
 from jev_navigator.operations import TraceLink
 
 
@@ -158,3 +160,36 @@ def test_an_entry_file_description_hides_a_copy_whose_key_line_is_past_the_doc_l
     # Assert
     assert "Posts with" in description
     assert sent_pieces(COPY_VALUE, {"options": [description]}) == set()
+
+
+@dataclass(frozen=True)
+class _HostMasker:
+    """A host's own masker, which the index accepts by design: it hides one marked word."""
+
+    def mask(self, text: str, path: str | None = None) -> str:
+        return text.replace(HOST_MARK, MASK)
+
+    def masked_values(self, text: str, path: str | None = None) -> list[str]:
+        return [HOST_MARK] if HOST_MARK in text else []
+
+
+HOST_MARK = "host-only-mark"
+
+
+BUILDS = {
+    "from_git": lambda root, masker: CodeIndex.from_git(root, masker=masker),
+    "from_directory": lambda root, masker: CodeIndex.from_directory(root, masker=masker),
+    "at_commit": lambda root, masker: CodeIndex.at_commit(root, "HEAD", masker=masker),
+}
+
+
+@pytest.mark.parametrize("build", BUILDS.values(), ids=BUILDS.keys())
+def test_an_index_built_with_a_hosts_masker_masks_its_slices_with_it(tmp_path: Path, build) -> None:
+    # Arrange
+    commit_files(tmp_path / "repo", {"app/a.py": f'def send():\n    return "{HOST_MARK}"\n'})
+
+    # Act
+    index = build(tmp_path / "repo", _HostMasker())
+
+    # Assert
+    assert index.read_slice(Span("app/a.py", 1, 2)).text == f'def send():\n    return "{MASK}"'
