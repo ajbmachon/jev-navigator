@@ -10,6 +10,7 @@ from jev_navigator.judgments.secrets import (
     HIGH_ENTROPY_MIN_CHARS,
     MASK,
     TOKEN_CHARACTER_CLASS,
+    Copies,
     SecretInRequestError,
     SecretMasker,
     SecretScanner,
@@ -676,3 +677,25 @@ def test_a_copy_pattern_finds_a_long_value_anywhere_and_a_short_one_as_a_whole_w
 
     # Assert
     assert bool(found) is hidden
+
+
+def test_one_pass_copies_find_exactly_what_each_values_pattern_finds() -> None:
+    # Arrange: long values anywhere, short ones as whole words, one value a prefix of another
+    values = frozenset({"hunter2", "abc", "Kq8mLx2PzR7v", "Kq8mLx2PzR7vWn4T", "p@ss!", "$tok"})
+    text = (
+        'a hunter2 hunter2x xabc abc_ (abc) Kq8mLx2PzR7vWn4T Kq8mLx2PzR7v9 p@ss! xp@ss! $tok a$tok "hunter2"'
+    )
+
+    # Act
+    found = Copies(values).spans(text)
+
+    # Assert
+    expected = sorted(
+        span for value in values for span in (match.span() for match in copy_pattern(value).finditer(text))
+    )
+    longest = [
+        span
+        for span in expected
+        if not any(o != span and o[0] <= span[0] and span[1] <= o[1] for o in expected)
+    ]
+    assert found == longest

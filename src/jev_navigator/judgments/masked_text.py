@@ -1,30 +1,26 @@
 """The one owner of the text a request may show. ``masked_lines`` masks a whole file once, so every
 slice, window, preview, excerpt or line cut takes masked text: a cut can no longer split a secret from
-the key that marks it. A value whose key is in another file is left to the request's own copy masking."""
+the key that marks it. The values it hides join the caller's ``HiddenValues``, so a request hides their
+copies in other files' slices too."""
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 
-from .secrets import MASK, Masker, copy_pattern, remember_hidden
+from .secrets import MASK, HiddenValues, Masker, copies_of
 
 
-def masked_lines(lines: Sequence[str], file: str | None, masker: Masker) -> tuple[str, ...]:
+def masked_lines(
+    lines: Sequence[str], file: str | None, masker: Masker, hidden: HiddenValues
+) -> tuple[str, ...]:
     """``lines`` with every value ``masker`` finds anywhere in them masked wherever it stands, read as
-    ``file``. The line count stays: a value spanning lines becomes ``MASK`` on its first line and
-    leaves the lines it covered empty up to what follows it on its last line."""
+    ``file``, and those values added to ``hidden``. The line count stays: a value spanning lines
+    becomes ``MASK`` on its first line and leaves the lines it covered empty up to what follows it
+    on its last line."""
     text = "\n".join(lines)
-    values = sorted(set(masker.masked_values(text, file)) - {MASK}, key=len, reverse=True)
-    remember_hidden(values)
-    return tuple(_masked(text, _secret_spans(text, values)).split("\n"))
-
-
-def _secret_spans(text: str, values: list[str]) -> list[tuple[int, int]]:
-    if not values:
-        return []
-    copies = re.compile("|".join(copy_pattern(value).pattern for value in values))
-    return [match.span() for match in copies.finditer(text)]
+    values = frozenset(masker.masked_values(text, file)) - {MASK}
+    hidden.add(values)
+    return tuple(_masked(text, copies_of(values).spans(text)).split("\n"))
 
 
 def _masked(text: str, spans: list[tuple[int, int]]) -> str:

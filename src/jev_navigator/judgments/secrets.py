@@ -11,10 +11,11 @@ from __future__ import annotations
 import math
 import re
 import threading
+import weakref
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, lru_cache
 from typing import Protocol
 
 MASK = "[MASKED]"
@@ -174,9 +175,6 @@ class SecretMasker:
         return [value for value in _hide_secrets(text, path)[1] if _is_copied(value)]
 
 
-_HIDDEN_LOCK = threading.Lock()
-_HIDDEN: set[str] = set()
-
 DEFAULT_MASKER = SecretMasker()
 """What every request is masked with unless its caller names another masker."""
 
@@ -213,37 +211,57 @@ def masked_values(value: object, masker: Masker) -> frozenset[str]:
         for text in dict.fromkeys(_strings(value))
         for found in masker.masked_values(text.text, text.path)
     )
-    with _HIDDEN_LOCK:
-        return found | _HIDDEN
+    return found.union(*(scope.values() for scope in list(_LIVE_SCOPES)))
 
 
-def remember_hidden(values: Iterable[str]) -> None:
-    """Keeps ``values``, hidden from a file before any cut, so every later request hides their copies
-    too: a file masked whole no longer shows a request the value its other slices copy."""
-    kept = {value for value in values if value and value != MASK}
-    with _HIDDEN_LOCK:
-        _HIDDEN.update(kept)
+class HiddenValues:
+    """The values hidden from files before any cut, kept for as long as their owner (a ``CodeIndex``)
+    lives: every request masked meanwhile hides their copies too, whatever masker it uses, because a
+    file masked whole no longer shows a request the value its other slices copy."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._values: set[str] = set()
+
+    def add(self, values: Iterable[str]) -> None:
+        kept = {value for value in values if value and value != MASK}
+        with self._lock:
+            self._values.update(kept)
+
+    def values(self) -> frozenset[str]:
+        with self._lock:
+            return frozenset(self._values)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._values.clear()
+
+
+_LIVE_SCOPES: weakref.WeakSet[HiddenValues] = weakref.WeakSet()
+
+
+def hidden_scope() -> HiddenValues:
+    """A new set of hidden values that request masking adds until nothing holds it any more."""
+    scope = HiddenValues()
+    _LIVE_SCOPES.add(scope)
+    return scope
 
 
 def forget_hidden() -> None:
-    """Forgets every remembered value; for tests, so none depends on what an earlier one read."""
-    with _HIDDEN_LOCK:
-        _HIDDEN.clear()
+    """Empties every live set of hidden values; for tests, so none depends on what an earlier one read."""
+    for scope in list(_LIVE_SCOPES):
+        scope.clear()
 
 
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str], questions: bool = False) -> object:
     """Masks every string by the masker's rules, then hides each of ``values`` wherever it still
     appears. Keys are left as they are. In ``questions``, JVN's own wording hides no copies."""
-    copies = [copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
+    copies = copies_of(values)
 
     @cache
     def hide(text: str, path: str | None, role: str) -> str:
         text = masker.mask(text, path)
-        if role == "wording":
-            return text
-        for copy in copies:
-            text = copy.sub(MASK, text)
-        return text
+        return text if role == "wording" else copies.sub(text)
 
     return _each_string(value, hide, questions=questions)
 
@@ -262,8 +280,8 @@ def refuse_if_secret(
     A key counts only for a value of ``BY_CONTENT_MIN_CHARS`` or more characters (a short value such as
     ``"false"`` equals JVN's own keys), and question wording, which keeps its words, never counts."""
     texts = _strings(state) + _strings(questions, questions=True)
-    copies = [(value, copy_pattern(value)) for value in masked - {MASK}]
-    if any(_holds_copy(text, value, copy) for text in texts for value, copy in copies):
+    copies = copies_of(masked)
+    if any(_holds_copy(text, value) for text in texts for value in copies.found(text.text)):
         raise SecretInRequestError("a masked value is still in the request, in a key; nothing was sent")
     if scanner is None:
         return
@@ -280,6 +298,91 @@ def copy_pattern(value: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![\w$]){re.escape(value)}(?![\w$])")
 
 
+class Copies:
+    """Where any of ``values`` stands in a text, found in one pass however many values there are: a
+    value of ``BY_CONTENT_MIN_CHARS`` or more characters is looked up by its first that many
+    characters, a shorter one by itself at a word start, and every candidate is confirmed by
+    ``copy_pattern``, which alone decides where a copy stands. Overlapping copies yield the leftmost,
+    then the longest."""
+
+    def __init__(self, values: Iterable[str]) -> None:
+        kept = sorted({value for value in values if value and value != MASK}, key=len, reverse=True)
+        self._patterns: dict[str, re.Pattern[str]] = {}
+        self._long: dict[str, list[str]] = {}
+        self._short: dict[int, set[str]] = {}
+        for value in kept:
+            if len(value) >= BY_CONTENT_MIN_CHARS:
+                self._long.setdefault(value[:BY_CONTENT_MIN_CHARS], []).append(value)
+            else:
+                self._short.setdefault(len(value), set()).add(value)
+        self._short_lengths = sorted(self._short, reverse=True)
+
+    def spans(self, text: str) -> list[tuple[int, int]]:
+        return [(start, end) for start, end, _ in self._copies(text)]
+
+    def found(self, text: str) -> list[str]:
+        return [value for _, _, value in self._copies(text)]
+
+    def sub(self, text: str) -> str:
+        parts, position = [], 0
+        for start, end, _ in self._copies(text):
+            parts += [text[position:start], MASK]
+            position = end
+        return "".join([*parts, text[position:]])
+
+    def _copies(self, text: str) -> list[tuple[int, int, str]]:
+        word_starts = self._word_starts(text)
+        copies, position = [], 0
+        while position < len(text):
+            value = self._copy_at(text, position, position in word_starts)
+            if value is None:
+                position += 1
+                continue
+            copies.append((position, position + len(value), value))
+            position += len(value)
+        return copies
+
+    def _word_starts(self, text: str) -> frozenset[int]:
+        """Where a short value may begin: no word character or ``$`` stands right before."""
+        if not self._short:
+            return frozenset()
+        return frozenset(match.start() for match in _WORD_START.finditer(text))
+
+    def _copy_at(self, text: str, position: int, word_start: bool) -> str | None:
+        candidates = self._long.get(text[position : position + BY_CONTENT_MIN_CHARS], ())
+        if word_start:
+            candidates = [*candidates, *self._short_candidates(text, position)]
+        if not candidates:
+            return None
+        matched = [value for value in candidates if self._pattern(value).match(text, position)]
+        return max(matched, key=len, default=None)
+
+    def _pattern(self, value: str) -> re.Pattern[str]:
+        if value not in self._patterns:
+            self._patterns[value] = copy_pattern(value)
+        return self._patterns[value]
+
+    def _short_candidates(self, text: str, position: int) -> list[str]:
+        return [
+            text[position : position + length]
+            for length in self._short_lengths
+            if text[position : position + length] in self._short[length]
+        ]
+
+
+@lru_cache(maxsize=16)
+def _copies_of(values: frozenset[str]) -> Copies:
+    return Copies(values)
+
+
+def copies_of(values: frozenset[str]) -> Copies:
+    """The one-pass ``Copies`` of ``values``, built once for each set a process masks with."""
+    return _copies_of(frozenset(values))
+
+
+_WORD_START = re.compile(r"(?<![\w$])(?=.)", re.DOTALL)
+
+
 @dataclass(frozen=True)
 class _RequestText:
     """A string of a request, the file it comes from, and its role: a "value", a "key" of the request's
@@ -290,10 +393,8 @@ class _RequestText:
     role: str
 
 
-def _holds_copy(text: _RequestText, value: str, copy: re.Pattern[str]) -> bool:
-    if text.role == "wording" or (text.role == "key" and len(value) < BY_CONTENT_MIN_CHARS):
-        return False
-    return bool(copy.search(text.text))
+def _holds_copy(text: _RequestText, value: str) -> bool:
+    return not (text.role == "wording" or (text.role == "key" and len(value) < BY_CONTENT_MIN_CHARS))
 
 
 def _is_copied(value: str) -> bool:
