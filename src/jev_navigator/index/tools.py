@@ -16,7 +16,7 @@ from typing import IO
 import msgspec
 
 from .file_shape import MAX_PARSE_PEAK_MB, Placement, placement_of
-from .spans import TextHit, TextWindow
+from .spans import TextHit
 
 AST_GREP = "ast-grep"
 RIPGREP = "rg"
@@ -273,17 +273,15 @@ def ripgrep_fixed(
     hit = literal_pattern(text)
     if whole_word:
         hit = rf"(?:^|[^\w\n]){hit}(?:[^\w\n]|$)"
-    windows = ripgrep_windows(hit, files, cwd, max_hits, context_bytes)
-    return [TextHit(window.file, window.line, window.text) for window in windows]
+    return ripgrep_windows(hit, files, cwd, max_hits, context_bytes)
 
 
 def ripgrep_windows(
     hit_pattern: str, files: Sequence[str], cwd: Path, max_hits: int, context_bytes: int
-) -> list[TextWindow]:
+) -> list[TextHit]:
     """The lines matching the ripgrep regular expression ``hit_pattern``, at most ``max_hits`` per
     file, each as the bytes around one hit: up to ``context_bytes`` before and after, so a one-line
-    bundle costs no more than a short line. A side holding all ``context_bytes`` may stop short of
-    the line's end there, so it counts as cut. The match runs on to the end of the line, so each line
+    bundle costs no more than a short line. The match runs on to the end of the line, so each line
     matches once, and ``--replace`` prints only the hit and its context, each on its own line;
     ripgrep's JSON would carry the whole line."""
     if not files:
@@ -292,10 +290,10 @@ def ripgrep_windows(
     pattern = f"(?P<before>{context})(?P<hit>{hit_pattern})(?P<after>{context})(?-u:.)*"
     command = [*RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null"]
     command += ["--max-count", str(max_hits), "--replace", _WINDOW_FIELDS, "--regexp", pattern, "--"]
-    windows: dict[tuple[str, int], TextWindow] = {}
+    windows: dict[tuple[str, int], TextHit] = {}
     for chunk in file_chunks(files, bytes_only=True):
         output = command_output([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
-        for window in _windows(output, context_bytes):
+        for window in _windows(output):
             windows.setdefault((window.file, window.line), window)
     return list(windows.values())
 
@@ -311,7 +309,7 @@ def literal_pattern(text: str) -> str:
 _WINDOW_FIELDS = "${before}\n${hit}\n${after}|"
 
 
-def _windows(output: bytes, context_bytes: int) -> Iterator[TextWindow]:
+def _windows(output: bytes) -> Iterator[TextHit]:
     """The windows ripgrep's ``--null`` printer gives for ``_WINDOW_FIELDS``: ``path NUL line:before``,
     then the hit, then the text after followed by ``|``, each ending in a newline. None of the three
     holds a newline, and a path ends at its NUL, so a newline in a path cannot split a record. Bytes
@@ -325,12 +323,10 @@ def _windows(output: bytes, context_bytes: int) -> Iterator[TextWindow]:
         record_end = output.index(b"|\n", hit_end + 1)
         before = output[number_end + 1 : before_end]
         after = output[hit_end + 1 : record_end]
-        yield TextWindow(
+        yield TextHit(
             output[position:path_end].decode(errors="replace").removeprefix("./"),
             int(output[path_end + 1 : number_end]),
             (before + output[before_end + 1 : hit_end] + after).decode(errors="replace").rstrip("\r"),
-            cut_start=len(before) >= context_bytes,
-            cut_end=len(after) >= context_bytes,
         )
         position = record_end + 2
 

@@ -92,15 +92,3 @@ class TextHit:
     file: str
     line: int
     text: str
-
-
-@dataclass(frozen=True, order=True)
-class TextWindow:
-    """A line's text around a hit; ``cut_start`` and ``cut_end`` say whether the text stops short of
-    the line's own start or end."""
-
-    file: str
-    line: int
-    text: str
-    cut_start: bool
-    cut_end: bool
