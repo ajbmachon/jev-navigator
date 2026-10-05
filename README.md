@@ -616,8 +616,10 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `secret: process.env.AUTH_SECRET` reaches Jev unchanged. Every rule scans in time linear in the line
   length. Masking works by content: a value hidden in one place is hidden everywhere
   in the request, for example where a relation text or another candidate quotes it; a value of 8 or
-  more characters wherever it appears, a shorter one as a whole word, and a short number only where it
-  stands. In a code file a plain identifier under a secret-named key
+  more characters wherever it appears, a shorter one as a whole word, and a number of at most four
+  characters or a value without letters or digits only where it stands. JVN's own question wording
+  (instructions, and the criteria of a question that is not a choice) keeps its words, and a key of
+  the request equal to a short masked value does not refuse it. In a code file a plain identifier under a secret-named key
   (`{ password: changeme }`) reads as code; in YAML it is a value.
   The complete candidate set is masked once, before packing, so copied values stay hidden across
   batches; the final scan still runs on every request before it is sent.

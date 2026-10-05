@@ -54,7 +54,7 @@ _ENV_FILE_VALUE = re.compile(
     re.M,
 )
 _CLI_SECRET_FLAG = re.compile(
-    r"(?:^|(?<=\s))--?(?P<key>[A-Za-z][\w-]*+)(?:=|[ \t]++)(?P<value>[^\s\"'`=-][^\s\"'`]*+)"
+    r"(?:^|(?<=\s))--?(?P<key>[A-Za-z][\w-]*+)(?:=|[ \t]++)(?P<value>[^\s\"'`=<>|&;$(-][^\s\"'`]*+)"
 )
 _USAGE_PLACEHOLDER = re.compile(r"\.\.\.|…|<[^<>]*>|\*+|x+", re.I)
 _CONFIG_SCALAR = re.compile(
@@ -62,7 +62,8 @@ _CONFIG_SCALAR = re.compile(
     r"(?P<value>[^\s#\"'`{\[|>&*!](?:[^\n#]*[^\s#])?)[ \t]*+(?:#[^\n]*)?$",
     re.M,
 )
-_SHORT_NUMBER = re.compile(r"[\d.,:_+-]{1,7}")
+_SHORT_NUMBER = re.compile(r"[\d.,:_+-]{1,4}")
+_CHOICE_QUESTION = "choice"
 _CONFIG_SUFFIXES = (".yml", ".yaml", ".env", ".ini", ".cfg", ".conf", ".properties", ".toml", ".dockerfile")
 _CONFIG_NON_VALUES = frozenset({"null", "~", "true", "false", "yes", "no", "on", "off"})
 _CI_EXPRESSION = re.compile(r"\$\{\{[^{}]*\}\}")
@@ -161,7 +162,7 @@ class SecretMasker:
 
     ``masked_values`` lists every masked value but a short number (``"1.5"``, ``"0"``), so request masking
     hides each copy elsewhere too: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more characters,
-    as a whole word for a shorter one (see ``_copy_pattern``).
+    as a whole word for a shorter one (see ``copy_pattern``).
 
     ``path`` is the file the text comes from. In a config file, or in text from no file, an unquoted value
     under a secret key is a value (``POSTGRES_PASSWORD: example``); in code it stays (``token: str``)."""
@@ -170,7 +171,7 @@ class SecretMasker:
         return _hide_secrets(text, path)[0]
 
     def masked_values(self, text: str, path: str | None = None) -> list[str]:
-        return [value for value in _hide_secrets(text, path)[1] if not _SHORT_NUMBER.fullmatch(value)]
+        return [value for value in _hide_secrets(text, path)[1] if _is_copied(value)]
 
 
 _HIDDEN_LOCK = threading.Lock()
@@ -189,9 +190,14 @@ class SecretScanner:
 
 
 def mask_request(state: Mapping, questions: Mapping, masker: Masker) -> tuple[Mapping, Mapping, frozenset]:
-    """The masked state and questions, and every value that was hidden in either."""
+    """The masked state and questions, and every value that was hidden in either. JVN's own question
+    wording keeps its words (see ``_wording_keys``)."""
     values = masked_values([state, questions], masker)
-    return mask_everywhere(state, masker, values), mask_everywhere(questions, masker, values), values
+    return (
+        mask_everywhere(state, masker, values),
+        mask_everywhere(questions, masker, values, questions=True),
+        values,
+    )
 
 
 def mask_by_content(value: object, masker: Masker) -> object:
@@ -203,7 +209,9 @@ def masked_values(value: object, masker: Masker) -> frozenset[str]:
     """Every value the masker hides anywhere inside nested JSON-like data, keys included, and every
     value this process already hid in a file it read (``remember_hidden``), whatever masker hid it."""
     found = frozenset(
-        found for text, path in dict.fromkeys(_strings(value)) for found in masker.masked_values(text, path)
+        found
+        for text in dict.fromkeys(_strings(value))
+        for found in masker.masked_values(text.text, text.path)
     )
     with _HIDDEN_LOCK:
         return found | _HIDDEN
@@ -223,19 +231,21 @@ def forget_hidden() -> None:
         _HIDDEN.clear()
 
 
-def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:
+def mask_everywhere(value: object, masker: Masker, values: frozenset[str], questions: bool = False) -> object:
     """Masks every string by the masker's rules, then hides each of ``values`` wherever it still
-    appears. Keys are left as they are; ``refuse_if_secret`` refuses a request with one in a key."""
-    copies = [_copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
+    appears. Keys are left as they are. In ``questions``, JVN's own wording hides no copies."""
+    copies = [copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
 
     @cache
-    def hide(text: str, path: str | None) -> str:
+    def hide(text: str, path: str | None, role: str) -> str:
         text = masker.mask(text, path)
+        if role == "wording":
+            return text
         for copy in copies:
             text = copy.sub(MASK, text)
         return text
 
-    return _each_string(value, hide)
+    return _each_string(value, hide, questions=questions)
 
 
 def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str, str]:
@@ -248,20 +258,21 @@ def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str,
 def refuse_if_secret(
     state: Mapping, questions: Mapping, scanner: Scanner | None, masked: frozenset[str] = frozenset()
 ) -> None:
-    """Refuses when a value masked elsewhere is still in the request (it can only sit in a key), or
-    when the scanner finds a secret."""
-    texts = _strings(state) + _strings(questions)
-    copies = [_copy_pattern(value) for value in masked - {MASK}]
-    if any(copy.search(text) for text, _ in texts for copy in copies):
+    """Refuses when a value masked elsewhere is still in the request, or when the scanner finds a secret.
+    A key counts only for a value of ``BY_CONTENT_MIN_CHARS`` or more characters (a short value such as
+    ``"false"`` equals JVN's own keys), and question wording, which keeps its words, never counts."""
+    texts = _strings(state) + _strings(questions, questions=True)
+    copies = [(value, copy_pattern(value)) for value in masked - {MASK}]
+    if any(_holds_copy(text, value, copy) for text in texts for value, copy in copies):
         raise SecretInRequestError("a masked value is still in the request, in a key; nothing was sent")
     if scanner is None:
         return
-    for text, path in texts:
-        if scanner.findings(text, path):
+    for text in texts:
+        if scanner.findings(text.text, text.path):
             raise SecretInRequestError("the final scan found a secret in the request; nothing was sent")
 
 
-def _copy_pattern(value: str) -> re.Pattern[str]:
+def copy_pattern(value: str) -> re.Pattern[str]:
     """Where a masked value's copies stand: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more
     characters, and as a whole word for a shorter one, so ``hunter2`` is hidden but ``hunter2x`` stays."""
     if len(value) >= BY_CONTENT_MIN_CHARS:
@@ -269,27 +280,77 @@ def _copy_pattern(value: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![\w$]){re.escape(value)}(?![\w$])")
 
 
-def _each_string(value: object, change: Callable[[str, str | None], str], path: str | None = None) -> object:
-    """Changes every string, each with the file it comes from (see ``_file_of``)."""
+@dataclass(frozen=True)
+class _RequestText:
+    """A string of a request, the file it comes from, and its role: a "value", a "key" of the request's
+    structure, or question "wording"."""
+
+    text: str
+    path: str | None
+    role: str
+
+
+def _holds_copy(text: _RequestText, value: str, copy: re.Pattern[str]) -> bool:
+    if text.role == "wording" or (text.role == "key" and len(value) < BY_CONTENT_MIN_CHARS):
+        return False
+    return bool(copy.search(text.text))
+
+
+def _is_copied(value: str) -> bool:
+    """A masked value is hidden everywhere else too, unless it is a number of at most four characters or
+    holds no letter or digit (``"<"``)."""
+    return any(character.isalnum() for character in value) and not _SHORT_NUMBER.fullmatch(value)
+
+
+def _wording_keys(mapping: Mapping, questions: bool) -> frozenset[str]:
+    """The keys of a question that hold JVN's own wording, written from code: its instructions, and its
+    criteria unless it is a choice, whose criteria are the options code supplies (signatures)."""
+    if not questions or "instructions" not in mapping:
+        return frozenset()
+    return frozenset(
+        {"instructions"} if mapping.get("type") == _CHOICE_QUESTION else {"instructions", "criteria"}
+    )
+
+
+def _each_string(
+    value: object,
+    change: Callable[[str, str | None, str], str],
+    path: str | None = None,
+    role: str = "value",
+    questions: bool = False,
+) -> object:
+    """Changes every string, each with the file it comes from (see ``_file_of``) and its role."""
     if isinstance(value, str):
-        return change(value, path)
+        return change(value, path, role)
     if isinstance(value, Mapping):
-        inner = _file_of(value, path)
-        return {key: _each_string(item, change, inner) for key, item in value.items()}
+        inner, wording = _file_of(value, path), _wording_keys(value, questions)
+        return {
+            key: _each_string(item, change, inner, "wording" if key in wording else role, questions)
+            for key, item in value.items()
+        }
     if isinstance(value, list | tuple):
-        return [_each_string(item, change, path) for item in value]
+        return [_each_string(item, change, path, role, questions) for item in value]
     return value
 
 
-def _strings(value: object, path: str | None = None) -> list[tuple[str, str | None]]:
-    """Every string, keys included, with the file it comes from."""
+def _strings(
+    value: object, path: str | None = None, role: str = "value", questions: bool = False
+) -> list[_RequestText]:
+    """Every string, keys included, with the file it comes from and its role."""
     if isinstance(value, str):
-        return [(value, path)]
+        return [_RequestText(value, path, role)]
     if isinstance(value, Mapping):
-        inner = _file_of(value, path)
-        return [pair for key, item in value.items() for pair in [(str(key), None), *_strings(item, inner)]]
+        inner, wording = _file_of(value, path), _wording_keys(value, questions)
+        return [
+            text
+            for key, item in value.items()
+            for text in [
+                _RequestText(str(key), None, "key"),
+                *_strings(item, inner, "wording" if key in wording else role, questions),
+            ]
+        ]
     if isinstance(value, list | tuple):
-        return [pair for item in value for pair in _strings(item, path)]
+        return [text for item in value for text in _strings(item, path, role, questions)]
     return []
 
 

@@ -1,9 +1,11 @@
+import json
 import re
 import time
 from collections import Counter
 
 import pytest
 
+from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.secrets import (
     HIGH_ENTROPY_MIN_CHARS,
     MASK,
@@ -11,6 +13,7 @@ from jev_navigator.judgments.secrets import (
     SecretInRequestError,
     SecretMasker,
     SecretScanner,
+    copy_pattern,
     is_high_entropy,
     mask_by_content,
     mask_request,
@@ -576,3 +579,100 @@ def test_a_short_masked_value_inside_a_longer_word_does_not_refuse_the_request()
 
     # Assert
     assert "pw" in masked
+
+
+def _check_request(code: str, path: str) -> tuple[dict, dict, frozenset]:
+    check = Check(
+        "contains_target",
+        "Is `slice.code` the admin check that `target.description` describes?",
+        Criterion("it is"),
+        Criterion("it is not"),
+    )
+    state = {"target": {"description": "the admin check"}, "slice": {"file": path, "code": code}}
+    return mask_request(state, {check.question_id: check.to_question()}, SecretMasker())
+
+
+def test_a_short_value_equal_to_a_request_key_does_not_refuse_the_request() -> None:
+    # Arrange
+    state, questions, masked = _check_request('const auth = { useToken: "false" };\n', "src/auth.ts")
+
+    # Act
+    refuse_if_secret(state, questions, SecretScanner(), masked)
+
+    # Assert
+    assert state["slice"]["code"] == 'const auth = { useToken: "[MASKED]" };\n'
+
+
+def test_question_wording_keeps_its_words_while_the_target_hides_a_copy() -> None:
+    # Arrange
+    state, questions, masked = _check_request('password = "admin"\n', "tests/fixtures.py")
+
+    # Act
+    refuse_if_secret(state, questions, SecretScanner(), masked)
+
+    # Assert
+    assert state["target"]["description"] == "the [MASKED] check"
+    assert "the admin check" in json.dumps(questions)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'docker login --password-stdin < token.txt\nif [ "$a" < "$b" ]; then echo x; fi\n',
+        "psql --password $PGPASS -h db\necho $PGPASS\n",
+        "deploy --token | tee log.txt\n",
+    ],
+)
+def test_a_flag_without_a_value_or_with_a_reference_keeps_the_line(code: str) -> None:
+    # Act
+    masked_state, _, _ = mask_request({"slice": {"file": "scripts/run.sh", "code": code}}, {}, SecretMasker())
+
+    # Assert
+    assert masked_state["slice"]["code"] == code
+
+
+def test_a_masked_value_without_letters_or_digits_is_not_copied() -> None:
+    # Arrange
+    state = {
+        "slice": {"file": "app/a.py", "code": 'password = "<>"\n'},
+        "other": {"file": "app/b.ts", "code": "if (a <> b) { return a < b; }\n"},
+    }
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert masked_state["other"]["code"] == "if (a <> b) { return a < b; }\n"
+
+
+@pytest.mark.parametrize(("value", "copied"), [("1234", False), ("12345", True)])
+def test_a_masked_number_is_copied_only_from_five_characters(value: str, copied: bool) -> None:
+    # Arrange
+    state = {
+        "slice": {"file": "app/settings.ts", "code": f'API_KEY_VERSION: "{value}",\n'},
+        "other": {"file": "app/math.ts", "code": f"const limit = {value};\n"},
+    }
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert (value not in masked_state["other"]["code"]) is copied
+
+
+@pytest.mark.parametrize(
+    ("value", "text", "hidden"),
+    [
+        ("hunter2hunter2", "xhunter2hunter2x", True),
+        ("hunter2", 'connect(user, "hunter2")', True),
+        ("hunter2", "hunter2x and $hunter2", False),
+    ],
+)
+def test_a_copy_pattern_finds_a_long_value_anywhere_and_a_short_one_as_a_whole_word(
+    value: str, text: str, hidden: bool
+) -> None:
+    # Act
+    found = copy_pattern(value).search(text)
+
+    # Assert
+    assert bool(found) is hidden

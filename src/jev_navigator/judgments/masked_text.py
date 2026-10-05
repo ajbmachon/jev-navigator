@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-from .secrets import BY_CONTENT_MIN_CHARS, MASK, Masker, remember_hidden
+from .secrets import MASK, Masker, copy_pattern, remember_hidden
 
 
 def masked_lines(lines: Sequence[str], file: str | None, masker: Masker) -> tuple[str, ...]:
@@ -23,16 +23,8 @@ def masked_lines(lines: Sequence[str], file: str | None, masker: Masker) -> tupl
 def _secret_spans(text: str, values: list[str]) -> list[tuple[int, int]]:
     if not values:
         return []
-    copies = re.compile("|".join(_copy_pattern(value) for value in values))
+    copies = re.compile("|".join(copy_pattern(value).pattern for value in values))
     return [match.span() for match in copies.finditer(text)]
-
-
-def _copy_pattern(value: str) -> str:
-    """Where the masker hides a value's copies: anywhere for ``BY_CONTENT_MIN_CHARS`` or more
-    characters, as a whole word for a shorter one."""
-    if len(value) >= BY_CONTENT_MIN_CHARS:
-        return re.escape(value)
-    return rf"(?<![\w$]){re.escape(value)}(?![\w$])"
 
 
 def _masked(text: str, spans: list[tuple[int, int]]) -> str:
