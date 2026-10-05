@@ -349,7 +349,7 @@ class HoldingScanner:
         self.held = held
         self.release = release
 
-    def findings(self, text: str) -> list[str]:
+    def findings(self, text: str, path: str | None = None) -> list[str]:
         if self.held(text):
             deadline = threading.Event()
             for _ in range(1000):

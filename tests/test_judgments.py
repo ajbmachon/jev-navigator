@@ -365,9 +365,9 @@ class CountingMasker(SecretMasker):
     def __init__(self) -> None:
         self.masked: Counter[str] = Counter()
 
-    def mask(self, text: str) -> str:
+    def mask(self, text: str, path: str | None = None) -> str:
         self.masked[text] += 1
-        return super().mask(text)
+        return super().mask(text, path)
 
 
 def test_each_item_is_masked_once_per_judging_call_across_several_batches() -> None:
