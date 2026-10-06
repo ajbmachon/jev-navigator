@@ -7,7 +7,8 @@ from shop_search import shop_index
 
 from jev_navigator.directives.find_all import find_all
 from jev_navigator.directives.frontier import VALUE
-from jev_navigator.index.units import LineAnchor, RangeAnchor, Unit, list_units
+from jev_navigator.index.spans import Span
+from jev_navigator.index.units import LineAnchor, RangeAnchor, Unit, list_units, unit_spans
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.sources import (
@@ -117,8 +118,8 @@ def test_the_caller_and_callee_sources_reach_the_functions_on_either_side_of_a_s
     place_order = units_by_symbol(index, "orders/service.py")["place_order"]
 
     # Act
-    callers = CALLERS.reach(index, Seeds(units=(check_limit,)))
-    callees = CALLEES.reach(index, Seeds(units=(place_order,)))
+    callers = CALLERS.reach(index, Seeds(spans=unit_spans(index, check_limit)))
+    callees = CALLEES.reach(index, Seeds(spans=unit_spans(index, place_order)))
 
     # Assert
     assert places(callers) == [
@@ -128,19 +129,19 @@ def test_the_caller_and_callee_sources_reach_the_functions_on_either_side_of_a_s
     assert places(callees) == [(LineAnchor("orders/limits.py", 4), place_order.id, 1)]
 
 
-def test_a_unit_that_is_not_a_function_reaches_no_callers_or_callees(tmp_path: Path) -> None:
-    # Arrange: limits.py's top-level code is the MAX_ITEMS constant
-    index = shop_index(tmp_path)
-    top_level = units_by_symbol(index, "orders/limits.py")["<top level>"]
+def test_top_level_code_reaches_the_functions_it_calls_but_has_no_callers(tmp_path: Path) -> None:
+    # Arrange: app.py's top-level code calls build
+    index = shop_index(tmp_path, {"app.py": "def build():\n    return 1\n\n\nAPP = build()\n"})
+    top_level = units_by_symbol(index, "app.py")["<top level>"]
+    spans = unit_spans(index, top_level)
 
     # Act
-    reached = [
-        *CALLERS.reach(index, Seeds(units=(top_level,))),
-        *CALLEES.reach(index, Seeds(units=(top_level,))),
-    ]
+    callers = CALLERS.reach(index, Seeds(spans=spans))
+    callees = CALLEES.reach(index, Seeds(spans=spans))
 
     # Assert
-    assert reached == []
+    assert spans == (Span("app.py", 5, 5),)
+    assert (callers, places(callees)) == ([], [(LineAnchor("app.py", 1), "app.py:5-5", 1)])
 
 
 def test_the_definition_and_reference_sources_reach_a_names_definition_and_its_uses(tmp_path: Path) -> None:
@@ -203,8 +204,8 @@ def test_the_model_sources_link_prisma_queries_and_the_models_they_query(
     website = units_by_symbol(index, SCHEMA)["model Website"]
 
     # Act
-    queried = MODELS.reach(index, Seeds(units=(update_website,)))
-    calls = CLIENT_CALLS.reach(index, Seeds(units=(website,)))
+    queried = MODELS.reach(index, Seeds(spans=unit_spans(index, update_website)))
+    calls = CLIENT_CALLS.reach(index, Seeds(spans=unit_spans(index, website)))
 
     # Assert
     assert places(queried) == [(LineAnchor(SCHEMA, 98), update_website.id, 1)]

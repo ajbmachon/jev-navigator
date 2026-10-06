@@ -1,9 +1,10 @@
 """Sources: where a search's candidates come from, as code facts without a model.
 
-A source takes seeds and the index and reaches places. A place is a file, meaning every unit listed
-in it, or an anchor, meaning the unit holding it. Each place it reaches carries its provenance: the
-source, the seed it came from, a distance, and the request names it was reached by. A source makes
-no Jev call.
+A source takes seeds and the index and reaches places. A place is a file (every unit listed in it),
+an anchor (the unit holding a line, or the lines a range names) or a definition span the index knows
+(opened whole). Each place it reaches carries its provenance: the source, the seed it came from, a
+distance, the request names it was reached by, and for a link between two pieces of code the
+relation in words and how sure the index is of it. A source makes no Jev call.
 
 A source never builds units and never scores them. The search resolves places into units with its
 own room and reading, so the units, the anchors that named none and each seed's counts have one
@@ -20,40 +21,47 @@ from dataclasses import dataclass
 from typing import ClassVar, Protocol
 
 from . import operations
+from .index.bindings import Binding
 from .index.code_index import CodeIndex
 from .index.languages import language_read
 from .index.scope import is_lockfile
 from .index.spans import Span, TextHit
-from .index.units import Anchor, LineAnchor, Unit, UnitKind, read_ranges
+from .index.units import Anchor, LineAnchor
 
 
 @dataclass(frozen=True)
 class Seeds:
     """What sources start from. ``names`` and ``texts`` come from the request (the texts are the
-    targets' descriptions), ``files`` and ``anchors`` from the caller, and ``units`` are units a search
-    already judged, such as one that cleared a target's bar."""
+    targets' descriptions), ``files`` and ``anchors`` from the caller, and ``spans`` are code a search
+    already holds: the spans of a unit that cleared a target's bar (``units.unit_spans``), or the code
+    find opened, which may be a function, a window of lines or a stretch chosen by position."""
 
     names: tuple[str, ...] = ()
     texts: tuple[str, ...] = ()
     files: tuple[str, ...] = ()
     anchors: tuple[Anchor, ...] = ()
-    units: tuple[Unit, ...] = ()
+    spans: tuple[Span, ...] = ()
 
 
 @dataclass(frozen=True)
 class Reach:
-    """One place a source reached. ``at`` is a file (every unit listed in it) or an anchor (the unit
-    holding it). ``source`` is the source's name and ``seed`` what it reached the place from: a name,
-    a path, an anchor as ``file:line`` or a unit id. ``distance`` is how far the place lies from what
-    the caller pointed at, 0 for an anchor; the frontier subtracts it from a unit's value and keeps the
+    """One place a source reached. ``at`` is a file (every unit listed in it), a line (the unit
+    holding it), a range of lines chosen by position, or a definition span the index knows, opened
+    whole. ``source`` is the source's name and ``seed`` what it reached the place from: a name, a path,
+    an anchor as ``file:line`` or a span's key. ``distance`` is how far the place lies from what the
+    caller pointed at, 0 for an anchor; the frontier subtracts it from a unit's value and keeps the
     smallest when several sources reach one unit. ``names`` are the request names the source reached
-    the place by; each name's rarity counts them."""
+    the place by; each name's rarity counts them. ``relation`` says in words how the place relates to
+    its seed, such as "calls place", and ``binding`` how sure the index is that a call or use reaches
+    the seed, for a link the index resolved by name."""
 
-    at: str | Anchor
+    at: str | Anchor | Span
     source: str
     seed: str
     distance: int
     names: frozenset[str] = frozenset()
+    relation: str = ""
+    binding: Binding | None = None
 
 
 class Source(Protocol):
@@ -124,35 +132,32 @@ class NameSource:
 
 @dataclass(frozen=True)
 class CallerSource:
-    """The functions calling each seed unit that is a named function or method, where the index reads
-    the calls, at distance 1."""
+    """The functions calling each named seed span, where the index reads the calls, at distance 1."""
 
     name: ClassVar[str] = "caller"
     label: ClassVar[str] = "callers"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(LineAnchor(caller.file, caller.start), self.name, unit.id, 1)
-            for unit in seeds.units
-            if (function := function_span(index, unit)) is not None and function.is_named
-            for caller, _ in operations.caller_functions(index, function)
+            Reach(LineAnchor(caller.file, caller.start), self.name, span.key, 1)
+            for span in seeds.spans
+            if span.is_named
+            for caller, _ in operations.caller_functions(index, span)
         ]
 
 
 @dataclass(frozen=True)
 class CalleeSource:
-    """The functions each seed unit that is a function or method calls, where the index reads the
-    calls, at distance 1."""
+    """The functions each seed span calls, where the index reads the calls, at distance 1."""
 
     name: ClassVar[str] = "callee"
     label: ClassVar[str] = "callees"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(LineAnchor(callee.file, callee.start), self.name, unit.id, 1)
-            for unit in seeds.units
-            if (function := function_span(index, unit)) is not None
-            for callee, _ in operations.callee_functions(index, function)
+            Reach(LineAnchor(callee.file, callee.start), self.name, span.key, 1)
+            for span in seeds.spans
+            for callee, _ in operations.callee_functions(index, span)
         ]
 
 
@@ -190,7 +195,7 @@ class ReferenceSource:
 
 @dataclass(frozen=True)
 class ImportSource:
-    """Every unit of the files that the anchors' files and the seed units' files import, where the
+    """Every unit of the files that the anchors' files and the seed spans' files import, where the
     index reads the language, at distance 1."""
 
     name: ClassVar[str] = "import"
@@ -207,7 +212,7 @@ class ImportSource:
 
 @dataclass(frozen=True)
 class ImporterSource:
-    """Every unit of the files that import the anchors' files or the seed units' files, at distance 1."""
+    """Every unit of the files that import the anchors' files or the seed spans' files, at distance 1."""
 
     name: ClassVar[str] = "importer"
     label: ClassVar[str] = "importing files"
@@ -238,7 +243,7 @@ class NamedFileSource:
 
 @dataclass(frozen=True)
 class ModelSource:
-    """The Prisma schema's model and view blocks each seed unit queries through Prisma Client
+    """The Prisma schema's model and view blocks each seed span queries through Prisma Client
     (``operations.queried_models``), at distance 1."""
 
     name: ClassVar[str] = "model"
@@ -246,15 +251,15 @@ class ModelSource:
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(LineAnchor(file, block.start), self.name, unit.id, 1)
-            for unit in seeds.units
-            for file, block in operations.queried_models(index, read_ranges(index, unit.path, unit.ranges))
+            Reach(LineAnchor(file, block.start), self.name, span.key, 1)
+            for span in seeds.spans
+            for file, block in operations.queried_models(index, index.read_slice(span).text)
         ]
 
 
 @dataclass(frozen=True)
 class ClientCallSource:
-    """The code that queries each seed unit that is a Prisma model or view block, found by the text of
+    """The code that queries a Prisma model or view block each seed span overlaps, found by the text of
     its Prisma Client calls (``operations.client_calls``), at distance 1."""
 
     name: ClassVar[str] = "client_call"
@@ -262,10 +267,9 @@ class ClientCallSource:
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(LineAnchor(hit.file, hit.line), self.name, unit.id, 1)
-            for unit in seeds.units
-            if unit.kind is UnitKind.SCHEMA_BLOCK
-            for hit, _ in operations.client_calls(index, Span(unit.path, unit.start, unit.end))
+            Reach(LineAnchor(hit.file, hit.line), self.name, span.key, 1)
+            for span in seeds.spans
+            for hit, _ in operations.client_calls(index, span)
         ]
 
 
@@ -306,14 +310,7 @@ def near_files(index: CodeIndex, anchors: Sequence[Anchor]) -> frozenset[str]:
 
 
 def pointed_files(index: CodeIndex, seeds: Seeds) -> tuple[str, ...]:
-    """The scope files the anchors and the seed units sit in, in that order, each once."""
+    """The scope files the anchors and the seed spans sit in, in that order, each once."""
     scope = frozenset(index.files)
-    pointed = [*(anchor.file for anchor in seeds.anchors), *(unit.path for unit in seeds.units)]
+    pointed = [*(anchor.file for anchor in seeds.anchors), *(span.file for span in seeds.spans)]
     return tuple(file for file in dict.fromkeys(pointed) if file in scope)
-
-
-def function_span(index: CodeIndex, unit: Unit) -> Span | None:
-    """The function or method span a unit is, or None for any other unit."""
-    if unit.kind not in (UnitKind.FUNCTION, UnitKind.METHOD):
-        return None
-    return next((span for span in index.functions_in(unit.path) if span.key == unit.id), None)

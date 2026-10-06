@@ -26,9 +26,11 @@ from itertools import groupby
 from typing import TypeVar
 
 from ..index.code_index import CodeIndex
+from ..index.spans import Span
 from ..index.units import (
     Anchor,
     Item,
+    LineAnchor,
     Piece,
     RangeAnchor,
     Reading,
@@ -39,6 +41,7 @@ from ..index.units import (
     list_units,
     read_ranges,
     resolve_each,
+    unit_spans,
 )
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, item_path, serialized_chars
@@ -665,7 +668,7 @@ class _Search:
         """The units the hop sources reach from ``unit_id``, seeded with that unit alone, each admitted on
         first sight; the unit itself is never its own hop."""
         if unit_id not in self.pushed:
-            seeds = Seeds(units=(self.units[unit_id],))
+            seeds = Seeds(spans=unit_spans(self.index, self.units[unit_id]))
             reached = (
                 pair
                 for source in self.hops
@@ -736,9 +739,10 @@ class _Search:
         return [(unit, reach_of[unit.path]) for unit in listing.units]
 
     def _units_at_anchors(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:
-        """The units each anchor names. An anchor reached by a name that names none counts against that
-        name; any other is ``unresolved``."""
-        anchors = [reach.at for reach in reaches]
+        """The units each anchor names, a definition span naming the unit that holds its first line. An
+        anchor reached by a name that names none counts against that name; any other is
+        ``unresolved``."""
+        anchors = [_anchor_of(reach.at) for reach in reaches]
         resolved = resolve_each(
             self.index, anchors, box_chars=self.room, listed_only=True, reading=self.reading
         )
@@ -874,6 +878,10 @@ def _room(judge: Judge, index: CodeIndex, checks: Sequence[Check], shared: Mappi
 
 def _is_file_reach(reach: Reach) -> bool:
     return isinstance(reach.at, str)
+
+
+def _anchor_of(at: Anchor | Span) -> Anchor:
+    return LineAnchor(at.file, at.start) if isinstance(at, Span) else at
 
 
 def _lines_by_file(regions: Sequence[RangeAnchor]) -> dict[str, frozenset[int]]:

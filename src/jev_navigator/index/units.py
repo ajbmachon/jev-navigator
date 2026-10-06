@@ -180,6 +180,14 @@ def read_ranges(index: CodeIndex, file: str, ranges: Iterable[Sequence[int]]) ->
     return "\n".join(index.read_slice(Span(file, start, end)).text for start, end in ranges)
 
 
+def unit_spans(index: CodeIndex, unit: Unit) -> tuple[Span, ...]:
+    """The code a unit covers, as the index spans it: a function or method's own span, named as the
+    syntax names it, and for any other unit one unnamed span per range of lines."""
+    if unit.kind in (UnitKind.FUNCTION, UnitKind.METHOD):
+        return tuple(span for span in index.functions_in(unit.path) if span.key == unit.id)
+    return tuple(Span(unit.path, start, end) for start, end in unit.ranges)
+
+
 def unit_score(unit: Unit, scores: Mapping[str, float]) -> float | None:
     """A unit's score for one question from ``scores`` keyed by unit or piece id: its own, or for a
     cut unit its best judged piece's; None when nothing of it was scored."""
