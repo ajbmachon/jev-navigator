@@ -3,18 +3,19 @@
 Caches are the most valuable data JVN keeps, but only while they represent real files (André,
 04.10.2026). Each store stamps its own entries and deletes them on request; this module decides:
 
-1. Dead by rules: another JVN version's fact identity folder or name table goes once no JVN version
-   used it for ``IDENTITY_UNUSED_DAYS``. An older layout of the default answer store holds paid-for
-   answers, so it follows the answer rule: it goes once unused for ``UNCONFIRMED_DAYS``.
-2. Dead by content: a fact entry or a name table file content no run confirmed against a real file
-   for ``UNCONFIRMED_DAYS`` goes.
+1. Dead by rules: another JVN version's fact identity folder, name table or spelling table goes once
+   no JVN version used it for ``IDENTITY_UNUSED_DAYS``. An older layout of the default answer store
+   holds paid-for answers, so it follows the answer rule: it goes once unused for ``UNCONFIRMED_DAYS``.
+2. Dead by content: a fact entry, or a name or spelling table's file content, no run confirmed
+   against a real file for ``UNCONFIRMED_DAYS`` goes.
 3. Answers in the default shared store no run reused for ``UNCONFIRMED_DAYS`` go, with their item
    answers and refusals. A store at a path the user names is never opened.
 4. Run folders JVN named itself in ``runs_root()`` go after ``FINISHED_RUN_DAYS``, or
    ``RESUMABLE_RUN_DAYS`` while they hold ``resume.json``. A folder the user named is never touched.
-5. Over the disk budget, run folders go first, oldest first; then other versions' facts and name
-   tables, least recently used first; then fact entries and name table rows, least recently confirmed
-   first. Answers go last: older layouts of the default store, then its least recently used answers.
+5. Over the disk budget, run folders go first, oldest first; then other versions' facts, name tables
+   and spelling tables, least recently used first; then fact entries, then name and spelling table
+   rows, least recently confirmed first. Answers go last: older layouts of the default store, then its
+   least recently used answers.
 
 Housekeeping deletes only inside ``cache_root()`` and ``runs_root()`` and never follows a link. A
 folder it deletes first moves into a ``.trash`` folder in its root, so the decision is made at once
@@ -36,8 +37,10 @@ from pathlib import Path
 from .cache_root import cache_root
 from .confirmation import SECONDS_PER_DAY, Confirmations, today
 from .data_root import data_root, run_folder_started, runs_root
+from .index import spellings
 from .index.fact_cache import FactCache
 from .index.name_table import NameTable, table_path, user_name_tables
+from .index.spellings import SpellingTable
 from .judgments.store import SqliteAnswerStore, default_shared_store, is_default_store_file
 from .shared_database import database_base
 
@@ -61,7 +64,7 @@ class Sweep:
 
     deleted_files: int = 0
     deleted_bytes: int = 0
-    forgotten: dict[str, int] = field(default_factory=lambda: {"names": 0, "answers": 0})
+    forgotten: dict[str, int] = field(default_factory=lambda: {"names": 0, "spellings": 0, "answers": 0})
     finished: bool = True
 
 
@@ -91,6 +94,7 @@ class RunsStatus:
 class Status:
     facts: CacheStatus
     names: CacheStatus
+    spellings: CacheStatus
     answers: CacheStatus
     runs: RunsStatus
     trash_bytes: int
@@ -121,9 +125,13 @@ def status() -> Status:
         IDENTITY_UNUSED_DAYS,
         now,
     )
-    names, answers = (
+    names, spelling_tables, answers = (
         _cache_status(_store_bytes(store), _confirmations(store), retired, store.retired_after_days, now)
-        for store, retired in ((_NAMES, held.retired_names), (_ANSWERS, held.retired_answers))
+        for store, retired in (
+            (_NAMES, held.retired_names),
+            (_SPELLINGS, held.retired_spellings),
+            (_ANSWERS, held.retired_answers),
+        )
     )
     expired = [run for run in held.runs if run.expired(now)]
     runs = RunsStatus(
@@ -132,7 +140,7 @@ def status() -> Status:
         len(expired),
         _total(run.item for run in expired),
     )
-    return Status(facts, names, answers, runs, held.trash, held.used(), disk_budget())
+    return Status(facts, names, spelling_tables, answers, runs, held.trash, held.used(), disk_budget())
 
 
 def disk_budget() -> int:
@@ -176,7 +184,7 @@ class _Store:
     folder: Callable[[], Path]
     current: Callable[[], Path]
     belongs: Callable[[str], bool]
-    open: Callable[[], NameTable | SqliteAnswerStore]
+    open: Callable[[], NameTable | SpellingTable | SqliteAnswerStore]
     retired_after_days: int
 
     def groups(self) -> dict[Path, list[Path]]:
@@ -202,6 +210,16 @@ def _open_default_store() -> SqliteAnswerStore:
 
 
 _NAMES = _Store("names", user_name_tables, table_path, _is_table_file, NameTable, IDENTITY_UNUSED_DAYS)
+_SPELLINGS = _Store(
+    "spellings",
+    spellings.user_spelling_tables,
+    spellings.table_path,
+    _is_table_file,
+    SpellingTable,
+    IDENTITY_UNUSED_DAYS,
+)
+_TABLES = (_NAMES, _SPELLINGS)
+"""The stores keyed by file content, whose rows a run confirms."""
 _ANSWERS = _Store(
     "answers", cache_root, default_shared_store, is_default_store_file, _open_default_store, UNCONFIRMED_DAYS
 )
@@ -214,6 +232,7 @@ class _Holdings:
     entries: list[_Item]
     retired_facts: list[_Item]
     retired_names: list[_Item]
+    retired_spellings: list[_Item]
     retired_answers: list[_Item]
     runs: list[_Run]
     trash: int
@@ -225,6 +244,7 @@ class _Holdings:
             _items(entry for folder in cache.current_folders() for entry in _children(folder)),
             _items(cache.retired()),
             _NAMES.retired(),
+            _SPELLINGS.retired(),
             _ANSWERS.retired(),
             _runs(),
             sum(_size(trash) for trash in _trashes()),
@@ -232,10 +252,11 @@ class _Holdings:
 
     @property
     def retired(self) -> list[_Item]:
-        return [*self.retired_facts, *self.retired_names, *self.retired_answers]
+        return [*self.retired_facts, *self.retired_names, *self.retired_spellings, *self.retired_answers]
 
     def used(self) -> int:
-        caches = _total(self.entries) + _total(self.retired) + _store_bytes(_NAMES) + _store_bytes(_ANSWERS)
+        stores = sum(_store_bytes(store) for store in (*_TABLES, _ANSWERS))
+        caches = _total(self.entries) + _total(self.retired) + stores
         return caches + _total(run.item for run in self.runs) + self.trash
 
 
@@ -274,15 +295,21 @@ def _sweep(allowance: _Allowance) -> Sweep:
 def _apply_rules(held: _Holdings, now: float, allowance: _Allowance) -> _Holdings:
     """Rules 1 to 4; returns what they left."""
     retired_facts = _kept(held.retired_facts, _older_than(IDENTITY_UNUSED_DAYS, now), allowance)
-    retired_names, retired_answers = (
+    retired_names, retired_spellings, retired_answers = (
         _kept(items, _older_than(store.retired_after_days, now), allowance)
-        for store, items in ((_NAMES, held.retired_names), (_ANSWERS, held.retired_answers))
+        for store, items in (
+            (_NAMES, held.retired_names),
+            (_SPELLINGS, held.retired_spellings),
+            (_ANSWERS, held.retired_answers),
+        )
     )
     entries = _kept(held.entries, _older_than(UNCONFIRMED_DAYS, now), allowance)
-    for store in (_NAMES, _ANSWERS):
+    for store in (*_TABLES, _ANSWERS):
         _forget_unconfirmed(store, today() - UNCONFIRMED_DAYS, allowance)
     runs = [run for run in held.runs if not (run.expired(now) and _removed(run.item, allowance))]
-    return _Holdings(entries, retired_facts, retired_names, retired_answers, runs, held.trash)
+    return _Holdings(
+        entries, retired_facts, retired_names, retired_spellings, retired_answers, runs, held.trash
+    )
 
 
 def _older_than(days: int, now: float) -> Callable[[_Item], bool]:
@@ -295,20 +322,21 @@ def _kept(items: list[_Item], doomed: Callable[[_Item], bool], allowance: _Allow
 
 
 def _keep_to_budget(held: _Holdings, allowance: _Allowance) -> None:
-    """Rule 5: everything ahead of the answers, then name rows, then older answer layouts, and the
-    default store's answers last."""
+    """Rule 5: everything ahead of the answers, then name and spelling rows, then older answer
+    layouts, and the default store's answers last."""
     excess = held.used() - disk_budget()
     if excess <= 0:
         return
     excess = _evicted(_ahead_of_answers(held), excess, allowance)
-    excess = _forgotten(_NAMES, excess, allowance)
+    for store in _TABLES:
+        excess = _forgotten(store, excess, allowance)
     excess = _evicted(_least_recently_used(held.retired_answers), excess, allowance)
     _forgotten(_ANSWERS, excess, allowance)
 
 
 def _ahead_of_answers(held: _Holdings) -> Iterator[_Item]:
     yield from (run.item for run in sorted(held.runs, key=lambda run: run.started))
-    yield from _least_recently_used([*held.retired_facts, *held.retired_names])
+    yield from _least_recently_used([*held.retired_facts, *held.retired_names, *held.retired_spellings])
     yield from _least_recently_used(held.entries)
 
 

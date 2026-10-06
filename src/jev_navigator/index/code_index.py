@@ -36,12 +36,12 @@ from .imports import (
     reexported_names,
     resolve_import,
 )
-from .languages import export_words, is_schema_file, language_of
+from .languages import export_words, is_schema_file, language_of, language_read
 from .memo import memoized
 from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
 from .prisma_schema import SchemaBlock, schema_blocks
-from .scope import text_files_left_out
+from .scope import is_lockfile, text_files_left_out
 from .scope_scan import (
     CallMatch,
     FileFacts,
@@ -55,6 +55,7 @@ from .scope_scan import (
 )
 from .source_files import DISAPPEARED, SourceFiles
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
+from .spellings import Spelling, SpellingMap, SpellingTable, file_words
 from .text_blocks import TextBlock, text_blocks
 from .tsconfig import ScriptPaths, nearest_script_paths
 
@@ -137,6 +138,7 @@ class CodeIndex:
         }
         self._blobs: dict[str, str] = {}
         self._name_table = NameTable()
+        self._spelling_table = SpellingTable()
         self._unwritten: dict[str, FileFacts] = {}
         self._entries: dict[str, FileEntry] | None = None
         self._files_by_blob: dict[str, tuple[str, ...]] = {}
@@ -475,6 +477,24 @@ class CodeIndex:
         """Functions, classes, and the constants, assignments, types, interfaces and enums of
         ``declarations_in``."""
         return self._definitions_by_name(name)
+
+    def names(self, term: str, max_files: int | None = None) -> tuple[Spelling, ...]:
+        """Every real spelling of ``term`` in scope, rarest first (see ``spellings``): the words the
+        files JVN parses or a text search reads spell, and the files' names, each naming at most
+        ``max_files`` files. A lockfile spells none."""
+        return self._read_spellings().names(term, max_files)
+
+    @memoized
+    def _read_spellings(self) -> SpellingMap:
+        files = self._spelled_files()
+        return SpellingMap(file_words(self._spelling_table, self._blobs_of(files), self._read_bytes))
+
+    def _spelled_files(self) -> tuple[str, ...]:
+        """The available files a text search or a parser reads, in scope order, lockfiles left out."""
+        available = [file for file in self.available_files if not is_lockfile(file)]
+        text = [file for file in available if not language_read(file)]
+        left_out = self.text_files_left_out(text)
+        return tuple(file for file in available if file not in left_out)
 
     def find_callers(self, name: str) -> tuple[CallSite, ...]:
         """Calls to ``name`` found by name in the syntax tree, each with its binding status. When one

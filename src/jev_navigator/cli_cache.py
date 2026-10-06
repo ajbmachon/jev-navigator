@@ -49,6 +49,7 @@ def _status_lines(status: Status) -> list[str]:
         f"({housekeeping.DISK_BUDGET_VARIABLE})",
         _cache_line("facts", status.facts, "entry", "entries"),
         _cache_line("names", status.names, "file", "files"),
+        _cache_line("spellings", status.spellings, "file", "files"),
         _cache_line("answers", status.answers, "request", "requests"),
         f"runs: {_count(runs.count, 'run', 'runs')}, {_size(runs.bytes)}; {runs.expired:,} past retention "
         f"({housekeeping.FINISHED_RUN_DAYS} days finished, {housekeeping.RESUMABLE_RUN_DAYS} resumable), "
@@ -71,7 +72,8 @@ def _cache_line(name: str, cache: CacheStatus, singular: str, plural: str) -> st
 def _pruned(sweep: Sweep) -> str:
     return (
         f"removed {_count(sweep.deleted_files, 'file', 'files')} ({_size(sweep.deleted_bytes)}); forgot "
-        f"{_count(sweep.forgotten['names'], 'name table file', 'name table files')} and "
+        f"{_count(sweep.forgotten['names'], 'name table file', 'name table files')}, "
+        f"{_count(sweep.forgotten['spellings'], 'spelling table file', 'spelling table files')} and "
         f"{_count(sweep.forgotten['answers'], 'answered request', 'answered requests')}"
     )
 

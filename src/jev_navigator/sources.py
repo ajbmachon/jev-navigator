@@ -24,7 +24,12 @@ from .index.code_index import CodeIndex
 from .index.languages import language_read
 from .index.scope import is_lockfile
 from .index.spans import Span, TextHit
+from .index.spellings import Spelling, text_words
 from .index.units import Anchor, LineAnchor, Unit, UnitKind, read_ranges
+
+SPELLING_FILES = 20
+"""The most files a spelling the spelling source follows may be held by: one more common points
+nowhere in particular."""
 
 
 @dataclass(frozen=True)
@@ -120,6 +125,49 @@ class NameSource:
         if not self.text_files:
             return hits
         return tuple(hit for hit in hits if not language_read(hit.file) and not is_lockfile(hit.file))
+
+
+@dataclass(frozen=True)
+class SpellingSource:
+    """The places each real spelling of a request name or of a word of the targets' descriptions sits
+    (``CodeIndex.names``), at distance 3, the rarest spelling first, each reached by the name or word
+    it spells: ``website`` reaches the lines spelling ``createWebsite`` and ``WEBSITE_ID`` and every
+    unit of ``website.ts``. A spelling held by more than ``max_files`` files is too common to point
+    anywhere and is left out; None follows every one. With ``text_files`` only the files JVN does not
+    parse are kept, never a lockfile."""
+
+    max_files: int | None = SPELLING_FILES
+    text_files: bool = False
+    name: ClassVar[str] = "spelling"
+    label: ClassVar[str] = "spellings"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        terms = dict.fromkeys((*seeds.names, *text_words(seeds.texts)))
+        spelled = sorted(
+            (
+                (term, spelling)
+                for term in terms
+                for spelling in index.names(term)
+                if self.max_files is None or spelling.files <= self.max_files
+            ),
+            key=lambda found: (found[1].files, found[1].word, found[0]),
+        )
+        return [reach for term, spelling in spelled for reach in self._places(term, spelling)]
+
+    def _places(self, term: str, spelling: Spelling) -> list[Reach]:
+        kept = [place for place in spelling.places if self._reads(place.file)]
+        if spelling.file_name:
+            return [Reach(place.file, self.name, term, 3, frozenset({term})) for place in kept]
+        return [
+            Reach(LineAnchor(place.file, line), self.name, term, 3, frozenset({term}))
+            for place in kept
+            for line in place.lines
+        ]
+
+    def _reads(self, file: str) -> bool:
+        if self.text_files:
+            return not language_read(file) and not is_lockfile(file)
+        return bool(language_read(file))
 
 
 @dataclass(frozen=True)
@@ -273,6 +321,8 @@ ANCHORS = AnchorSource()
 FILES = FileSource()
 NAMES = NameSource()
 TEXT_NAMES = NameSource(text_files=True)
+SPELLINGS = SpellingSource()
+TEXT_SPELLINGS = SpellingSource(text_files=True)
 CALLERS = CallerSource()
 CALLEES = CalleeSource()
 DEFINITIONS = DefinitionSource()

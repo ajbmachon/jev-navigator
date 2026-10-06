@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from .adapters.routes import RoutedJevClient, system_one_client
 from .cache_root import cache_root
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
+from .cli_names import add_names_command, run_names
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
 from .cli_trace import (
@@ -81,6 +82,9 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_line_chars")
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
 RESUMABLE_OUTCOMES = (Outcome.BUDGET, Outcome.CANCELLED, Outcome.FAILED)
+REQUEST_COMMANDS = ("find", "findall", "trace", "stats", "names")
+"""The commands a JSON request can name."""
+REQUEST_EXAMPLE_TARGETS = {"names": "website"}
 FIND_ALL_TARGET = "target"
 FIND_ALL_QUESTION = match_check(FIND_ALL_TARGET)
 """A search that stopped before it finished: it saves its frontier, a Find All does not enumerate
@@ -104,7 +108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "cache":
         return run_cache_command(args.action)
-    status = _run_statistics(args) if args.command == "stats" else _run_search(args)
+    status = _COMMAND_RUNNERS.get(args.command, _run_search)(args)
     return 130 if tidy_after_run() else status
 
 
@@ -291,6 +295,10 @@ def _run_statistics(args: argparse.Namespace) -> int:
         return 1
     finally:
         progress.close(outcome)
+
+
+_COMMAND_RUNNERS = {"stats": _run_statistics, "names": run_names}
+"""The commands that run without a model; every other command is a search."""
 
 
 def create_evidence_pack(
@@ -613,13 +621,9 @@ Find stops on a match; it is not an exhaustive find-all or an end-to-end trace.
 For JSON field names, types and defaults: jvn schema find. Full examples: docs/cli.md.""",
     )
     schema = commands.add_parser("schema", help="print a command's JSON request schema (no model calls)")
-    schema.add_argument(
-        "topic", choices=("find", "findall", "trace", "stats"), help="command whose request schema to show"
-    )
+    schema.add_argument("topic", choices=REQUEST_COMMANDS, help="command whose request schema to show")
     help_command = commands.add_parser("help", help="show general or command-specific help")
-    help_command.add_argument(
-        "topic", nargs="?", choices=("find", "findall", "trace", "stats", "schema", "cache")
-    )
+    help_command.add_argument("topic", nargs="?", choices=(*REQUEST_COMMANDS, "schema", "cache"))
     cache = commands.add_parser(
         "cache",
         help="show or prune what JVN keeps on disk (no model calls)",
@@ -712,6 +716,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     stats.add_argument(
         "--top-level", action="store_true", help="Exclude nested symbols from ranking and ranges"
     )
+    add_names_command(commands, _count_or_none)
     return parser
 
 
@@ -839,8 +844,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         parser.error("JSON request must be an object")
     command = payload.get("command", "find")
     # The command parser is the option schema for both input formats.
-    if command not in ("find", "findall", "trace", "stats"):
-        parser.error(f"unknown JSON command: {command!r}; expected find, findall, trace or stats")
+    if command not in REQUEST_COMMANDS:
+        parser.error(f"unknown JSON command: {command!r}; expected {', '.join(REQUEST_COMMANDS)}")
     actions = _request_actions(_command_parser(parser, command))
     arguments = [command]
     for name, value in payload.items():
@@ -925,7 +930,11 @@ def _request_schema(parser: argparse.ArgumentParser) -> dict:
         "examples": [
             {
                 "command": command,
-                **({"target": "the order item limit"} if command != "stats" else {}),
+                **(
+                    {"target": REQUEST_EXAMPLE_TARGETS.get(command, "the order item limit")}
+                    if command != "stats"
+                    else {}
+                ),
                 **({"start": ["app/orders.py:42"]} if command == "trace" else {}),
             }
         ],
