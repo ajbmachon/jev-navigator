@@ -230,7 +230,9 @@ class CodeIndex:
         """The regular files under ``prefixes`` as they were at ``commit``, read from git objects into a
         private temporary directory; the checkout is never touched. History lookups still run in
         ``repository``. Symbolic links and submodules are left out, as in ``from_git``. The commit's
-        tsconfig files come along (outside the scope), so path aliases resolve."""
+        tsconfig files come along (outside the scope), so path aliases resolve. ``close()``, or the end
+        of a ``with`` block over the index, removes the directory; it is removed at once if the index
+        cannot be built."""
         repository = Path(repository)
         sha = tools.git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repository).strip()
         blobs = _regular_blobs(tools.git(["ls-tree", "-r", "-z", sha, "--", *prefixes], repository))
@@ -240,12 +242,29 @@ class CodeIndex:
                 f"{len(listed)} files is wider than the limit of {max_files}; narrow the scope"
             )
         snapshot = tempfile.TemporaryDirectory(prefix=f"jev-navigator-{sha[:8]}-")
-        tools.export_blobs(repository, _blobs_to_export(repository, sha, listed), Path(snapshot.name))
-        index = cls(
-            snapshot.name, listed, max_files=max_files, commit=sha, git_root=repository, blob_ids=blobs
-        )
+        try:
+            tools.export_blobs(repository, _blobs_to_export(repository, sha, listed), Path(snapshot.name))
+            index = cls(
+                snapshot.name, listed, max_files=max_files, commit=sha, git_root=repository, blob_ids=blobs
+            )
+        except BaseException:
+            snapshot.cleanup()
+            raise
         index._snapshot = snapshot
         return index
+
+    def close(self) -> None:
+        """Removes the private directory ``at_commit`` read the revision into; nothing for an index over a
+        checkout. The index reads no file after it."""
+        if self._snapshot is not None:
+            self._snapshot.cleanup()
+            self._snapshot = None
+
+    def __enter__(self) -> CodeIndex:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
     def require_commit(self, commit: str) -> None:
         """Raises unless this index reads exactly ``commit``: a working-tree index with uncommitted

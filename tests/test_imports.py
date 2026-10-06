@@ -387,12 +387,11 @@ def test_an_index_at_an_old_commit_still_reads_configs_outside_its_scope(tmp_pat
     commit_all(tmp_path)
 
     # Act
-    index = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("src/",))
-
-    # Assert
-    assert index.imports("src/app/page.ts") == ("src/lib/utils.ts", "src/lib/money.ts")
-    assert "tsconfig.json" not in index.files
-    assert "package.json" not in index.files
+    with CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("src/",)) as index:
+        # Assert
+        assert index.imports("src/app/page.ts") == ("src/lib/utils.ts", "src/lib/money.ts")
+        assert "tsconfig.json" not in index.files
+        assert "package.json" not in index.files
 
 
 def test_a_multi_line_import_with_comments_inside_keeps_its_module_and_names() -> None:

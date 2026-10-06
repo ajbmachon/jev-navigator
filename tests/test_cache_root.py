@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from git_repos import read_files
 
-from jev_navigator.cache_root import cache_root
+from jev_navigator.cache_root import CACHE_HOME_VARIABLE, cache_root
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
 from jev_navigator.index.scope_scan import Unparsed, scan_facts
@@ -62,6 +62,35 @@ def test_a_relative_xdg_cache_home_is_ignored_so_no_cache_lands_in_the_analysed_
 
     # Assert
     assert root == Path.home() / ".cache" / "jev-navigator"
+
+
+def test_a_cache_home_puts_every_cache_in_that_folder_ahead_of_xdg_cache_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a host keeps one tenant's caches in their own folder
+    tenant = tmp_path / "volume" / "jvn-cache" / "tenant-a"
+    monkeypatch.setenv(CACHE_HOME_VARIABLE, str(tenant))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv(SHARED_STORE_VARIABLE, raising=False)
+
+    # Act
+    root, answers, facts = cache_root(), shared_store_path(), FactCache().root
+
+    # Assert
+    assert (root, facts) == (tenant, tenant / "facts")
+    assert answers == tenant / f"answers-v{SHARED_STORE_VERSION}.sqlite"
+
+
+def test_a_relative_cache_home_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange
+    monkeypatch.setenv(CACHE_HOME_VARIABLE, "tenant-a")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+
+    # Act
+    root = cache_root()
+
+    # Assert
+    assert root == tmp_path / "jev-navigator"
 
 
 def test_a_store_named_in_a_folder_beside_the_cache_folder_is_accepted(private_cache_root: Path) -> None:

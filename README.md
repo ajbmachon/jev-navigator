@@ -324,7 +324,9 @@ folder with `--out`. Without `--out`, a run's evidence pack goes to its own run 
 unset), and the run prints that path.
 
 Caches live in `$XDG_CACHE_HOME/jev-navigator` (`~/.cache` when unset): the fact cache (`facts/`), the
-name table (`names/`) and the shared answer store (`answers-v2.sqlite`). Caches are the data JVN
+name table (`names/`) and the shared answer store (`answers-v2.sqlite`). A host that keeps each
+tenant's caches apart sets `JEV_NAVIGATOR_CACHE_HOME` to that tenant's folder, which then holds
+them directly; a relative path in either variable is ignored. Caches are the data JVN
 values most, but only while they represent real files, so JVN cleans up after itself:
 
 - Facts or a name table another JVN version wrote, which this version can never read, go once no
@@ -348,6 +350,17 @@ notice and exit status 130. Nothing outside these two folders is ever deleted, a
 `jvn cache status` shows what each store holds and what each rule would remove; `jvn cache prune`
 applies every rule now.
 
+A program that uses JVN as a library (`CodeIndex`, `find_code` and the other blocks) fills the same
+caches but never cleans them up, because only a CLI run ends with housekeeping. Such a host runs
+`jvn cache prune` itself on its own schedule. A host serving several tenants composes the two
+variables: it gives each tenant's searches `JEV_NAVIGATOR_CACHE_HOME=<that tenant's folder>`, and
+prunes each folder with the same variable and the share of disk it allows that tenant in
+`JEV_NAVIGATOR_DISK_BUDGET`:
+
+```bash
+JEV_NAVIGATOR_CACHE_HOME=/volume/jvn-cache/tenant-a JEV_NAVIGATOR_DISK_BUDGET=10GB jvn cache prune
+```
+
 ## Layer 1: index, operations and comments (no model)
 
 ```python
@@ -359,6 +372,7 @@ index = CodeIndex.from_directory(repo_root, prefixes=("app/", "web/"))  # tracke
 index.not_indexed_files  # {"node_modules/": "ignored", ...}: every file or folder left out, with the reason
 tracked = CodeIndex.from_git(repo_root, ["app/orders.py"])  # only what git tracks; the rest is not_indexed
 old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
+old.close()  # removes at_commit's private copy; `with CodeIndex.at_commit(...) as old:` closes it too
 index.find_definition("LIMITS_KEY")  # functions, classes, constants, assignments, types, enums
 index.find_callers("validate_order")  # CallSite(file, line, caller, binding), found by name
 index.callee_edges(span)  # CallEdge(name, line, binding); find_callees gives names only
@@ -837,7 +851,7 @@ on its own scope, so searches sharing one judge never use up each other's budget
   likewise keeps the body as handed to the client (`body_base64`) and the wire bytes when captured
   (`sent_body_base64`), and `export_for_review` keeps the order the request is sent in. By default the store keeps
   hashes, question wording, and each item's ids, file, lines, commit and names, or its place's file
-  and runs, so `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from
+  and runs, so `rebuild_request(record, old, shared)`, with `old` an open `CodeIndex.at_commit(...)`, rebuilds a request from
   the code at that commit and proves it matches, or names the part that differs. A request whose items carried a
   field that can quote code, such as a Trace link line or a Find signature, keeps that field withheld,
   so it does not rebuild exactly; the mismatch then names the withheld fields first.

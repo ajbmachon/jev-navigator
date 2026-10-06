@@ -43,7 +43,8 @@ def test_a_stored_request_is_rebuilt_exactly_from_the_repository_at_its_commit(
     (sample_repo / "app/validation.py").write_text("# the checkout moved on\n")
 
     # Act
-    rebuilt = rebuild_request(record, CodeIndex.at_commit(sample_repo, sample_index.commit), CLAIM)
+    with CodeIndex.at_commit(sample_repo, sample_index.commit) as historical:
+        rebuilt = rebuild_request(record, historical, CLAIM)
 
     # Assert
     assert rebuilt.matches and rebuilt.request_sha256 == record.request_sha256

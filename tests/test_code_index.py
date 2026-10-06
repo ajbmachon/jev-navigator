@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -200,14 +201,53 @@ def test_at_commit_reads_the_old_version_without_touching_the_checkout(sample_re
     checkout_before = (sample_repo / "app/validation.py").read_text()
 
     # Act
-    old = CodeIndex.at_commit(sample_repo, first_commit, prefixes=("app/",))
+    with CodeIndex.at_commit(sample_repo, first_commit, prefixes=("app/",)) as old:
+        # Assert
+        assert "web/routes.ts" not in old.files and "app/settings.py" not in old.files
+        assert [span.name for span in old.functions_in("app/validation.py")] == [
+            "validate_order",
+            "check_limits",
+        ]
+        assert old.read_slice(old.find_definition("check_limits")[0]).commit == first_commit
+        assert set(old.co_changed_files("app/orders.py")) == {
+            ("app/__init__.py", 1),
+            ("app/validation.py", 1),
+        }
+    assert (sample_repo / "app/validation.py").read_text() == checkout_before
+
+
+def test_closing_an_index_at_a_commit_removes_its_private_copy_but_never_a_checkout(
+    sample_repo: Path,
+) -> None:
+    # Act
+    with CodeIndex.at_commit(sample_repo, "HEAD", prefixes=("app/",)) as historical:
+        copied = (historical.root / "app/validation.py").is_file()
+    working = CodeIndex.from_git(sample_repo, prefixes=("app/",))
+    working.close()
 
     # Assert
-    assert "web/routes.ts" not in old.files and "app/settings.py" not in old.files
-    assert [span.name for span in old.functions_in("app/validation.py")] == ["validate_order", "check_limits"]
-    assert old.read_slice(old.find_definition("check_limits")[0]).commit == first_commit
-    assert set(old.co_changed_files("app/orders.py")) == {("app/__init__.py", 1), ("app/validation.py", 1)}
-    assert (sample_repo / "app/validation.py").read_text() == checkout_before
+    assert copied and not historical.root.exists()
+    assert (working.root / "app/validation.py").is_file()
+
+
+def test_an_index_at_a_commit_that_fails_to_build_leaves_no_private_copy(
+    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: the disk fills while the commit's files are written out
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+    def disk_full(*args: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(tools, "export_blobs", disk_full)
+
+    # Act: the raised error's traceback stays alive, so garbage collection cannot remove the copy
+    with pytest.raises(OSError, match="No space left") as raised:
+        CodeIndex.at_commit(sample_repo, "HEAD", prefixes=("app/",))
+
+    # Assert
+    assert raised.value.errno == 28
+    assert not [path for path in tmp_path.iterdir() if path.name.startswith("jev-navigator-")]
 
 
 def test_call_bindings_say_whether_the_target_is_proven(sample_index: CodeIndex) -> None:
@@ -900,12 +940,11 @@ def test_tracked_symbolic_links_stay_out_of_the_scope(tmp_path: Path) -> None:
 
     # Act
     working = CodeIndex.from_git(tmp_path, prefixes=("app/",))
-    historical = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("app/",))
-
-    # Assert
-    assert working.files == historical.files == ("app/main.py",)
-    assert [hit.file for hit in working.search_text("shared.key")] == ["app/main.py"]
-    assert [hit.file for hit in historical.search_text("shared.key")] == ["app/main.py"]
+    with CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("app/",)) as historical:
+        # Assert
+        assert working.files == historical.files == ("app/main.py",)
+        assert [hit.file for hit in working.search_text("shared.key")] == ["app/main.py"]
+        assert [hit.file for hit in historical.search_text("shared.key")] == ["app/main.py"]
 
 
 def test_file_names_with_non_ascii_characters_enter_the_scope_as_they_are_on_disk(tmp_path: Path) -> None:
@@ -917,10 +956,11 @@ def test_file_names_with_non_ascii_characters_enter_the_scope_as_they_are_on_dis
 
     # Act
     working = CodeIndex.from_git(tmp_path, prefixes=("app/",))
-    historical = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("app/",))
+    with CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("app/",)) as historical:
+        historical_files = historical.files
 
     # Assert
-    assert working.files == historical.files == ("app/größe.py",)
+    assert working.files == historical_files == ("app/größe.py",)
     assert working.read_slice(working.find_definition("groesse")[0]).text.endswith("return 2")
     assert working._changed == frozenset({"app/größe.py"})
 
@@ -933,12 +973,11 @@ def test_an_index_at_a_commit_reads_a_file_whose_name_holds_a_newline(tmp_path: 
     commit_all(tmp_path)
 
     # Act
-    historical = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("app/",))
-
-    # Assert
-    assert historical.files == ("app/line\nbreak.py", "app/plain.py")
-    assert (historical.root / "app/line\nbreak.py").read_text().endswith("return 1\n")
-    assert (historical.root / "app/plain.py").read_text().endswith("return 2\n")
+    with CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("app/",)) as historical:
+        # Assert
+        assert historical.files == ("app/line\nbreak.py", "app/plain.py")
+        assert (historical.root / "app/line\nbreak.py").read_text().endswith("return 1\n")
+        assert (historical.root / "app/plain.py").read_text().endswith("return 2\n")
 
 
 def test_search_text_returns_every_hit_in_file_and_line_order_unless_the_caller_bounds_it(

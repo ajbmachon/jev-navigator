@@ -5,10 +5,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+CACHE_HOME_VARIABLE = "JEV_NAVIGATOR_CACHE_HOME"
+
 
 def cache_root() -> Path:
-    """``$XDG_CACHE_HOME/jev-navigator``, or ``~/.cache/jev-navigator`` when the variable is unset or
-    relative."""
+    """``$JEV_NAVIGATOR_CACHE_HOME`` itself, for a host that keeps each tenant's caches in their own
+    folder; else ``$XDG_CACHE_HOME/jev-navigator``, or ``~/.cache/jev-navigator`` when that is unset.
+    A relative path in either variable is ignored."""
+    own = Path(os.environ.get(CACHE_HOME_VARIABLE, ""))
+    if own.is_absolute():
+        return own
     return xdg_base("XDG_CACHE_HOME", Path.home() / ".cache") / "jev-navigator"
 
 
