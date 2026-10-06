@@ -82,17 +82,17 @@ def test_the_other_functions_of_the_opened_file_are_offered_whole(tmp_path: Path
     assert "in the same file as place" in offered[refund.key]
 
 
-def test_the_lines_before_an_opened_slice_are_offered(tmp_path: Path) -> None:
-    # Arrange
-    header = "".join(f"SETTING_{number} = {number}\n" for number in range(30))
+def test_the_forty_lines_before_an_opened_slice_are_offered(tmp_path: Path) -> None:
+    # Arrange: place starts on line 53
+    header = "".join(f"SETTING_{number} = {number}\n" for number in range(50))
     index = committed_index(tmp_path, {"orders.py": header + "\n\ndef place(order):\n    return order\n"})
 
     # Act
     offered = neighbour_signatures(index, "place")
 
     # Assert
-    before = [signature for signature in offered.values() if "the lines before" in signature]
-    assert len(before) == 1
+    before = [key for key, signature in offered.items() if "the lines before" in signature]
+    assert before == ["orders.py:13-52"]
 
 
 def test_windows_chosen_by_position_are_labelled_by_their_range_and_first_code_line(
@@ -470,6 +470,30 @@ def test_callees_called_from_few_places_come_first(tmp_path: Path) -> None:
     callees = [signature.split("`")[1] for signature in offered.values() if "called by handle" in signature]
     assert callees[0] == "def save_event(event):"
     assert len(callees) == 10
+
+
+def test_proven_callees_come_before_name_matches_called_from_fewer_places(tmp_path: Path) -> None:
+    # Arrange: handle imports record, which three other files also call, and calls save_event without
+    # importing it, so only the name links that call to its definition.
+    job = "from audit import record\n\n\ndef job_{}(event):\n    return record(event)\n"
+    jobs = {f"job_{number}.py": job.format(number) for number in range(3)}
+    index = committed_index(
+        tmp_path,
+        {
+            "audit.py": "def record(event):\n    return event\n",
+            "events.py": "def save_event(event):\n    return event\n",
+            "handler.py": "from audit import record\n\n\ndef handle(event):\n    save_event(event)\n"
+            "    return record(event)\n",
+            **jobs,
+        },
+    )
+
+    # Act
+    offered = neighbour_signatures(index, "handle")
+
+    # Assert
+    callees = [signature.split("`")[1] for signature in offered.values() if "called by handle" in signature]
+    assert callees == ["def record(event):", "def save_event(event):"]
 
 
 def test_a_callee_with_no_definition_is_never_counted_when_callees_are_ranked(
