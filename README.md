@@ -21,22 +21,22 @@ For structural questions, use code directly: `jvn stats --kind function --limit 
 function without model calls. `jvn stats` reports counts and line ranges; see the
 [structural command examples](docs/cli.md#structural-measurements).
 
-## Architecture: blocks, mini-workflows and configurations
+## Architecture: primitives, pipelines and workflows
 
 JVN is a library of building blocks for searching code. Each level composes the one below it, and
 every use of JVN, the `jvn` command included, is a composition of the same blocks.
 
-1. **Code primitives** establish facts without a model: the files in scope, definitions, callers,
-   callees, references, imports, text hits, units and git history
-   ([Layer 1](#layer-1-index-operations-and-comments-no-model)).
-2. **Mini-workflows** compose primitives and Jev judgments into one kind of search: `find`
-   (`find_code`), `find_all`, `trace`, `find_text` and `find_all_text`
-   ([Layer 3](#layer-3-directives)).
-3. **Configurations** (being built) compose mini-workflows into a larger workflow. A configuration is
-   typed: it names the mini-workflows, their order, their inputs and their budgets. `jvn search`, also
-   being built, is to be the default configuration.
+1. **Primitives** gather candidate code by code alone, without a model: the files in scope,
+   definitions, callers, callees, references, imports, text hits, units and git history
+   ([Layer 1](#layer-1-index-operations-and-comments-no-model)). The sources a search's candidates come
+   from are primitives.
+2. **Pipelines** compose primitives and Jev judgments into one kind of search: `find` (`find_code`),
+   `find_all`, `trace`, `find_text` and `find_all_text` ([Layer 3](#layer-3-directives)).
+3. **Workflows** compose pipelines into a larger search: `jvn search` (being built) or a caller's own
+   composition. A typed configuration (being built) names a workflow's pipelines, their order, their
+   inputs and their budgets; `jvn search` is to be the default configuration.
 
-Between two stages a configuration can place a **Jev step**, one bounded decision such as a yes or no
+Between two stages a workflow can place a **Jev step**, one bounded decision such as a yes or no
 check or a pick from a list code built ([Layer 2](#layer-2-judgments)), or an **LLM step**, generation
 over an open space ([`LlmStep`](#llmstep-an-llm-call-you-add-yourself)). Which steps run is
 configuration: a recipe the caller passes as data names them, never an environment or deploy flag.
@@ -45,12 +45,12 @@ configuration: a recipe the caller passes as data names them, never an environme
 | --- | --- |
 | Index, operations, units and scope (`CodeIndex`, `operations`, `index.units`, `resolve_scope`) | built |
 | Jev judgments (`Check`, `Pick`, `Rate`, asked through `Judge`) | built |
-| Mini-workflows `find_code`, `find_all` and `trace` | built |
-| The frontier: the order a search judges what its sources reach, a named policy, `STAGE_ORDER` or `VALUE` (per-target queues and shares, settling after one step of hops); see [Sources, the frontier and each workflow's composition](#sources-the-frontier-and-each-workflows-composition) | built |
+| Pipelines `find_code`, `find_all` and `trace` | built |
+| The frontier: the order a search judges what its sources reach, a named policy, `STAGE_ORDER` or `VALUE` (per-target queues and shares, settling after one step of hops); see [Sources, the frontier and each pipeline's composition](#sources-the-frontier-and-each-pipelines-composition) | built |
 | `LlmStep` | built |
-| Text search: the mini-workflows `find_text` and `find_all_text` | built |
-| Sources: one contract (`sources.Source`) for every primitive that reaches candidates; `find_all`, `find_all_text` and `find_text` are compositions of them | built |
-| `find` and `trace` as compositions of sources | not yet: they keep their own moves and call graph |
+| Text search: the pipelines `find_text` and `find_all_text` | built |
+| Sources: one contract (`sources.Source`) for every primitive that reaches candidates; `find_all`, `find_all_text` and `find_text` are compositions of them, and each of `find`'s neighbour moves is a source | built |
+| `trace` as a composition of sources | not yet: it keeps its own call graph |
 | The spelling map | being built |
 | Typed configurations | being built |
 | `jvn search` | being built |
@@ -61,9 +61,11 @@ share a key: `Website`, `website`, `websites`, `web_site` and `website.ts` meet.
 returns every real spelling and its locations, rarest first.
 
 **Sources** are the primitives a search's candidates come from, all under one contract, and a
-mini-workflow is a composition of them: the sources that start it, the hop sources a unit that clears
-a target's bar expands through, the frontier's policy and shares, and Jev judging in queue order. See
-[Sources, the frontier and each workflow's composition](#sources-the-frontier-and-each-workflows-composition).
+pipeline is a composition of them: the sources that start it, the hop sources a unit that clears a
+target's bar expands through, the frontier's policy and shares, and Jev judging in queue order. `find`
+lists each opened place's neighbours through sources too and keeps its own control: Jev picks which
+neighbour to open next. See
+[Sources, the frontier and each pipeline's composition](#sources-the-frontier-and-each-pipelines-composition).
 
 Three rules hold for every change:
 
@@ -930,19 +932,23 @@ the judge's masker leaves it (`judge.masked_request_fits`), since masking can ma
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
 `places.MOVES` maps each move's name (`callers`, `client_calls`, `callees`, `queried_models`,
 `referenced_by`, `passed_on`, `imported`, `same_file`, `keys_mentioned`, `co_changed`, `lines_before`,
-`rest_of_file`) to a function of the
-index and the opened code that returns places. Pass a subset, or add a function of your own; `MOVES`
-itself is read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
+`rest_of_file`) to the source it lists neighbours through, seeded with the opened span. `places.reached_place`
+turns what a source reaches into a place: a definition span opens whole, a line opens the code holding
+it, a range opens by position and a file opens at its first 40 lines. Pass a subset, or add a source of
+your own; `MOVES` itself is read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
 `context_for_comment` takes `moves=` too. The directives take their check (`check=`) as a parameter too.
 
-### Sources, the frontier and each workflow's composition
+### Sources, the frontier and each pipeline's composition
 
 A **source** ([`sources.py`](src/jev_navigator/sources.py)) is a primitive that reaches candidates
 without a model call. It takes `Seeds`: the request's names and the targets' descriptions (`texts`),
-the caller's files and anchors, or units a search already judged. It returns `Reach` records: a place,
-which is a file (every unit listed in it) or an anchor (the unit holding it), with its provenance, which
-is the source's name, the seed it came from, a distance and the request names it was reached by. A
-source never builds units and never scores them. The search turns places into units with its own room
+the caller's files and anchors, or `spans` of code a search already holds (a unit that cleared a
+target's bar, or the code `find` opened). It returns `Reach` records: a place, which is a file (every
+unit listed in it), an anchor (the unit holding a line, or the lines a range names) or a definition
+span (`find` opens it whole; `find_all` takes the unit holding its first line), with its provenance:
+the source's name, the seed it came from, a distance, the request names it was reached by, and for a
+link between two pieces of code the `relation` in words and the `binding`, how sure the index is of
+it. A source never builds units and never scores them. The search turns places into units with its own room
 and reading, so units, `unlisted` files, `unresolved` anchors and each name's counts (`names`) have
 one owner. The frontier measures every unit's code the same way whichever source reached it, so two
 sources reaching one unit never score it differently; only the distance is the source's own, and when
@@ -957,9 +963,18 @@ several sources reach one unit the smallest counts. A source is any object with 
 | `DEFINITIONS` | names | the units defining each name | 1 |
 | `REFERENCES` | names | the units using each name other than by a call | 2 |
 | `NAMED_FILES`, `TEXT_NAMED_FILES` | texts, anchors | every unit of the code (or text) files they name by path or run as a module | 1 |
-| `IMPORTS`, `IMPORTERS` | anchors, units | every unit of the files their files import, or that import their files | 1 |
-| `CALLERS`, `CALLEES` | units | the functions calling each function unit, or that it calls | 1 |
-| `MODELS`, `CLIENT_CALLS` | units | the Prisma models a unit queries, or the lines querying a model block | 1 |
+| `IMPORTS`, `IMPORTERS` | anchors, spans | every unit of the files their files import, or that import their files | 1 |
+| `CALLERS` | spans | the functions holding a call bound to each named span itself | 1 |
+| `CALLEES` | spans | the definitions each span calls, proven calls first, test-only targets after the rest, then the rarest names | 1 |
+| `MODELS`, `CLIENT_CALLS` | spans | the Prisma model blocks a span queries, or the lines querying a model block it overlaps, tests last | 1 |
+| `CALL_SITES` | spans | the code holding each call that may reach the lines a named span shows, tests last; keeps top-level calls and calls bound to any definition the span overlaps, which a window inside a class needs | 1 |
+| `REFERRERS` | spans | the code using a named span's name other than by a call, where the use may reach its lines | 1 |
+| `PASSED_ON` | spans | the definitions of the names a span passes on as an argument, decorator, collection item, assignment, export, return value, receiver, type or base | 1 |
+| `IMPORTED_CODE` | spans | the definitions a span imports by name, or the start of a module it imports whole | 1 |
+| `SAME_FILE` | spans | the other functions (or Prisma blocks) of a span's file, nearest first | 1 |
+| `KEY_MENTIONS` | spans | the lines elsewhere mentioning an environment variable a span reads or a key it quotes, rarest key first | 2 |
+| `CO_CHANGED` | spans | the start of the two files most often committed with a span's file | 2 |
+| `LINES_BEFORE`, `LINES_AFTER` | spans | up to 40 lines just before or just after a span | 1 |
 
 The **frontier** ([`directives/frontier.py`](src/jev_navigator/directives/frontier.py)) is the order
 in which a search judges what its sources reached. Under a call cap whatever is ranked last is lost,
@@ -975,20 +990,20 @@ still open, and when every target has settled the search ends `settled`. Every u
 asked every target's question. `Policy("value_all", ranked=True)` keeps the queues and shares without
 settling.
 
-Each mini-workflow's default composition (a caller replaces any part with `sources=`, `hops=`,
-`policy=` and `shares=`):
+Each pipeline's default composition (a caller replaces any part with `sources=`, `hops=`,
+`policy=` and `shares=`, or for `find` with `moves=`):
 
-| Workflow | Starts from | Hops (settling policy only) | Policy | Ends |
+| Pipeline | Starts from | Hops (settling policy only) | Policy | Ends |
 | --- | --- | --- | --- | --- |
 | `find_all` | `ANCHORS`, `FILES`, `NAMES` (`CODE_SOURCES`) | `CALLERS`, `CALLEES` (`HOP_SOURCES`) | `STAGE_ORDER` | scope examined, call cap, or every target settled |
 | `find_all_text` | `ANCHORS`, `FILES`, `TEXT_NAMES` (`TEXT_SOURCES`) | `HOP_SOURCES` | `STAGE_ORDER` | as `find_all` |
 | `find_text` | `TEXT_SOURCES` | `HOP_SOURCES` | `STAGE_ORDER` | the first wave with a yes |
-| `find` (`find_code`) | not a composition of sources yet: its own neighbour moves (`places.MOVES`) | | | |
+| `find` (`find_code`) | the caller's start places | each opened place's neighbours, through the sources `places.MOVES` names | open-and-pick: Jev picks which neighbour to open next | the target found, or a budget |
 | `trace` | not a composition of sources yet: the static call graph (`operations.trace_graph`) | | | |
 
-A new source feeds a workflow through `sources=` or `hops=`, with no change to the workflow. The
+A new source feeds a pipeline through `sources=`, `hops=` or `moves=`, with no change to the pipeline. The
 spelling map's source (`spelling`, every spelling of a name) and handler following (`handler`) are
-being built under the same contract. A source joins a workflow's default composition only when a
+being built under the same contract. A source joins a pipeline's default composition only when a
 measurement without model calls shows it reaches more of the deciding units at an equal or better
 rank, without more Jev calls; until then a caller adds it. This composition, run by
 [`tests/test_readme_examples.py`](tests/test_readme_examples.py), adds the definitions of the names

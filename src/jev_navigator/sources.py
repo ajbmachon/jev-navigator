@@ -10,8 +10,10 @@ A source never builds units and never scores them. The search resolves places in
 own room and reading, so the units, the anchors that named none and each seed's counts have one
 owner. The frontier measures every unit's code features the same way whichever source reached it,
 so two sources reaching one unit never score it differently; only the distance is a source's own.
-A workflow is a composition: the sources that start it, the sources a unit that clears a target's
-bar expands through, the frontier's policy and shares, and Jev judging in queue order.
+A pipeline is a composition: the sources that start it, the sources a unit that clears a target's
+bar expands through, the frontier's policy and shares, and Jev judging in queue order. ``find`` lists
+the neighbours of each place it opens through sources (``places.MOVES``) and lets Jev pick which to
+open next.
 """
 
 from __future__ import annotations

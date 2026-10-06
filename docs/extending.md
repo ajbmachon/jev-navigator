@@ -22,7 +22,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `find_all` | judges every unit its sources reach (by default anchored lines, files, and each hit of named texts) against described targets, one question per unit per target, in the order a `frontier` policy gives |
 | `frontier` | the order a search judges its population in: `STAGE_ORDER` (source by source) or `VALUE` (each target's own queue by code features, ties by content hash, an equal or caller-set share of every batch, and a target settling once a unit clears its bar and the units its hop sources reach from that unit are judged) |
 | `find_all_text`, `find_text` | the same for text units only, the files JVN does not parse: judge every one, or stop once one is found |
-| `places.MOVES` | the ways a search lists the neighbours of an opened place; pick a subset or add your own |
+| `places.MOVES` | the sources `find` lists the neighbours of an opened place through, by move name; pick a subset or add a source of your own |
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
 | `LlmStep` | an opt-in LLM call for the cases where Jev's answer is not clear enough |
 
@@ -164,7 +164,7 @@ that clears a target's bar expands through under a settling policy (`HOP_SOURCES
 `CALLEES`). Every source reaches places from the same seeds, the caller's anchors, files and names plus
 the targets' descriptions, and the search resolves them into units. A source of your own is any object
 with a `name`, a `label` and `reach(index, seeds)` returning `Reach` records; the README's
-[source table](../README.md#sources-the-frontier-and-each-workflows-composition) lists the built-in ones.
+[source table](../README.md#sources-the-frontier-and-each-pipelines-composition) lists the built-in ones.
 
 `policy` (`frontier`) decides the order, and under a call cap whatever is ranked last is what gets
 lost. `STAGE_ORDER`, the default, is the order above: anchors, files, then name hits rarest name first,
@@ -294,19 +294,21 @@ wire captures or re-encoded SDK data.
 
 ## Choosing how the search moves
 
-A move is a plain function of the index and the opened code that returns places. `places.MOVES` maps
-each built-in move's name to its function (callers, the code querying a Prisma model through its
-client, callees, the Prisma models the code queries, references, code passed on, imported modules, the
-same file, quoted keys and environment variables, co-changed files, the lines before and after) and is
-read-only. Pass `moves=` to `find_code`, `find_code_async` or
-`context_for_comment` to use a subset,
-for example `{name: MOVES[name] for name in ("callers", "callees")}`, or add a function of your own.
+A move is a source ([the contract](../README.md#sources-the-frontier-and-each-pipelines-composition))
+seeded with the span of the opened code. `places.MOVES` maps each built-in move's name to its source
+(callers, the code querying a Prisma model through its client, callees, the Prisma models the code
+queries, references, code passed on, imported code, the same file, quoted keys and environment
+variables, co-changed files, the lines before and after) and is read-only. Pass `moves=` to
+`find_code`, `find_code_async` or `context_for_comment` to use a subset, for example
+`{name: MOVES[name] for name in ("callers", "callees")}`, or add a source of your own: any object with
+a `name`, a `label` and `reach(index, seeds)`. `places.reached_place` opens what it reaches: a
+definition span whole, a line as the code holding it, a range by position, a file at its start.
 `FindResult.moves` and the final `stop` step of the history name the moves the search used, so every
-result says how it was found. Your move's places go through the same filter as the built-in ones:
+result says how it was found. Your source's places go through the same filter as the built-in ones:
 places that open the same lines of the same file are kept once, the first move that listed them wins,
 a place wholly inside the opened code is dropped, and each move's cap counts only places no earlier
-move kept. Order the places a move returns by how likely they are to matter, because the cap keeps the
-first ones.
+move kept. Order the places a source reaches by how likely they are to matter, because the cap keeps
+the first ones.
 
 ## Stopping on your own check
 
