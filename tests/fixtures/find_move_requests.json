@@ -1,0 +1,553 @@
+[
+  {
+    "opened": "app/orders.py:10-14",
+    "candidates": [
+      "app/orders.py:26 `def submit(order):` (calls place, candidate: method call on <expression>; receiver type not resolved (1 definitions))",
+      "app/limits.py:5 `def check_limit(order):` (called by place)",
+      "app/audit.py:1 `def record(order):` (called by place)",
+      "app/orders.py:17 `def cancel(order_id):` (in the same file as place)",
+      "app/orders.py:21 `def register(handlers):` (in the same file as place)",
+      "app/limits.py:1-9 `MAX_ITEMS = 4` (start of a file committed with app/orders.py 1 times)",
+      "app/orders.py:1-9 `import os` (the lines before app/orders.py:10-14)",
+      "app/orders.py:15-32 `def cancel(order_id):` (the lines after app/orders.py:10-14)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "could_contain_target@1a6fddfe#2",
+      "could_contain_target@1a6fddfe#3",
+      "could_contain_target@1a6fddfe#4",
+      "could_contain_target@1a6fddfe#5",
+      "could_contain_target@1a6fddfe#6",
+      "could_contain_target@1a6fddfe#7",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "web/website.ts:5-8",
+    "candidates": [
+      "web/format.ts:1 `export function title(name: string) {` (called by renameWebsite)",
+      "prisma/schema.prisma:1 `model Website {` (model Website, which renameWebsite queries by the text `.website.`)",
+      "web/website.ts:1-4 `import prisma from '@/lib/prisma';` (the lines before web/website.ts:5-8)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "could_contain_target@1a6fddfe#2",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "app/orders.py:26-27",
+    "candidates": [
+      "app/orders.py:31 `DEFAULT = submit({\"items\": [MAX_ITEMS]})` (calls submit)",
+      "app/orders.py:9 `class OrderService:` (called by submit)",
+      "app/orders.py:21 `def register(handlers):` (in the same file as submit)",
+      "app/orders.py:17 `def cancel(order_id):` (in the same file as submit)",
+      "app/limits.py:1-9 `MAX_ITEMS = 4` (start of a file committed with app/orders.py 1 times)",
+      "app/orders.py:1-25 `import os` (the lines before app/orders.py:26-27)",
+      "app/orders.py:28-32 `TIMEOUT = os.environ.get(\"ORDER_TIMEOUT_SECONDS\")` (the lines after app/orders.py:26-27)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "could_contain_target@1a6fddfe#2",
+      "could_contain_target@1a6fddfe#3",
+      "could_contain_target@1a6fddfe#4",
+      "could_contain_target@1a6fddfe#5",
+      "could_contain_target@1a6fddfe#6",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "web/format.ts:1-3",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:31-31",
+    "candidates": [
+      "app/limits.py:1 `MAX_ITEMS = 4` (passed on by DEFAULT as collection)",
+      "app/limits.py:5 `def check_limit(order):` (imported by app/orders.py)",
+      "app/orders.py:21 `def register(handlers):` (in the same file as DEFAULT)",
+      "app/orders.py:17 `def cancel(order_id):` (in the same file as DEFAULT)",
+      "app/limits.py:1-9 `MAX_ITEMS = 4` (start of a file committed with app/orders.py 1 times)",
+      "app/orders.py:1-30 `import os` (the lines before app/orders.py:31-31)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "could_contain_target@1a6fddfe#2",
+      "could_contain_target@1a6fddfe#3",
+      "could_contain_target@1a6fddfe#4",
+      "could_contain_target@1a6fddfe#5",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "app/limits.py:1-1",
+    "candidates": [
+      "app/limits.py:5 `def check_limit(order):` (refers to MAX_ITEMS as condition)",
+      "app/orders.py:1-32 `import os` (start of a file committed with app/limits.py 1 times)",
+      "app/limits.py:2-9 `SETTINGS_KEY = \"orders.max_items\"` (the lines after app/limits.py:1-1)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "could_contain_target@1a6fddfe#2",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "app/limits.py:5-8",
+    "candidates": [
+      "app/orders.py:1-32 `import os` (start of a file committed with app/limits.py 1 times)",
+      "app/limits.py:1-4 `MAX_ITEMS = 4` (the lines before app/limits.py:5-8)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-32",
+    "candidates": [
+      "app/audit.py:1 `def record(order):` (called by app/orders.py:1-32)",
+      "config/settings.yaml:1-2 line 2 `ORDER_TIMEOUT_SECONDS: 30` (mentions `ORDER_TIMEOUT_SECONDS`)",
+      "app/limits.py:2 `SETTINGS_KEY = \"orders.max_items\"` (mentions `orders.max_items`)",
+      "app/limits.py:1-9 `MAX_ITEMS = 4` (start of a file committed with app/orders.py 1 times)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "could_contain_target@1a6fddfe#2",
+      "could_contain_target@1a6fddfe#3",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "app/audit.py:1-2",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:17-18",
+    "candidates": [
+      "tests/test_orders.py:4 `def test_cancel_returns_the_id():` (calls cancel)",
+      "app/orders.py:21 `def register(handlers):` (refers to cancel as argument)",
+      "app/limits.py:1-9 `MAX_ITEMS = 4` (start of a file committed with app/orders.py 1 times)",
+      "app/orders.py:1-16 `import os` (the lines before app/orders.py:17-18)",
+      "app/orders.py:19-32 `def register(handlers):` (the lines after app/orders.py:17-18)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "could_contain_target@1a6fddfe#2",
+      "could_contain_target@1a6fddfe#3",
+      "could_contain_target@1a6fddfe#4",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "tests/test_orders.py:4-5",
+    "candidates": [
+      "tests/test_orders.py:1-3 `from app.orders import cancel` (the lines before tests/test_orders.py:4-5)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/orders.py:21-23",
+    "candidates": [
+      "app/limits.py:1-9 `MAX_ITEMS = 4` (start of a file committed with app/orders.py 1 times)",
+      "app/orders.py:1-20 `import os` (the lines before app/orders.py:21-23)",
+      "app/orders.py:24-32 `def submit(order):` (the lines after app/orders.py:21-23)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "could_contain_target@1a6fddfe#2",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "app/limits.py:1-9",
+    "candidates": [
+      "app/orders.py:6 `ORDER_LIMIT_KEY = \"orders.max_items\"` (mentions `orders.max_items`)",
+      "config/settings.yaml:1-2 line 1 `orders.max_items: 4` (mentions `orders.max_items`)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "app/orders.py:6-6",
+    "candidates": [
+      "app/limits.py:2 `SETTINGS_KEY = \"orders.max_items\"` (mentions `orders.max_items`)",
+      "config/settings.yaml:1-2 line 1 `orders.max_items: 4` (mentions `orders.max_items`)",
+      "app/orders.py:1-5 `import os` (the lines before app/orders.py:6-6)",
+      "app/orders.py:7-32 `class OrderService:` (the lines after app/orders.py:6-6)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "could_contain_target@1a6fddfe#2",
+      "could_contain_target@1a6fddfe#3",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "app/limits.py:2-2",
+    "candidates": [
+      "config/settings.yaml:1-2 line 1 `orders.max_items: 4` (mentions `orders.max_items`)",
+      "app/limits.py:3-9 `def check_limit(order):` (the lines after app/limits.py:2-2)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "config/settings.yaml:1-2",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-9",
+    "candidates": [
+      "app/orders.py:10-32 `def place(self, order):` (the lines after app/orders.py:1-9)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/orders.py:15-32",
+    "candidates": [
+      "app/orders.py:9 `class OrderService:` (called by app/orders.py:15-32)",
+      "config/settings.yaml:1-2 line 2 `ORDER_TIMEOUT_SECONDS: 30` (mentions `ORDER_TIMEOUT_SECONDS`)",
+      "app/orders.py:1-14 `import os` (the lines before app/orders.py:15-32)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "could_contain_target@1a6fddfe#2",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "app/orders.py:9-14",
+    "candidates": [
+      "app/orders.py:1-8 `import os` (the lines before app/orders.py:9-14)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "prisma/schema.prisma:1-4",
+    "candidates": [
+      "web/stats.ts:3 `export async function countWebsites() {` (queries model Website by the text `.website.`)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "web/website.ts:1-4",
+    "candidates": [
+      "web/labels.ts:1-1 `export const RENAMED = 'renamed';` (start of a module imported by web/website.ts)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-25",
+    "candidates": [
+      "app/orders.py:26-32 `def submit(order):` (the lines after app/orders.py:1-25)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/orders.py:28-32",
+    "candidates": [
+      "config/settings.yaml:1-2 line 2 `ORDER_TIMEOUT_SECONDS: 30` (mentions `ORDER_TIMEOUT_SECONDS`)",
+      "app/orders.py:1-27 `import os` (the lines before app/orders.py:28-32)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0",
+      "could_contain_target@1a6fddfe#1",
+      "open_first@73cf1e75"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-30",
+    "candidates": [
+      "app/orders.py:31-32 `DEFAULT = submit({\"items\": [MAX_ITEMS]})` (the lines after app/orders.py:1-30)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/limits.py:2-9",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/limits.py:1-4",
+    "candidates": [
+      "app/limits.py:5-9 `def check_limit(order):` (the lines after app/limits.py:1-4)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-16",
+    "candidates": [
+      "app/orders.py:17-32 `def cancel(order_id):` (the lines after app/orders.py:1-16)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/orders.py:19-32",
+    "candidates": [
+      "app/orders.py:1-18 `import os` (the lines before app/orders.py:19-32)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "tests/test_orders.py:1-3",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-20",
+    "candidates": [
+      "app/orders.py:21-32 `def register(handlers):` (the lines after app/orders.py:1-20)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/orders.py:24-32",
+    "candidates": [
+      "app/orders.py:1-23 `import os` (the lines before app/orders.py:24-32)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-5",
+    "candidates": [
+      "app/orders.py:6-32 `ORDER_LIMIT_KEY = \"orders.max_items\"` (the lines after app/orders.py:1-5)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/orders.py:7-32",
+    "candidates": [
+      "app/orders.py:1-6 `import os` (the lines before app/orders.py:7-32)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/limits.py:3-9",
+    "candidates": [
+      "app/limits.py:1-2 `MAX_ITEMS = 4` (the lines before app/limits.py:3-9)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "app/orders.py:10-32",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-14",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-8",
+    "candidates": [
+      "app/orders.py:9-32 `class OrderService:` (the lines after app/orders.py:1-8)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "web/stats.ts:3-5",
+    "candidates": [
+      "web/stats.ts:1-2 `import prisma from '@/lib/prisma';` (the lines before web/stats.ts:3-5)"
+    ],
+    "questions": [
+      "contains_target@80e0fd2a",
+      "could_contain_target@1a6fddfe#0"
+    ]
+  },
+  {
+    "opened": "web/labels.ts:1-1",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:26-32",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-27",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:31-32",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/limits.py:5-9",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:17-32",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-18",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:21-32",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-23",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:6-32",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:1-6",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/limits.py:1-2",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "app/orders.py:9-32",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  },
+  {
+    "opened": "web/stats.ts:1-2",
+    "candidates": [],
+    "questions": [
+      "contains_target@80e0fd2a"
+    ]
+  }
+]
