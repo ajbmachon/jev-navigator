@@ -164,7 +164,7 @@ that clears a target's bar expands through under a settling policy (`HOP_SOURCES
 `CALLEES`). Every source reaches places from the same seeds, the caller's anchors, files and names plus
 the targets' descriptions, and the search resolves them into units. A source of your own is any object
 with a `name`, a `label` and `reach(index, seeds)` returning `Reach` records; the README's
-[source table](../README.md#sources-the-frontier-and-each-workflows-composition) lists the built-in ones.
+[source table](../README.md#sources-the-frontier-and-each-pipelines-composition) lists the built-in ones.
 
 `policy` (`frontier`) decides the order, and under a call cap whatever is ranked last is what gets
 lost. `STAGE_ORDER`, the default, is the order above: anchors, files, then name hits rarest name first,

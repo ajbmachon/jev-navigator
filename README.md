@@ -21,22 +21,23 @@ For structural questions, use code directly: `jvn stats --kind function --limit 
 function without model calls. `jvn stats` reports counts and line ranges; see the
 [structural command examples](docs/cli.md#structural-measurements).
 
-## Architecture: blocks, mini-workflows and configurations
+## Architecture: primitives, pipelines and workflows
 
 JVN is a library of building blocks for searching code. Each level composes the one below it, and
 every use of JVN, the `jvn` command included, is a composition of the same blocks.
 
-1. **Code primitives** establish facts without a model: the files in scope, definitions, callers,
-   callees, references, imports, text hits, units and git history
-   ([Layer 1](#layer-1-index-operations-and-comments-no-model)).
-2. **Mini-workflows** compose primitives and Jev judgments into one kind of search: `find`
-   (`find_code`), `find_all`, `trace`, `find_text` and `find_all_text`
+1. **Primitives** gather candidate code by code alone, without a model: the files in scope,
+   definitions, callers, callees, references, imports, text hits, spellings, units and git history
+   ([Layer 1](#layer-1-index-operations-and-comments-no-model)). A primitive that reaches a search's
+   candidates is a [source](#sources-the-frontier-and-each-pipelines-composition).
+2. **Pipelines** answer one question: primitives as sources, then the frontier's order, then Jev
+   judging. `find` (`find_code`), `find_all`, `trace`, `find_text` and `find_all_text` are pipelines
    ([Layer 3](#layer-3-directives)).
-3. **Configurations** (being built) compose mini-workflows into a larger workflow. A configuration is
-   typed: it names the mini-workflows, their order, their inputs and their budgets. `jvn search`, also
-   being built, is to be the default configuration.
+3. **Workflows** (being built) compose several pipelines with decisions between them. A workflow is
+   typed: it names its pipelines, their order, their inputs and their budgets. `jvn search`, also being
+   built, is to be the default workflow.
 
-Between two stages a configuration can place a **Jev step**, one bounded decision such as a yes or no
+Between two stages a workflow can place a **Jev step**, one bounded decision such as a yes or no
 check or a pick from a list code built ([Layer 2](#layer-2-judgments)), or an **LLM step**, generation
 over an open space ([`LlmStep`](#llmstep-an-llm-call-you-add-yourself)). Which steps run is
 configuration: a recipe the caller passes as data names them, never an environment or deploy flag.
@@ -45,36 +46,31 @@ configuration: a recipe the caller passes as data names them, never an environme
 | --- | --- |
 | Index, operations, units and scope (`CodeIndex`, `operations`, `index.units`, `resolve_scope`) | built |
 | Jev judgments (`Check`, `Pick`, `Rate`, asked through `Judge`) | built |
-| Mini-workflows `find_code`, `find_all` and `trace` | built |
-| The frontier: the order a search judges what its sources reach, a named policy, `STAGE_ORDER` or `VALUE` (per-target queues and shares, settling after one step of hops); see [Sources, the frontier and each workflow's composition](#sources-the-frontier-and-each-workflows-composition) | built |
+| Pipelines `find_code`, `find_all` and `trace` | built |
+| The frontier: the order a search judges what its sources reach, a named policy, `STAGE_ORDER` or `VALUE` (per-target queues and shares, settling after one step of hops); see [Sources, the frontier and each pipeline's composition](#sources-the-frontier-and-each-pipelines-composition) | built |
 | `LlmStep` | built |
-| Text search: the mini-workflows `find_text` and `find_all_text` | built |
+| Text search: the pipelines `find_text` and `find_all_text` | built |
 | Sources: one contract (`sources.Source`) for every primitive that reaches candidates; `find_all`, `find_all_text` and `find_text` are compositions of them | built |
 | `find` and `trace` as compositions of sources | not yet: they keep their own moves and call graph |
-| The spelling map | being built |
-| Typed configurations | being built |
+| [The spelling map](#the-spelling-map-every-spelling-of-a-word): `CodeIndex.names`, its sources `SPELLINGS` and `TEXT_SPELLINGS`, and `jvn names` | built |
+| Typed workflows | being built |
 | `jvn search` | being built |
 
-The spelling map is an index block. It splits every identifier, file name, config key and string
-literal into word parts and normalises case, separators and plural, so all spellings of one name
-share a key: `Website`, `website`, `websites`, `web_site` and `website.ts` meet. A name lookup then
-returns every real spelling and its locations, rarest first.
-
 **Sources** are the primitives a search's candidates come from, all under one contract, and a
-mini-workflow is a composition of them: the sources that start it, the hop sources a unit that clears
-a target's bar expands through, the frontier's policy and shares, and Jev judging in queue order. See
-[Sources, the frontier and each workflow's composition](#sources-the-frontier-and-each-workflows-composition).
+pipeline is a composition of them: the sources that start it, the hop sources a unit that clears a
+target's bar expands through, the frontier's policy and shares, and Jev judging in queue order. See
+[Sources, the frontier and each pipeline's composition](#sources-the-frontier-and-each-pipelines-composition).
 
 Three rules hold for every change:
 
 - A capability that is not about one caller's domain is a block that any caller can use. A caller
   configures blocks and passes its own inputs; it never reimplements a block.
 - Nothing specific to findings, themes or the Analysis Engine lives in JVN. The Engine's evidence
-  pack, a theme agent's search tool and a coding agent's search are each a configuration plus that
-  caller's inputs.
-- An experiment compares named configurations on an evaluation set, never tweaks inside one call.
+  pack, a theme agent's search tool and a coding agent's search are each a workflow plus that caller's
+  inputs.
+- An experiment compares named workflows on an evaluation set, never tweaks inside one call.
 
-Until typed configurations exist, a composition is a plain function of the blocks; see
+Until typed workflows exist, a composition is a plain function of the blocks; see
 [docs/extending.md](docs/extending.md).
 
 ## Trace a known workflow
@@ -322,13 +318,15 @@ folder with `--out`. Without `--out`, a run's evidence pack goes to its own run 
 unset), and the run prints that path.
 
 Caches live in `$XDG_CACHE_HOME/jev-navigator` (`~/.cache` when unset): the fact cache (`facts/`), the
-name table (`names/`) and the shared answer store (`answers-v2.sqlite`). Caches are the data JVN
+name table (`names/`), the spelling table (`spellings/`) and the shared answer store
+(`answers-v2.sqlite`). Caches are the data JVN
 values most, but only while they represent real files, so JVN cleans up after itself:
 
-- Facts or a name table another JVN version wrote, which this version can never read, go once no
-  JVN version has used them for 3 days. Versions in use side by side keep theirs. A default answer
+- Facts, a name table or a spelling table another JVN version wrote, which this version can never
+  read, go once no JVN version has used them for 3 days. Versions in use side by side keep theirs. A default answer
   store in an older layout holds paid-for answers, so it stays until unused for 30 days.
-- A cached file's facts or names go once no run has met that exact file content for 30 days.
+- A cached file's facts, names or spellings go once no run has met that exact file content for 30
+  days.
 - An answer in the default shared store goes once no run has reused it for 30 days, with its item
   answers and refusals. A store you name with `--answer-store` or `JEV_NAVIGATOR_ANSWER_STORE` keeps
   every answer and is never touched; it must lie outside the cache folder, so a run naming a store
@@ -336,10 +334,11 @@ values most, but only while they represent real files, so JVN cleans up after it
 - A run folder goes 14 days after its run started, or 30 days while it can still be resumed (it holds
   `resume.json`). A folder you name with `--out` is never touched.
 - Above the disk budget, 5 GB unless `JEV_NAVIGATOR_DISK_BUDGET` says otherwise (`750MB`, `20GB` or
-  plain bytes), the oldest run folders go first, then other versions' facts and name tables, then the
-  least recently confirmed facts and names, and answers last, older layouts first.
+  plain bytes), the oldest run folders go first, then other versions' facts, name tables and spelling
+  tables, then the least recently confirmed facts, names and spellings, and answers last, older layouts
+  first.
 
-Every `find`, `findall`, `trace` and `stats` run applies these rules as it ends, at most once a day,
+Every `find`, `findall`, `trace`, `stats` and `names` run applies these rules as it ends, at most once a day,
 deleting at most 2,000 files per run; a failure to clean up is a notice on stderr and never fails the
 run, and Ctrl-C during the cleanup, which starts only once the run has ended, stops it with one
 notice and exit status 130. Nothing outside these two folders is ever deleted, and links are never followed.
@@ -361,6 +360,7 @@ index.find_definition("LIMITS_KEY")  # functions, classes, constants, assignment
 index.find_callers("validate_order")  # CallSite(file, line, caller, binding), found by name
 index.callee_edges(span)  # CallEdge(name, line, binding); find_callees gives names only
 index.find_references("send_invoice")  # Reference(name, file, line, role, holder, binding): non-call uses
+index.names("website")  # every real spelling: createWebsite, WEBSITE_ID, website.ts..., rarest first
 index.references_in(span)  # names a function passes on without calling (callbacks, registries)
 index.enclosing_symbol(file, line)
 index.symbols_in(file)
@@ -935,7 +935,33 @@ index and the opened code that returns places. Pass a subset, or add a function 
 itself is read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
 `context_for_comment` takes `moves=` too. The directives take their check (`check=`) as a parameter too.
 
-### Sources, the frontier and each workflow's composition
+### The spelling map: every spelling of a word
+
+The spelling map splits every identifier, file name (its stem kept whole), config key and string or
+comment word into word parts and normalises case, separators and plural, so every spelling of one
+name shares a key: `Website`, `websites`, `createWebsite`, `WEBSITE_ID`, `web_site` and `website.ts`
+meet. `CodeIndex.names(term, max_files=None)` returns each real spelling (`Spelling(word, file_name,
+files, places, capped)`) with the files and lines it sits in, rarest first. Each file content's words
+are read once and kept by content in the spelling table (`spellings/` in the cache). An env template
+gives only its keys; `.env` files and lockfiles give nothing.
+
+```python
+for spelling in index.names("website", max_files=3):
+    print(spelling.word, spelling.files, [place.file for place in spelling.places])
+```
+
+```bash
+jvn names website --repo . --max-files 2
+# 7 spellings of "website" (keys: website, websitee), rarest first; 0 model calls
+# createWebsite  [1 file]  src/queries/website.ts:1
+```
+
+As a source, `SPELLINGS` reaches the units holding each spelling of a request name or of a word of
+the request's texts, leaving out a spelling more than 20 files hold; `TEXT_SPELLINGS` reads only text
+files. A caller adds it: `find_all(index, judge, targets, names=..., sources=(*CODE_SOURCES,
+SPELLINGS))`.
+
+### Sources, the frontier and each pipeline's composition
 
 A **source** ([`sources.py`](src/jev_navigator/sources.py)) is a primitive that reaches candidates
 without a model call. It takes `Seeds`: the request's names and the targets' descriptions (`texts`),
@@ -954,6 +980,7 @@ several sources reach one unit the smallest counts. A source is any object with 
 | `ANCHORS` | anchors | the unit each anchor names | 0 |
 | `FILES` | files | every unit of each file | 1 for an anchor's file or a file it imports, else 2 |
 | `NAMES`, `TEXT_NAMES` | names | the unit holding each line a name is on, rarest name first; `TEXT_NAMES` only in text files, never a lockfile | 3 |
+| `SPELLINGS`, `TEXT_SPELLINGS` | names, texts | the unit holding each line, and every unit of each file, that a [spelling](#the-spelling-map-every-spelling-of-a-word) of a name or of a word of the texts sits in, rarest spelling first, leaving out a spelling more than 20 files hold; `TEXT_SPELLINGS` only in text files, never a lockfile | 3 |
 | `DEFINITIONS` | names | the units defining each name | 1 |
 | `REFERENCES` | names | the units using each name other than by a call | 2 |
 | `NAMED_FILES`, `TEXT_NAMED_FILES` | texts, anchors | every unit of the code (or text) files they name by path or run as a module | 1 |
@@ -975,10 +1002,10 @@ still open, and when every target has settled the search ends `settled`. Every u
 asked every target's question. `Policy("value_all", ranked=True)` keeps the queues and shares without
 settling.
 
-Each mini-workflow's default composition (a caller replaces any part with `sources=`, `hops=`,
+Each pipeline's default composition (a caller replaces any part with `sources=`, `hops=`,
 `policy=` and `shares=`):
 
-| Workflow | Starts from | Hops (settling policy only) | Policy | Ends |
+| Pipeline | Starts from | Hops (settling policy only) | Policy | Ends |
 | --- | --- | --- | --- | --- |
 | `find_all` | `ANCHORS`, `FILES`, `NAMES` (`CODE_SOURCES`) | `CALLERS`, `CALLEES` (`HOP_SOURCES`) | `STAGE_ORDER` | scope examined, call cap, or every target settled |
 | `find_all_text` | `ANCHORS`, `FILES`, `TEXT_NAMES` (`TEXT_SOURCES`) | `HOP_SOURCES` | `STAGE_ORDER` | as `find_all` |
@@ -986,9 +1013,9 @@ Each mini-workflow's default composition (a caller replaces any part with `sourc
 | `find` (`find_code`) | not a composition of sources yet: its own neighbour moves (`places.MOVES`) | | | |
 | `trace` | not a composition of sources yet: the static call graph (`operations.trace_graph`) | | | |
 
-A new source feeds a workflow through `sources=` or `hops=`, with no change to the workflow. The
-spelling map's source (`spelling`, every spelling of a name) and handler following (`handler`) are
-being built under the same contract. A source joins a workflow's default composition only when a
+A new source feeds a pipeline through `sources=` or `hops=`, with no change to the pipeline. The
+spelling map's sources (`SPELLINGS`, `TEXT_SPELLINGS`) are built and join no default composition
+yet; handler following is paused. A source joins a pipeline's default composition only when a
 measurement without model calls shows it reaches more of the deciding units at an equal or better
 rank, without more Jev calls; until then a caller adds it. This composition, run by
 [`tests/test_readme_examples.py`](tests/test_readme_examples.py), adds the definitions of the names
