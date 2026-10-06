@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import weakref
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -39,6 +40,7 @@ from ..judgments.questions import serialized_chars
 from .code_index import CodeIndex
 from .imports import import_lines, without_comments
 from .languages import TEXT_LANGUAGE, is_schema_file, language_of, language_read
+from .memo import memoized
 from .scope import is_test_file
 from .spans import Span, holder_of
 from .text_blocks import TextBlock, child_blocks
@@ -280,7 +282,11 @@ def _left_out(index: CodeIndex, files: Sequence[str], reading: Reading) -> dict[
     return code | index.text_files_left_out([file for file in files if file not in code])
 
 
+@memoized
 def _file_units(index: CodeIndex, file: str, box_chars: int) -> _FileUnits:
+    """A file's units for ``box_chars``, built once per index and kept in it: they come from the
+    index's first read of the file, which stands for the index's life. Every listing and anchor
+    resolution of the file shares them, so a large file is not cut into units again per request."""
     if is_schema_file(file):
         return _SchemaFile(index, file, box_chars)
     if language_of(file):
@@ -293,7 +299,7 @@ class _FileUnits:
     top-level code, the lines outside every inner unit."""
 
     def __init__(self, index: CodeIndex, file: str, box_chars: int) -> None:
-        self._index = index
+        self._index = weakref.proxy(index)
         self._file = file
         self._box_chars = box_chars
         self._lines = index.lines(file)
@@ -492,7 +498,6 @@ class _AnchorResolver:
         self._box_chars = box_chars
         self._listed_only = listed_only
         self._reading = reading
-        self._sources: dict[str, _FileUnits] = {}
 
     def resolve(self, anchor: Anchor) -> tuple[tuple[Unit, ...], str]:
         start, end = (
@@ -539,9 +544,7 @@ class _AnchorResolver:
         return _left_out(self._index, [file], self._reading).get(file, "")
 
     def _source(self, file: str) -> _FileUnits:
-        if file not in self._sources:
-            self._sources[file] = _file_units(self._index, file, self._box_chars)
-        return self._sources[file]
+        return _file_units(self._index, file, self._box_chars)
 
 
 def _non_code_lines(source: str, file: str) -> frozenset[int]:
