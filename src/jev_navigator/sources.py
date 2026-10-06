@@ -16,17 +16,32 @@ bar expands through, the frontier's policy and shares, and Jev judging in queue 
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import re
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import ClassVar, Protocol
+from typing import ClassVar, Protocol, TypeVar
 
 from . import operations
-from .index.bindings import Binding
+from .index.bindings import Binding, falls_inside
 from .index.code_index import CodeIndex
 from .index.languages import language_read
-from .index.scope import is_lockfile
-from .index.spans import Span, TextHit
-from .index.units import Anchor, LineAnchor
+from .index.scope import is_lockfile, is_test_file
+from .index.spans import CallEdge, Span, TextHit
+from .index.units import Anchor, LineAnchor, RangeAnchor
+from .judgments.relations import key_mention
+
+ADJACENT_LINES = 40
+FILE_HEAD_LINES = 40
+MAX_KEY_HITS = 30
+PASSED_ON_ROLES = frozenset(
+    {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type", "base"}
+)
+_ENVIRONMENT_READ = re.compile(
+    r"""(?:environ(?:\.get)?\(?\[?|getenv\(|process\.env\.)\s*["']?([A-Z][A-Z0-9_]{2,})"""
+)
+_QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
+_KEY_SHAPE = re.compile(r"[._:/-]")
+_Item = TypeVar("_Item")
 
 
 @dataclass(frozen=True)
@@ -132,32 +147,82 @@ class NameSource:
 
 @dataclass(frozen=True)
 class CallerSource:
-    """The functions calling each named seed span, where the index reads the calls, at distance 1."""
+    """The functions holding a call to each named seed span, where the index binds the call to that
+    definition or leaves it unbound (``names_exactly``), at distance 1. Each definition is its own
+    node here, so a call bound to a method is not a call to the class holding it; ``CallSiteSource``
+    is the view-shaped sibling find uses."""
 
     name: ClassVar[str] = "caller"
     label: ClassVar[str] = "callers"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(LineAnchor(caller.file, caller.start), self.name, span.key, 1)
+            Reach(
+                LineAnchor(caller.file, caller.start),
+                self.name,
+                span.key,
+                1,
+                relation=f"calls {span.name}",
+                binding=binding,
+            )
             for span in seeds.spans
             if span.is_named
-            for caller, _ in operations.caller_functions(index, span)
+            for caller, binding in operations.caller_functions(index, span)
+        ]
+
+
+@dataclass(frozen=True)
+class CallSiteSource:
+    """The code holding each call to a named seed span's name that may reach the lines the span shows
+    (``falls_inside``: a resolved target overlaps them), test files last, at distance 1. Unlike
+    ``CallerSource`` it keeps calls outside every function, and calls bound to any definition the
+    span overlaps rather than only to the span's own, so a window inside a class still has callers."""
+
+    name: ClassVar[str] = "call_site"
+    label: ClassVar[str] = "call sites"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(
+                LineAnchor(site.file, site.line),
+                self.name,
+                span.key,
+                1,
+                relation=f"calls {span.name}",
+                binding=site.binding,
+            )
+            for span in seeds.spans
+            if span.is_named
+            for site in _tests_last(
+                (site for site in index.find_callers(span.name) if falls_inside(site.binding, span)),
+                lambda site: site.file,
+            )
         ]
 
 
 @dataclass(frozen=True)
 class CalleeSource:
-    """The functions each seed span calls, where the index reads the calls, at distance 1."""
+    """The definitions each seed span calls, where the index reads the calls: a call's resolved target,
+    else every definition of the called name (``operations.link_targets``), at distance 1. Calls the
+    index proves come first, then calls whose targets are not all in test files, then the names
+    called from the fewest places, as the rarer name says more."""
 
     name: ClassVar[str] = "callee"
     label: ClassVar[str] = "callees"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(LineAnchor(callee.file, callee.start), self.name, span.key, 1)
+            Reach(
+                target,
+                self.name,
+                span.key,
+                1,
+                relation=f"called by {_span_label(span)}",
+                binding=edge.binding,
+            )
             for span in seeds.spans
-            for callee, _ in operations.callee_functions(index, span)
+            for edge in sorted(index.callee_edges(span), key=lambda edge: _callee_rank(index, edge))
+            for target in operations.link_targets(index, edge.binding, edge.name)
         ]
 
 
@@ -171,7 +236,7 @@ class DefinitionSource:
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(LineAnchor(span.file, span.start), self.name, name, 1, frozenset({name}))
+            Reach(LineAnchor(span.file, span.start), self.name, name, 1, frozenset({name}), f"defines {name}")
             for name in dict.fromkeys(seeds.names)
             for span in index.find_definition(name)
         ]
@@ -187,9 +252,69 @@ class ReferenceSource:
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(LineAnchor(reference.file, reference.line), self.name, name, 2, frozenset({name}))
+            Reach(
+                LineAnchor(reference.file, reference.line),
+                self.name,
+                name,
+                2,
+                frozenset({name}),
+                relation=f"refers to {name} as {reference.role}",
+                binding=reference.binding,
+            )
             for name in dict.fromkeys(seeds.names)
             for reference in index.find_references(name)
+        ]
+
+
+@dataclass(frozen=True)
+class ReferrerSource:
+    """The code using a named seed span's name other than by calling it, where the use may reach the
+    lines the span shows (``falls_inside``), at distance 1. ``ReferenceSource`` starts from the
+    request's names instead and keeps every use."""
+
+    name: ClassVar[str] = "referrer"
+    label: ClassVar[str] = "referring code"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(
+                LineAnchor(reference.file, reference.line),
+                self.name,
+                span.key,
+                1,
+                relation=f"refers to {span.name} as {reference.role}",
+                binding=reference.binding,
+            )
+            for span in seeds.spans
+            if span.is_named
+            for reference in index.find_references(span.name)
+            if falls_inside(reference.binding, span)
+        ]
+
+
+@dataclass(frozen=True)
+class PassedOnSource:
+    """The definitions of the names each seed span passes on without calling them (``PASSED_ON_ROLES``:
+    as an argument, decorator, collection item, assignment, export, return value, receiver, type or
+    base class): a resolved target, else every definition of the name, at distance 1."""
+
+    name: ClassVar[str] = "passed_on"
+    label: ClassVar[str] = "passed on"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(
+                target,
+                self.name,
+                span.key,
+                1,
+                relation=f"passed on by {_span_label(span)} as {reference.role}",
+                binding=reference.binding,
+            )
+            for span in seeds.spans
+            for reference in index.references_in(span)
+            if reference.role in PASSED_ON_ROLES
+            for target in operations.link_targets(index, reference.binding, reference.name)
         ]
 
 
@@ -203,11 +328,49 @@ class ImportSource:
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(imported, self.name, file, 1)
+            Reach(imported, self.name, file, 1, relation=f"imported by {file}")
             for file in pointed_files(index, seeds)
             if language_read(file)
             for imported in index.imports(file)
         ]
+
+
+@dataclass(frozen=True)
+class ImportedCodeSource:
+    """What each seed span imports, re-exports or requires from files in scope, at distance 1. Code
+    outside every function and class stands for its module, so all of its file's import statements
+    count; a function or class counts only its own lines, as callees already follow the calls it
+    makes. A name taken by name reaches its definition in the module the import resolves to; a whole
+    module, or a name that module only passes on from elsewhere, reaches the module's start.
+    ``ImportSource`` reaches every unit of every file a file imports instead."""
+
+    name: ClassVar[str] = "imported_code"
+    label: ClassVar[str] = "imported code"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [reach for span in seeds.spans for reach in self._imported_by(index, span)]
+
+    def _imported_by(self, index: CodeIndex, span: Span) -> list[Reach]:
+        module_level = not any(symbol.contains(span.start) for symbol in index.symbols_in(span.file))
+        text = "\n".join(index.lines(span.file)) if module_level else index.read_slice(span).text
+        importer = span.file if module_level else _span_label(span)
+        reaches = []
+        for fact, names in index.imports_in(span.file, text):
+            relation = f"imported by {importer}" + ("" if fact.proven else f", candidate: {fact.reason}")
+            definitions = sorted(
+                (
+                    found
+                    for name in names or ()
+                    for found in index.find_definition(name)
+                    if found.file == fact.path
+                ),
+                key=lambda found: found.start,
+            )
+            reaches += [Reach(found, self.name, span.key, 1, relation=relation) for found in definitions]
+            if names is None or not names <= {definition.name for definition in definitions}:
+                head = file_head(index, fact.path)
+                reaches.append(Reach(head, self.name, span.key, 1, relation=f"start of a module {relation}"))
+        return reaches
 
 
 @dataclass(frozen=True)
@@ -219,7 +382,7 @@ class ImporterSource:
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(importer, self.name, file, 1)
+            Reach(importer, self.name, file, 1, relation=f"imports {file}")
             for file in pointed_files(index, seeds)
             for importer in index.dependents(file)
         ]
@@ -243,15 +406,24 @@ class NamedFileSource:
 
 @dataclass(frozen=True)
 class ModelSource:
-    """The Prisma schema's model and view blocks each seed span queries through Prisma Client
-    (``operations.queried_models``), at distance 1."""
+    """The Prisma schema's model and view blocks each seed span queries through Prisma Client, found by
+    the text of the calls (``operations.queried_models``), each block whole, at distance 1."""
 
     name: ClassVar[str] = "model"
     label: ClassVar[str] = "queried models"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(LineAnchor(file, block.start), self.name, span.key, 1)
+            Reach(
+                Span(file, block.start, block.end, block.name),
+                self.name,
+                span.key,
+                1,
+                relation=(
+                    f"{block.keyword} {block.name}, which {_span_label(span)} queries by the text "
+                    f"`{block.client_call_text}`"
+                ),
+            )
             for span in seeds.spans
             for file, block in operations.queried_models(index, index.read_slice(span).text)
         ]
@@ -260,17 +432,130 @@ class ModelSource:
 @dataclass(frozen=True)
 class ClientCallSource:
     """The code that queries a Prisma model or view block each seed span overlaps, found by the text of
-    its Prisma Client calls (``operations.client_calls``), at distance 1."""
+    its Prisma Client calls (``operations.client_calls``), test files last, at distance 1."""
 
     name: ClassVar[str] = "client_call"
     label: ClassVar[str] = "client calls"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
         return [
-            Reach(LineAnchor(hit.file, hit.line), self.name, span.key, 1)
+            Reach(
+                LineAnchor(hit.file, hit.line),
+                self.name,
+                span.key,
+                1,
+                relation=f"queries {block.keyword} {block.name} by the text `{block.client_call_text}`",
+            )
             for span in seeds.spans
-            for hit, _ in operations.client_calls(index, span)
+            for hit, block in _tests_last(operations.client_calls(index, span), lambda call: call[0].file)
         ]
+
+
+@dataclass(frozen=True)
+class SameFileSource:
+    """The other functions of each seed span's file, or the other blocks of a Prisma schema, nearest to
+    the span first, at distance 1; a function nested in another is part of that function. An anonymous
+    span first reaches its nearest named container, else its nearest container: a callback in a
+    test's callback reaches that test."""
+
+    name: ClassVar[str] = "same_file"
+    label: ClassVar[str] = "same file"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(other, self.name, span.key, 1, relation=f"in the same file as {_span_label(span)}")
+            for span in seeds.spans
+            for other in _same_file_spans(index, span)
+        ]
+
+
+@dataclass(frozen=True)
+class KeyMentionSource:
+    """The lines elsewhere that mention an environment variable a seed span reads or a key it quotes,
+    the rarest key first, at distance 2. A quoted key has at least six characters and a key's shape: a
+    dot, underscore, colon, slash or dash. A key found on more than ``MAX_KEY_HITS`` lines is too
+    common to point anywhere and is skipped."""
+
+    name: ClassVar[str] = "key_mention"
+    label: ClassVar[str] = "key mentions"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [reach for span in seeds.spans for reach in self._mentions(index, span)]
+
+    def _mentions(self, index: CodeIndex, span: Span) -> list[Reach]:
+        hits_by_key = {
+            key: _lines_mentioning(index, span, key) for key in _keys_in(index.read_slice(span).text)
+        }
+        usable = [(key, hits) for key, hits in hits_by_key.items() if 0 < len(hits) <= MAX_KEY_HITS]
+        return [
+            Reach(LineAnchor(hit.file, hit.line), self.name, span.key, 2, relation=key_mention(key))
+            for key, hits in sorted(usable, key=lambda item: len(item[1]))
+            for hit in hits
+        ]
+
+
+@dataclass(frozen=True)
+class CoChangeSource:
+    """The start of the two files most often committed together with each seed span's file, at
+    distance 2."""
+
+    name: ClassVar[str] = "co_changed"
+    label: ClassVar[str] = "files committed together"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(
+                file_head(index, other),
+                self.name,
+                file,
+                2,
+                relation=f"start of a file committed with {file} {commits} times",
+            )
+            for file in dict.fromkeys(span.file for span in seeds.spans)
+            for other, commits in index.co_changed_files(file, limit=2)
+        ]
+
+
+@dataclass(frozen=True)
+class LinesBeforeSource:
+    """Up to ``ADJACENT_LINES`` lines just before each seed span, at distance 1."""
+
+    name: ClassVar[str] = "lines_before"
+    label: ClassVar[str] = "lines before"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(
+                RangeAnchor(span.file, max(1, span.start - ADJACENT_LINES), span.start - 1),
+                self.name,
+                span.key,
+                1,
+                relation=f"the lines before {span.key}",
+            )
+            for span in seeds.spans
+            if span.start > 1
+        ]
+
+
+@dataclass(frozen=True)
+class LinesAfterSource:
+    """Up to ``ADJACENT_LINES`` lines just after each seed span, at distance 1."""
+
+    name: ClassVar[str] = "lines_after"
+    label: ClassVar[str] = "lines after"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [self._after(index, span) for span in seeds.spans if span.end < len(index.lines(span.file))]
+
+    def _after(self, index: CodeIndex, span: Span) -> Reach:
+        end = min(len(index.lines(span.file)), span.end + ADJACENT_LINES)
+        return Reach(
+            RangeAnchor(span.file, span.end + 1, end),
+            self.name,
+            span.key,
+            1,
+            relation=f"the lines after {span.key}",
+        )
 
 
 ANCHORS = AnchorSource()
@@ -287,6 +572,15 @@ NAMED_FILES = NamedFileSource()
 TEXT_NAMED_FILES = NamedFileSource(text_files=True)
 MODELS = ModelSource()
 CLIENT_CALLS = ClientCallSource()
+CALL_SITES = CallSiteSource()
+REFERRERS = ReferrerSource()
+PASSED_ON = PassedOnSource()
+IMPORTED_CODE = ImportedCodeSource()
+SAME_FILE = SameFileSource()
+KEY_MENTIONS = KeyMentionSource()
+CO_CHANGED = CoChangeSource()
+LINES_BEFORE = LinesBeforeSource()
+LINES_AFTER = LinesAfterSource()
 
 
 def anchor_text(anchor: Anchor) -> str:
@@ -314,3 +608,63 @@ def pointed_files(index: CodeIndex, seeds: Seeds) -> tuple[str, ...]:
     scope = frozenset(index.files)
     pointed = [*(anchor.file for anchor in seeds.anchors), *(span.file for span in seeds.spans)]
     return tuple(file for file in dict.fromkeys(pointed) if file in scope)
+
+
+def file_head(index: CodeIndex, file: str) -> RangeAnchor:
+    """The first ``FILE_HEAD_LINES`` lines of ``file``, or all of a shorter file."""
+    return RangeAnchor(file, 1, min(len(index.lines(file)), FILE_HEAD_LINES))
+
+
+def _tests_last(items: Iterable[_Item], file_of: Callable[[_Item], str]) -> list[_Item]:
+    return sorted(items, key=lambda item: is_test_file(file_of(item)))
+
+
+def _span_label(span: Span) -> str:
+    return span.name if span.is_named else span.key
+
+
+def _callee_rank(index: CodeIndex, edge: CallEdge) -> tuple[bool, bool, int]:
+    """A callee with no definition reaches nothing, so its call sites are never counted."""
+    targets = operations.link_targets(index, edge.binding, edge.name)
+    only_tests = bool(targets) and all(is_test_file(target.file) for target in targets)
+    return not edge.binding.proven, only_tests, index.call_site_count(edge.name) if targets else 0
+
+
+def _same_file_spans(index: CodeIndex, span: Span) -> list[Span]:
+    functions = (*index.functions_in(span.file), *operations.schema_block_spans(index, span.file))
+    outermost = [other for other in functions if not any(_encloses(outer, other) for outer in functions)]
+    others = [other for other in outermost if not other.overlaps(span)]
+    nearest_first = sorted(others, key=lambda other: (_lines_between(other, span), other.start))
+    container = None if span.is_named else _nearest_container(index, span)
+    return ([container] if container is not None else []) + nearest_first
+
+
+def _nearest_container(index: CodeIndex, span: Span) -> Span | None:
+    """The smallest named symbol holding ``span``, else the smallest symbol holding it."""
+    containers = [
+        other for other in index.symbols_in(span.file) if other != span and other.contains(span.start)
+    ]
+    named = [other for other in containers if other.is_named]
+    return min(named or containers, key=Span.size, default=None)
+
+
+def _encloses(outer: Span, inner: Span) -> bool:
+    same_lines = (outer.start, outer.end) == (inner.start, inner.end)
+    return not same_lines and outer.start <= inner.start and inner.end <= outer.end
+
+
+def _lines_between(other: Span, span: Span) -> int:
+    return span.start - other.end if other.end < span.start else other.start - span.end
+
+
+def _keys_in(code: str) -> list[str]:
+    quoted = [key for key in _QUOTED_KEY.findall(code) if _KEY_SHAPE.search(key)]
+    return list(dict.fromkeys(_ENVIRONMENT_READ.findall(code) + quoted))
+
+
+def _lines_mentioning(index: CodeIndex, span: Span, key: str) -> list[TextHit]:
+    return [
+        hit
+        for hit in index.search_text(key, MAX_KEY_HITS + 1, whole_word=True)
+        if not (hit.file == span.file and span.contains(hit.line))
+    ]

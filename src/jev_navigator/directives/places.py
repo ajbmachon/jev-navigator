@@ -1,7 +1,9 @@
-"""Places the search can open, and the neighbours code lists for each from the parser and git.
+"""Places the search can open, and the neighbours its moves list for each.
 
 A place is concrete: a function, a window of lines, the start of a file. Its ``signature`` is the
 short text Jev reads when deciding whether the target could be inside it. Jev never invents a place.
+A move is a source (``jev_navigator.sources``) seeded with the opened code; each place it reaches
+becomes a place here by ``reached_place``.
 """
 
 from __future__ import annotations
@@ -11,30 +13,18 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 
-from .. import operations
-from ..index.bindings import Binding, falls_inside
+from .. import operations, sources
+from ..index.bindings import Binding
 from ..index.code_index import CodeIndex
-from ..index.scope import is_test_file
-from ..index.spans import CallEdge, CodeSlice, Span, TextHit
-from ..judgments.relations import key_mention
+from ..index.spans import CodeSlice, Span
+from ..index.units import LineAnchor, RangeAnchor
+from ..sources import Reach, Seeds, Source
 from .shown import LINE_CUT_MARK
 
 MAX_DEFINITION_LINES = 120
-REST_OF_FILE_LINES = 40
-CO_CHANGE_HEAD_LINES = 40
-IMPORTED_HEAD_LINES = 40
-_ENVIRONMENT_READ = re.compile(
-    r"""(?:environ(?:\.get)?\(?\[?|getenv\(|process\.env\.)\s*["']?([A-Z][A-Z0-9_]{2,})"""
-)
-_QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
-_KEY_SHAPE = re.compile(r"[._:/-]")
 _WINDOW_KEY_LINES = re.compile(r"(\d+)~\d+")
 _PLACE_LINES = re.compile(r":\d+(?:-\d+)? ")
 _WINDOW_LINE = re.compile(r"line \d+ ")
-MAX_KEY_HITS = 30
-_PASSED_ON_ROLES = frozenset(
-    {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type", "base"}
-)
 
 
 @dataclass(frozen=True)
@@ -227,18 +217,31 @@ def place_relationship(place: Place) -> dict | None:
 
 
 def _enclosing_definition(index: CodeIndex, file: str, line: int) -> Span | None:
-    definitions = (*index.symbols_in(file), *index.declarations_in(file), *_schema_block_spans(index, file))
+    definitions = (
+        *index.symbols_in(file),
+        *index.declarations_in(file),
+        *operations.schema_block_spans(index, file),
+    )
     return min((span for span in definitions if span.contains(line)), key=Span.size, default=None)
 
 
-Move = Callable[[CodeIndex, CodeSlice], list[Place]]
+def reached_place(index: CodeIndex, reach: Reach) -> Place:
+    """The place find opens for what a source reached: a definition whole, the code holding a line
+    (``place_for_line``), lines chosen by position, or the start of a file."""
+    at = reach.at
+    if isinstance(at, Span):
+        return function_place(index, at, reach.relation, binding=reach.binding)
+    if isinstance(at, LineAnchor):
+        return place_for_line(index, at.file, at.line, reach.relation, binding=reach.binding)
+    lines = at if isinstance(at, RangeAnchor) else sources.file_head(index, at)
+    return range_place(index, lines.file, lines.start, lines.end, reach.relation)
 
 
 def neighbours(
     index: CodeIndex,
     opened: CodeSlice,
     per_kind: int | None = None,
-    moves: Mapping[str, Move] | None = None,
+    moves: Mapping[str, Source] | None = None,
 ) -> list[Place]:
     return neighbours_and_omissions(index, opened, per_kind, moves)[0]
 
@@ -247,16 +250,16 @@ def neighbours_and_omissions(
     index: CodeIndex,
     opened: CodeSlice,
     per_kind: int | None = None,
-    moves: Mapping[str, Move] | None = None,
+    moves: Mapping[str, Source] | None = None,
     shown: Span | None = None,
 ) -> tuple[list[Place], list[Place]]:
     """The places each move lists for ``opened``, at most ``per_kind`` per move, in the order of
     ``moves`` (default ``MOVES``: callers, callees, code that refers to it without calling it, code
     it passes on without calling, the other functions of its file, lines anywhere in scope that
     mention its quoted keys or environment variables, files usually committed with it, and the lines
-    before and after it). A move is any function of the index and the opened code that returns
-    places, so callers can drop moves or add their own. The places cut by the cap come back
-    separately, so a caller can report them as not inspected.
+    before and after it). A move is a source seeded with the opened span, named by its key in
+    ``moves``, so callers can drop moves or add sources of their own. The places cut by the cap come
+    back separately, so a caller can report them as not inspected.
 
     Places are one when they open the same lines of the same file, whatever their keys, and a place
     wholly inside the lines a request shows of ``opened`` (``shown``, by default all of them) is left
@@ -264,11 +267,12 @@ def neighbours_and_omissions(
     before file position, so the strongest reason a place is a neighbour is the one shown. A move's
     cap counts only places no earlier move kept."""
     on_screen = opened.span if shown is None else shown
+    seeds = Seeds(spans=(opened.span,))
     kept_lines: set[str] = set()
     kept: list[Place] = []
     beyond_cap: list[Place] = []
-    for move, build in (MOVES if moves is None else moves).items():
-        related = [replace(place, move=move) for place in build(index, opened)]
+    for move, source in (MOVES if moves is None else moves).items():
+        related = [replace(reached_place(index, reach), move=move) for reach in source.reach(index, seeds)]
         new = _new_places(related, on_screen, kept_lines)
         selected = new if per_kind is None else new[:per_kind]
         kept += selected
@@ -294,121 +298,6 @@ def _within(inner: Span, outer: Span) -> bool:
     return inner.file == outer.file and outer.start <= inner.start and inner.end <= outer.end
 
 
-def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    if not opened.span.is_named:
-        return []
-    sites = sorted(
-        (site for site in index.find_callers(opened.span.name) if falls_inside(site.binding, opened.span)),
-        key=lambda site: is_test_file(site.file),
-    )
-    return [
-        place_for_line(index, site.file, site.line, f"calls {opened.span.name}", binding=site.binding)
-        for site in sites
-    ]
-
-
-def _client_calls(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    """The code that queries a model or view the opened lines of a schema declare, found by the
-    text of its Prisma Client calls (``.website.`` for ``model Website``), tests last."""
-    calls = sorted(operations.client_calls(index, opened.span), key=lambda call: is_test_file(call[0].file))
-    return [
-        place_for_line(
-            index,
-            hit.file,
-            hit.line,
-            f"queries {block.keyword} {block.name} by the text `{block.client_call_text}`",
-        )
-        for hit, block in calls
-    ]
-
-
-def _callees(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    """What the opened code calls, with proven production targets before name-only candidates."""
-    places = []
-    edges = sorted(index.callee_edges(opened.span), key=lambda edge: _callee_rank(index, edge))
-    source = _span_label(opened.span)
-    for edge in edges:
-        targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
-        relation = f"called by {source}"
-        places += [function_place(index, span, relation, binding=edge.binding) for span in targets]
-    return places
-
-
-def _callee_rank(index: CodeIndex, edge: CallEdge) -> tuple[bool, bool, int]:
-    """A callee with no definition yields no place, so its call sites are never counted."""
-    targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
-    only_tests = bool(targets) and all(is_test_file(target.file) for target in targets)
-    return not edge.binding.proven, only_tests, index.call_site_count(edge.name) if targets else 0
-
-
-def _queried_models(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    """The model and view blocks whose Prisma Client calls the opened code holds, found by their
-    text: ``.website.`` in ``prisma.client.website.update(...)`` opens ``model Website``."""
-    source = _span_label(opened.span)
-    return [
-        function_place(
-            index,
-            Span(file, block.start, block.end, block.name),
-            f"{block.keyword} {block.name}, which {source} queries by the text `{block.client_call_text}`",
-        )
-        for file, block in operations.queried_models(index, opened.text)
-    ]
-
-
-def _referenced_by(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    if not opened.span.is_named:
-        return []
-    name = opened.span.name
-    return [
-        place_for_line(index, ref.file, ref.line, f"refers to {name} as {ref.role}", binding=ref.binding)
-        for ref in index.find_references(name)
-        if falls_inside(ref.binding, opened.span)
-    ]
-
-
-def _passed_on(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    places = []
-    source = _span_label(opened.span)
-    for ref in (ref for ref in index.references_in(opened.span) if ref.role in _PASSED_ON_ROLES):
-        targets = (
-            [ref.binding.target] if ref.binding and ref.binding.target else index.find_definition(ref.name)
-        )
-        relation = f"passed on by {source} as {ref.role}"
-        places += [function_place(index, span, relation, binding=ref.binding) for span in targets]
-    return places
-
-
-def _imported(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    """What the opened code imports, re-exports or requires from files in scope. Code outside every
-    function and class stands for its module, so all of its file's import statements count; a
-    function or class counts only its own lines, as callees already follow the calls it makes. A name
-    taken by name opens its definition in the module the import resolves to; a whole module, or a
-    name that module only passes on from elsewhere, opens the start of that module."""
-    span = opened.span
-    module_level = not any(symbol.contains(span.start) for symbol in index.symbols_in(span.file))
-    text = "\n".join(index.lines(span.file)) if module_level else opened.text
-    source = span.file if module_level else _span_label(span)
-    places = []
-    for fact, names in index.imports_in(span.file, text):
-        relation = (
-            f"imported by {source}" if fact.proven else f"imported by {source}, candidate: {fact.reason}"
-        )
-        definitions = sorted(
-            (
-                found
-                for name in names or ()
-                for found in index.find_definition(name)
-                if found.file == fact.path
-            ),
-            key=lambda found: found.start,
-        )
-        places += [function_place(index, definition, relation) for definition in definitions]
-        if names is None or not names <= {definition.name for definition in definitions}:
-            end = min(len(index.lines(fact.path)), IMPORTED_HEAD_LINES)
-            places.append(range_place(index, fact.path, 1, end, f"start of a module {relation}"))
-    return places
-
-
 def _with_binding(relation: str, binding: Binding | None) -> str:
     """A name-match link is marked, so neither Jev nor the result treats it as a proven call."""
     if binding is None or binding.proven:
@@ -416,118 +305,23 @@ def _with_binding(relation: str, binding: Binding | None) -> str:
     return f"{relation}, {binding.status}: {binding.reason}"
 
 
-def _same_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    """The other functions of the file, or the other blocks of a Prisma schema, nearest to the
-    opened code first; a function nested in another is part of that function. An anonymous function
-    first offers its nearest named container, else its nearest container: a callback in a test's
-    callback offers that test."""
-    relation = f"in the same file as {_span_label(opened.span)}"
-    functions = (*index.functions_in(opened.span.file), *_schema_block_spans(index, opened.span.file))
-    container = None
-    if not opened.span.is_named:
-        containers = [
-            span
-            for span in index.symbols_in(opened.span.file)
-            if span != opened.span and span.contains(opened.span.start)
-        ]
-        named = [span for span in containers if span.is_named]
-        container = min(named or containers, key=Span.size, default=None)
-    outermost = [span for span in functions if not any(_encloses(other, span) for other in functions)]
-    others = [span for span in outermost if not span.overlaps(opened.span)]
-    nearest_first = sorted(others, key=lambda span: (_distance(span, opened.span), span.start))
-    ordered = ([container] if container is not None else []) + nearest_first
-    return [function_place(index, span, relation) for span in ordered]
-
-
-def _encloses(outer: Span, inner: Span) -> bool:
-    same_lines = (outer.start, outer.end) == (inner.start, inner.end)
-    return not same_lines and outer.start <= inner.start and inner.end <= outer.end
-
-
-def _distance(span: Span, opened: Span) -> int:
-    return opened.start - span.end if span.end < opened.start else span.start - opened.end
-
-
-def _keys_mentioned(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    """Lines elsewhere that mention an environment variable it reads or a key it quotes, the rarest
-    key first. A quoted key has at least six characters and a key's shape: a dot, underscore, colon,
-    slash or dash. A key found on more than ``MAX_KEY_HITS`` lines is too common to point anywhere
-    and is skipped."""
-    hits_by_key = {key: _lines_mentioning(index, opened, key) for key in _keys_in(opened.text)}
-    usable = [(key, hits) for key, hits in hits_by_key.items() if 0 < len(hits) <= MAX_KEY_HITS]
-    rarest_first = sorted(usable, key=lambda item: len(item[1]))
-    return [
-        place_for_line(index, hit.file, hit.line, key_mention(key))
-        for key, hits in rarest_first
-        for hit in hits
-    ]
-
-
-def _keys_in(code: str) -> list[str]:
-    quoted = [key for key in _QUOTED_KEY.findall(code) if _KEY_SHAPE.search(key)]
-    return list(dict.fromkeys(_ENVIRONMENT_READ.findall(code) + quoted))
-
-
-def _lines_mentioning(index: CodeIndex, opened: CodeSlice, key: str) -> list[TextHit]:
-    return [
-        hit
-        for hit in index.search_text(key, MAX_KEY_HITS + 1, whole_word=True)
-        if not (hit.file == opened.span.file and opened.span.contains(hit.line))
-    ]
-
-
-def _co_changed(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    places = []
-    for other, commits in index.co_changed_files(opened.span.file, limit=2):
-        relation = f"start of a file committed with {opened.span.file} {commits} times"
-        end = min(len(index.lines(other)), CO_CHANGE_HEAD_LINES)
-        places.append(range_place(index, other, 1, end, relation))
-    return places
-
-
-def _lines_before(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    span = opened.span
-    if span.start <= 1:
-        return []
-    start = max(1, span.start - REST_OF_FILE_LINES)
-    return [range_place(index, span.file, start, span.start - 1, f"the lines before {span.key}")]
-
-
-def _rest_of_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    span = opened.span
-    line_count = len(index.lines(span.file))
-    if span.end >= line_count:
-        return []
-    end = min(line_count, span.end + REST_OF_FILE_LINES)
-    return [range_place(index, span.file, span.end + 1, end, f"the lines after {span.key}")]
-
-
-def _schema_block_spans(index: CodeIndex, file: str) -> list[Span]:
-    """A Prisma schema's model, view, enum and type blocks, each named by its name; none elsewhere."""
-    return [Span(file, block.start, block.end, block.name) for block in index.schema_blocks_in(file)]
-
-
-def _span_label(span: Span) -> str:
-    return span.name if span.is_named else span.key
-
-
 def starting_places(index: CodeIndex, locations: Sequence[tuple[str, int]]) -> list[Place]:
     return [place_for_line(index, file, line, "start") for file, line in locations]
 
 
-MOVES: Mapping[str, Move] = MappingProxyType(
+MOVES: Mapping[str, Source] = MappingProxyType(
     {
-        "callers": _callers,
-        "client_calls": _client_calls,
-        "callees": _callees,
-        "queried_models": _queried_models,
-        "referenced_by": _referenced_by,
-        "passed_on": _passed_on,
-        "imported": _imported,
-        "same_file": _same_file,
-        "keys_mentioned": _keys_mentioned,
-        "co_changed": _co_changed,
-        "lines_before": _lines_before,
-        "rest_of_file": _rest_of_file,
+        "callers": sources.CALL_SITES,
+        "client_calls": sources.CLIENT_CALLS,
+        "callees": sources.CALLEES,
+        "queried_models": sources.MODELS,
+        "referenced_by": sources.REFERRERS,
+        "passed_on": sources.PASSED_ON,
+        "imported": sources.IMPORTED_CODE,
+        "same_file": sources.SAME_FILE,
+        "keys_mentioned": sources.KEY_MENTIONS,
+        "co_changed": sources.CO_CHANGED,
+        "lines_before": sources.LINES_BEFORE,
+        "rest_of_file": sources.LINES_AFTER,
     }
 )

@@ -6,10 +6,11 @@ import os
 import re
 import signal
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from conftest import WEBSITE_QUERIES
@@ -34,10 +35,12 @@ from jev_navigator.directives.places import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
+from jev_navigator.index.units import RangeAnchor
 from jev_navigator.judgments.client import InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.sources import Reach, Seeds
 from jev_navigator.testing import ScriptedJevClient
 
 TARGET = "the check that limits how many items an order may have"
@@ -70,6 +73,18 @@ ENTRY_POINTS = pytest.mark.parametrize("entry", ["sync", "async"])
 
 def start_at_place(index: CodeIndex) -> list[Place]:
     return [place_for_line(index, "app/orders.py", 6, "start")]
+
+
+@dataclass(frozen=True)
+class ScriptedSource:
+    """A source whose reaches a test computes from each seed span."""
+
+    reached_from: Callable[[Span], Sequence[Reach]]
+    name: ClassVar[str] = "scripted"
+    label: ClassVar[str] = "scripted places"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [reach for span in seeds.spans for reach in self.reached_from(span)]
 
 
 def test_search_follows_likely_neighbours_until_the_target_is_found(sample_index: CodeIndex) -> None:
@@ -942,12 +957,13 @@ def test_an_unbounded_search_can_reach_beyond_the_old_default_depth(tmp_path: Pa
     (tmp_path / "chain.txt").write_text("start\none\ntwo\nthree\ntarget\n")
     index = CodeIndex(tmp_path, ["chain.txt"])
     chain = [range_place(index, "chain.txt", line, line, "chain") for line in range(1, 6)]
-    successor = {current.key: following for current, following in zip(chain[:-1], chain[1:], strict=True)}
+    successor = {
+        f"chain.txt:{line}-{line}": RangeAnchor("chain.txt", line + 1, line + 1) for line in range(1, 5)
+    }
 
-    def next_in_chain(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-        del index
-        following = successor.get(opened.key)
-        return [following] if following is not None else []
+    def next_in_chain(span: Span) -> list[Reach]:
+        following = successor.get(span.key)
+        return [Reach(following, "chain", span.key, 1, relation="chain")] if following is not None else []
 
     client = ScriptedJevClient(
         nouls=scripted(
@@ -963,7 +979,7 @@ def test_an_unbounded_search_can_reach_beyond_the_old_default_depth(tmp_path: Pa
         "the target line",
         [chain[0]],
         budget=SearchBudget(beam_width=1),
-        moves={"chain": next_in_chain},
+        moves={"chain": ScriptedSource(next_in_chain)},
     )
 
     # Assert
@@ -1020,8 +1036,8 @@ def test_interrupt_while_opening_a_beam_restores_every_popped_place(tmp_path: Pa
     places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
     opened = 0
 
-    def interrupt_second_open(index: CodeIndex, code: CodeSlice) -> list[Place]:
-        del index, code
+    def interrupt_second_open(span: Span) -> list[Reach]:
+        del span
         nonlocal opened
         opened += 1
         if opened == 2:
@@ -1035,7 +1051,7 @@ def test_interrupt_while_opening_a_beam_restores_every_popped_place(tmp_path: Pa
         TARGET,
         [],
         budget=SearchBudget(beam_width=2),
-        moves={"interrupt": interrupt_second_open},
+        moves={"interrupt": ScriptedSource(interrupt_second_open)},
         initial_candidates=[(place, 1.0) for place in places],
     )
 
@@ -1046,31 +1062,30 @@ def test_interrupt_while_opening_a_beam_restores_every_popped_place(tmp_path: Pa
     assert {entry.reason for entry in cancelled.not_inspected} == {"cancelled"}
 
 
-def test_interrupt_while_filtering_a_candidate_resumes_and_processes_it(tmp_path: Path) -> None:
-    # Arrange
+def test_interrupt_while_filtering_a_candidate_resumes_and_processes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: listing a neighbour opens it twice (to drop lines already offered, then to remember
+    # them) and filtering it opens it a third time; the interrupt comes at that third opening.
     (tmp_path / "places.txt").write_text("start\ntarget\n")
     index = CodeIndex(tmp_path, ["places.txt"])
     start = range_place(index, "places.txt", 1, 1, "candidate")
-    real_candidate = range_place(index, "places.txt", 2, 2, "move")
+    candidate = RangeAnchor("places.txt", 2, 2)
+    read_slice = index.read_slice
     candidate_opens = 0
 
-    def open_candidate() -> CodeSlice:
+    def read_interrupting_the_third_candidate_opening(span: Span, origin: str = "") -> CodeSlice:
         nonlocal candidate_opens
-        candidate_opens += 1
-        if candidate_opens == 3:
-            raise KeyboardInterrupt
-        return real_candidate.open()
+        if (span.start, origin) == (candidate.start, "move"):
+            candidate_opens += 1
+            if candidate_opens == 3:
+                raise KeyboardInterrupt
+        return read_slice(span, origin)
 
-    candidate = Place(
-        real_candidate.key,
-        real_candidate.kind,
-        real_candidate.signature,
-        open_candidate,
+    monkeypatch.setattr(index, "read_slice", read_interrupting_the_third_candidate_opening)
+    offer_candidate = ScriptedSource(
+        lambda span: [Reach(candidate, "candidate", span.key, 1, relation="move")]
     )
-
-    def offer_candidate(index: CodeIndex, code: CodeSlice) -> list[Place]:
-        del index, code
-        return [candidate]
 
     client = ScriptedJevClient(
         nouls=scripted(
@@ -1105,7 +1120,7 @@ def test_interrupt_while_filtering_a_candidate_resumes_and_processes_it(tmp_path
         (start.key, "cancelled")
     ]
     assert resumed.outcome == Outcome.FOUND
-    assert resumed.found[0].place_key == candidate.key
+    assert resumed.found[0].place_key == "places.txt:2-2"
 
 
 @pytest.mark.usefixtures("python_sigint_handler")

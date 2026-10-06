@@ -61,7 +61,8 @@ from ..judgments.questions import (
 from ..judgments.secrets import DEFAULT_MASKER, TARGET, Masker
 from ..judgments.thresholds import NoulVerdict, Thresholds
 from ..memory_limit import MemoryLimitReachedError
-from .places import MOVES, Move, Place, neighbours_and_omissions, place_relationship
+from ..sources import Source
+from .places import MOVES, Place, neighbours_and_omissions, place_relationship
 from .shown import MAX_LINE_CHARS, cut_long_line, shown_slice
 
 FOUND = Check(
@@ -260,7 +261,7 @@ class _Search:
     questions: SearchQuestions = DEFAULT_SEARCH_QUESTIONS
     stop_rule: StopRule | None = None
     history: History = field(default_factory=History)
-    moves: Mapping[str, Move] = field(default_factory=lambda: MOVES)
+    moves: Mapping[str, Source] = field(default_factory=lambda: MOVES)
     stop_judgment: HistoryJudgment | None = None
     queue: list[_Queued] = field(default_factory=list)
     visited: set[str] = field(default_factory=set)
@@ -332,7 +333,7 @@ def find_code(
     resume: FindResult | None = None,
     commit: str | None = None,
     stop_rule: StopRule | None = None,
-    moves: Mapping[str, Move] | None = None,
+    moves: Mapping[str, Source] | None = None,
     initial_candidates: Sequence[tuple[Place, float]] = (),
 ) -> FindResult:
     """``commit``: the revision the caller means; the index must hold exactly it. ``resume``: continue
@@ -380,7 +381,7 @@ async def find_code_async(
     resume: FindResult | None = None,
     commit: str | None = None,
     stop_rule: StopRule | None = None,
-    moves: Mapping[str, Move] | None = None,
+    moves: Mapping[str, Source] | None = None,
     initial_candidates: Sequence[tuple[Place, float]] = (),
 ) -> FindResult:
     """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
@@ -434,7 +435,7 @@ class _SearchOptions:
     resume: FindResult | None
     commit: str | None
     stop_rule: StopRule | None
-    moves: Mapping[str, Move] | None
+    moves: Mapping[str, Source] | None
     initial_candidates: Sequence[tuple[Place, float]]
 
 

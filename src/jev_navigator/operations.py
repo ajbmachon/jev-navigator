@@ -345,7 +345,7 @@ def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ..
     for edge in index.callee_edges(function):
         if inside_member(edge.line):
             continue
-        targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
+        targets = link_targets(index, edge.binding, edge.name)
         if not targets:
             links.append(
                 TraceLink(hop, function, None, "call", edge.name, function.file, edge.line, edge.binding)
@@ -373,11 +373,7 @@ def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ..
     for reference in index.references_in(function):
         if inside_member(reference.line):
             continue
-        targets = (
-            [reference.binding.target]
-            if reference.binding is not None and reference.binding.target is not None
-            else index.find_definition(reference.name)
-        )
+        targets = link_targets(index, reference.binding, reference.name)
         if not targets:
             links.append(
                 TraceLink(
@@ -455,11 +451,24 @@ def caller_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Bindi
 
 def callee_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Binding | None]]:
     """Each callee definition, with the call's binding; when the binding names its target, only that one."""
-    linked = []
-    for edge in index.callee_edges(function):
-        targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
-        linked += [(target, edge.binding) for target in targets]
-    return linked
+    return [
+        (target, edge.binding)
+        for edge in index.callee_edges(function)
+        for target in link_targets(index, edge.binding, edge.name)
+    ]
+
+
+def link_targets(index: CodeIndex, binding: Binding | None, name: str) -> tuple[Span, ...]:
+    """The definitions a call or use of ``name`` may reach: the binding's target when the index
+    resolved one, else every definition of the name."""
+    if binding is not None and binding.target is not None:
+        return (binding.target,)
+    return index.find_definition(name)
+
+
+def schema_block_spans(index: CodeIndex, file: str) -> list[Span]:
+    """A Prisma schema's model, view, enum and type blocks, each named by its name; none elsewhere."""
+    return [Span(file, block.start, block.end, block.name) for block in index.schema_blocks_in(file)]
 
 
 def queried_models(index: CodeIndex, code: str) -> list[tuple[str, SchemaBlock]]:

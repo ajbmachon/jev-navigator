@@ -7,8 +7,9 @@ from collections.abc import Mapping
 from .. import operations
 from ..index.code_index import CodeIndex
 from ..judgments.judge import Judge
+from ..sources import Source
 from .find_code import FindResult, SearchBudget, find_code
-from .places import Move, function_place
+from .places import function_place
 
 
 def context_for_comment(
@@ -18,7 +19,7 @@ def context_for_comment(
     line: int,
     *,
     budget: SearchBudget | None = None,
-    moves: Mapping[str, Move] | None = None,
+    moves: Mapping[str, Source] | None = None,
 ) -> FindResult:
     """The code a comment talks about: starts from the whole symbol after the comment and searches
     outward only if that code does not contain what the comment describes. ``moves`` chooses how

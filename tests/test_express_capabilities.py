@@ -322,7 +322,7 @@ def test_a_constructor_call_offers_the_class_it_builds(shop_index: CodeIndex) ->
     get_adapter = starting_places(shop_index, [("src/adapters/index.js", 4)])[0].open()
 
     # Act
-    callees = MOVES["callees"](shop_index, get_adapter)
+    callees = neighbours_and_omissions(shop_index, get_adapter, moves={"callees": MOVES["callees"]})[0]
 
     # Assert
     assert any(place.key.startswith("src/adapters/memory.js:") for place in callees)

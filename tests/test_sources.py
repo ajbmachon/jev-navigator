@@ -126,7 +126,7 @@ def test_the_caller_and_callee_sources_reach_the_functions_on_either_side_of_a_s
         (LineAnchor("orders/service.py", 4), check_limit.id, 1),
         (LineAnchor("tests/test_limits.py", 4), check_limit.id, 1),
     ]
-    assert places(callees) == [(LineAnchor("orders/limits.py", 4), place_order.id, 1)]
+    assert places(callees) == [(Span("orders/limits.py", 4, 6, "check_limit"), place_order.id, 1)]
 
 
 def test_top_level_code_reaches_the_functions_it_calls_but_has_no_callers(tmp_path: Path) -> None:
@@ -141,7 +141,7 @@ def test_top_level_code_reaches_the_functions_it_calls_but_has_no_callers(tmp_pa
 
     # Assert
     assert spans == (Span("app.py", 5, 5),)
-    assert (callers, places(callees)) == ([], [(LineAnchor("app.py", 1), "app.py:5-5", 1)])
+    assert (callers, places(callees)) == ([], [(Span("app.py", 1, 2, "build"), "app.py:5-5", 1)])
 
 
 def test_the_definition_and_reference_sources_reach_a_names_definition_and_its_uses(tmp_path: Path) -> None:
@@ -208,7 +208,7 @@ def test_the_model_sources_link_prisma_queries_and_the_models_they_query(
     calls = CLIENT_CALLS.reach(index, Seeds(spans=unit_spans(index, website)))
 
     # Assert
-    assert places(queried) == [(LineAnchor(SCHEMA, 98), update_website.id, 1)]
+    assert places(queried) == [(Span(SCHEMA, 98, 131, "Website"), update_website.id, 1)]
     assert places(calls) == [
         (LineAnchor("src/website.ts", 4), website.id, 1),
         (LineAnchor("src/website.ts", 8), website.id, 1),

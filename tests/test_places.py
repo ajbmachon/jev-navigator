@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from conftest import WEBSITE_QUERIES
@@ -11,9 +13,7 @@ from git_repos import commit_files
 
 from jev_navigator.directives.places import (
     MAX_DEFINITION_LINES,
-    MAX_KEY_HITS,
     MOVES,
-    Move,
     Place,
     function_place,
     located_file,
@@ -27,8 +27,10 @@ from jev_navigator.directives.places import (
 from jev_navigator.directives.shown import cut_long_line
 from jev_navigator.index.bindings import Binding, BindingStatus
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.index.spans import CodeSlice, Span
+from jev_navigator.index.spans import Span
+from jev_navigator.index.units import Anchor, LineAnchor, RangeAnchor
 from jev_navigator.judgments.relations import key_mention
+from jev_navigator.sources import IMPORTS, MAX_KEY_HITS, Reach, Seeds
 
 
 def committed_index(root: Path, files: Mapping[str, str]) -> CodeIndex:
@@ -233,12 +235,11 @@ def test_the_caller_chooses_which_moves_list_neighbours(tmp_path: Path) -> None:
     )
     opened = index.read_slice(index.find_definition("place")[0])
 
-    def always_the_config(index: CodeIndex, code: CodeSlice) -> list[Place]:
-        return [window_place(index, "orders.py", 1, "a custom move")]
-
     # Act
     same_file_only = neighbours(index, opened, moves={"same_file": MOVES["same_file"]})
-    custom = neighbours(index, opened, moves={"custom": always_the_config})
+    custom = neighbours(
+        index, opened, moves={"custom": Reaching((LineAnchor("orders.py", 5),), "a custom move")}
+    )
 
     # Assert
     assert [place.signature.split(" (")[-1] for place in same_file_only] == ["in the same file as place)"]
@@ -710,8 +711,17 @@ def test_the_lines_before_and_after_stay_off_the_opened_code_in_a_short_file(tmp
     assert positional == {"orders.py:1-2", "orders.py:5-6"}
 
 
-def a_move_offering(*places: Place) -> Move:
-    return lambda index, opened: list(places)
+@dataclass(frozen=True)
+class Reaching:
+    """A source reaching the same places from any seeds."""
+
+    places: tuple[str | Anchor | Span, ...]
+    relation: str = "reached"
+    name: ClassVar[str] = "reaching"
+    label: ClassVar[str] = "reached places"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [Reach(at, self.name, "", 1, relation=self.relation) for at in self.places]
 
 
 @pytest.mark.parametrize("file", ["orders.py", "v~2/orders.py", "v:5~2/orders.py"])
@@ -740,20 +750,24 @@ def test_a_restored_place_rebuilds_the_signature_its_builder_gave(tmp_path: Path
 
 
 def test_places_that_open_the_same_lines_are_offered_once(tmp_path: Path) -> None:
-    # Arrange
-    index = committed_index(
-        tmp_path, {"routes.py": "".join(f"ROUTE_{number} = {number}\n" for number in range(30))}
-    )
-    opened = index.read_slice(Span("routes.py", 25, 30))
-    window = window_place(index, "routes.py", 11, "mentions a key")
-    same_lines = range_place(index, "routes.py", 1, 21, "the start of a co-changed file")
+    # Arrange: line 11 of a text file lies outside every definition, so it opens as the window of
+    # lines 1 to 21, the lines the second source reaches by position.
+    index = committed_index(tmp_path, {"routes.txt": "".join(f"route {number}\n" for number in range(30))})
+    opened = index.read_slice(Span("routes.txt", 25, 30))
+    window = window_place(index, "routes.txt", 11, "mentions a key")
 
     # Act
     offered = neighbours(
-        index, opened, moves={"keys": a_move_offering(window), "files": a_move_offering(same_lines)}
+        index,
+        opened,
+        moves={
+            "keys": Reaching((LineAnchor("routes.txt", 11),), "mentions a key"),
+            "files": Reaching((RangeAnchor("routes.txt", 1, 21),), "the start of a co-changed file"),
+        },
     )
 
     # Assert
+    assert window.open().span == Span("routes.txt", 1, 21)
     assert [place.key for place in offered] == [window.key]
 
 
@@ -763,14 +777,13 @@ def test_a_place_wholly_inside_the_opened_code_is_not_offered(tmp_path: Path) ->
         tmp_path, {"routes.py": "".join(f"ROUTE_{number} = {number}\n" for number in range(30))}
     )
     opened = index.read_slice(Span("routes.py", 1, 20))
-    inside = range_place(index, "routes.py", 3, 5, "inside")
-    overlapping = range_place(index, "routes.py", 15, 25, "overlapping")
+    inside, overlapping = RangeAnchor("routes.py", 3, 5), RangeAnchor("routes.py", 15, 25)
 
     # Act
-    offered = neighbours(index, opened, moves={"lines": a_move_offering(inside, overlapping)})
+    offered = neighbours(index, opened, moves={"lines": Reaching((inside, overlapping))})
 
     # Assert
-    assert [place.key for place in offered] == [overlapping.key]
+    assert [place.key for place in offered] == ["routes.py:15-25"]
 
 
 def test_identical_code_in_two_files_stays_two_places(tmp_path: Path) -> None:
@@ -798,16 +811,15 @@ def test_a_place_kept_by_an_earlier_move_does_not_use_a_later_moves_cap(tmp_path
         tmp_path, {"routes.py": "".join(f"ROUTE_{number} = {number}\n" for number in range(30))}
     )
     opened = index.read_slice(Span("routes.py", 1, 1))
-    shared = range_place(index, "routes.py", 5, 6, "shared")
-    only_later = range_place(index, "routes.py", 8, 9, "only later")
+    shared, only_later = RangeAnchor("routes.py", 5, 6), RangeAnchor("routes.py", 8, 9)
 
     # Act
     kept, omitted = neighbours_and_omissions(
-        index, opened, 1, {"first": a_move_offering(shared), "later": a_move_offering(shared, only_later)}
+        index, opened, 1, {"first": Reaching((shared,)), "later": Reaching((shared, only_later))}
     )
 
     # Assert
-    assert [place.key for place in kept] == [shared.key, only_later.key]
+    assert [place.key for place in kept] == ["routes.py:5-6", "routes.py:8-9"]
     assert omitted == []
 
 
@@ -1023,7 +1035,8 @@ def test_a_schema_start_offers_the_schemas_models_nearest_first(schema_index: Co
     opened = place_for_line(schema_index, SCHEMA, 1, "start").open()
 
     # Act
-    models = [place.open().span for place in MOVES["same_file"](schema_index, opened)]
+    offered = neighbours(schema_index, opened, moves={"same_file": MOVES["same_file"]})
+    models = [place.open().span for place in offered]
 
     # Assert
     assert len(models) == 26
@@ -1061,7 +1074,7 @@ def test_a_models_client_calls_in_tests_come_after_those_in_production(
     opened = place_for_line(index, SCHEMA, 120, "start").open()
 
     # Act
-    offered = MOVES["client_calls"](index, opened)
+    offered = neighbours(index, opened, moves={"client_calls": MOVES["client_calls"]})
 
     # Assert
     names = [place.open().span.name for place in offered]
@@ -1081,3 +1094,24 @@ def test_code_that_queries_a_model_offers_the_models_block(schema_index: CodeInd
     assert offered[0].signature == (
         f"{SCHEMA}:98 `model Website {{` (model Website, which {function} queries by the text `.website.`)"
     )
+
+
+def test_a_source_reaching_a_whole_file_offers_the_start_of_it(tmp_path: Path) -> None:
+    # Arrange: imports reaches whole files; find shows a file by its first lines.
+    constants = "".join(f"RATE_{number} = {number}\n" for number in range(60))
+    index = committed_index(
+        tmp_path,
+        {
+            "orders.py": "from billing import refund\n\n\ndef place(order):\n    return refund(order)\n",
+            "billing.py": "def refund(order):\n    return None\n\n\n" + constants,
+        },
+    )
+    opened = index.read_slice(index.find_definition("place")[0])
+
+    # Act
+    offered = neighbours(index, opened, moves={"imports": IMPORTS})
+
+    # Assert
+    assert [(place.key, place.signature) for place in offered] == [
+        ("billing.py:1-40", "billing.py:1-40 `def refund(order):` (imported by orders.py)")
+    ]
