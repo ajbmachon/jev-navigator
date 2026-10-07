@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -16,6 +17,7 @@ import urllib.request
 import uuid
 from collections import defaultdict
 from decimal import Decimal
+from functools import cmp_to_key
 from pathlib import Path
 from unittest.mock import patch
 
@@ -39,6 +41,10 @@ from .refresh import ADMITTED
 
 OUT = PLANNING / "search-design/judging/paid-20261007"
 BY_NAME = {d.name: d for d in DESIGNS}
+
+
+class ProviderContractError(RuntimeError):
+    """A systemic reply/usage failure stops dispatch after retaining the attempt."""
 
 
 def credentials():
@@ -224,6 +230,18 @@ def llm_call(record, destination, ledger):
     reserve = Decimal(len(wire) + 1024) * Decimal(str(rates["input_price"]))
     reserve += Decimal(request["max_tokens"]) * Decimal(str(rates["output_price"]))
     ledger.reserve(attempt, "llm", reserve)
+    write(
+        destination / "attempt.json",
+        {
+            "id": attempt,
+            "case": record.get("case"),
+            "group": record.get("group"),
+            "request_sha256": identity(request),
+            "wire_sha256": hashlib.sha256(wire).hexdigest(),
+            "reservation_usd": str(reserve),
+            "model": request["model"],
+        },
+    )
     (destination / "request.json").write_bytes(wire)
     started = time.perf_counter()
     req = urllib.request.Request(
@@ -250,9 +268,33 @@ def llm_call(record, destination, ledger):
                 "unpriced_reserved": True,
             },
         )
-        raise
+        raise ProviderContractError(f"HTTP {error.code}; response retained and bill reserved") from error
+    except urllib.error.URLError as error:
+        write(
+            destination / "failure-receipt.json",
+            {
+                "id": attempt,
+                "seconds": time.perf_counter() - started,
+                "model": request["model"],
+                "unpriced_reserved": True,
+                "reason": str(error),
+            },
+        )
+        raise ProviderContractError("Transport failed; bill remains reserved") from error
     (destination / "response.json").write_bytes(raw)
     reply = json.loads(raw)
+    if not reply.get("usage") or not (reply.get("choices") or [{}])[0].get("message", {}).get("content"):
+        write(
+            destination / "failure-receipt.json",
+            {
+                "id": attempt,
+                "seconds": time.perf_counter() - started,
+                "model": reply.get("model"),
+                "unpriced_reserved": True,
+                "reason": "Missing answer content or usage",
+            },
+        )
+        raise ProviderContractError("Provider returned no answer content or usage; stop dispatch")
     usage = reply["usage"]
     cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
     calculated = Decimal(usage["prompt_tokens"] - cached) * Decimal(str(rates["input_price"]))
@@ -278,9 +320,15 @@ def llm_call(record, destination, ledger):
 async def evaluate(names, ledger, pilot=True):
     chosen = load(ADMITTED / "pilot.json")["groups"]
     for name in names:
+        if not name.startswith("L1"):
+            reviewed = load(OUT / "guard-hand-inspection.json")["prototypes"]
+            admitted = {row["prototype"] for row in reviewed if row["admitted"]}
+            if any(f"{name}-{dataset}" not in admitted for dataset in ("dev110", "hard27")):
+                raise ValueError("Matching guards must be read by hand before candidate calls")
         semaphore = asyncio.Semaphore(4)
+        halted = asyncio.Event()
 
-        async def one(record, name=name, semaphore=semaphore):
+        async def one(record, name=name, semaphore=semaphore, halted=halted):
             cid, ordinal = record["case"], record["group"]
             destination = OUT / "answers" / name / folder(cid) / str(ordinal)
             destination.mkdir(parents=True, exist_ok=True)
@@ -290,6 +338,8 @@ async def evaluate(names, ledger, pilot=True):
                     raise ValueError("A different request cannot reuse the observation")
                 return
             async with semaphore:
+                if halted.is_set():
+                    return
                 start = time.perf_counter()
                 started_at = time.time()
                 try:
@@ -301,10 +351,15 @@ async def evaluate(names, ledger, pilot=True):
                             Judge(session, masker=None, max_calls=1), BY_NAME[name], record["request"]
                         )
                     failure = None
+                    stop = None
                 except CapStopError:
+                    halted.set()
                     raise
                 except Exception as error:
                     rows, failure = [], f"{type(error).__name__}: {error}"
+                    stop = error if isinstance(error, ProviderContractError) else None
+                    if stop is not None:
+                        halted.set()
                 write(
                     result,
                     {
@@ -318,6 +373,8 @@ async def evaluate(names, ledger, pilot=True):
                         "failure": failure,
                     },
                 )
+                if stop is not None:
+                    raise stop
 
         work = [
             r
@@ -497,7 +554,26 @@ def freeze():
     for name in summary:
         families["J3" if name.startswith("J3") else name.split("-")[0]].append(name)
     best = {family: max(names, key=order) for family, names in families.items()}
-    jev = sorted((name for family, name in best.items() if family != "L1"), key=order, reverse=True)[:2]
+
+    def compare(left, right):
+        a, b = summary[left], summary[right]
+        rank_a, rank_b = (a["recall16"], a["witness_points"]), (b["recall16"], b["witness_points"])
+        if rank_a != rank_b:
+            return (rank_a > rank_b) - (rank_a < rank_b)
+        if (
+            not left.startswith("J4")
+            and not right.startswith("J4")
+            and a["high_deciding_share"] != b["high_deciding_share"]
+        ):
+            return (a["high_deciding_share"] > b["high_deciding_share"]) - (
+                a["high_deciding_share"] < b["high_deciding_share"]
+            )
+        cost_a, cost_b = price_rows[left]["full_high_usd"], price_rows[right]["full_high_usd"]
+        return (cost_b > cost_a) - (cost_b < cost_a)
+
+    jev = sorted(
+        (name for family, name in best.items() if family != "L1"), key=cmp_to_key(compare), reverse=True
+    )[:2]
     write(
         OUT / "finalists.json",
         {

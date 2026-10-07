@@ -14,7 +14,7 @@ Use Case 1's environment with the pinned runtime on PYTHONPATH:
 - /Users/andremachon/Projects/jev-navigator-judging
 
 The frozen requests are in the planning repository's
-search-design/judging/design-20261007-admitted-v4. Every archive has 984 original
+search-design/judging/design-20261007-admitted-v5. Every archive has 984 original
 physical groups. J3 omits inadmissible groups and compares its parent on the
 same subset. Earlier unsent archives are superseded preparation drafts.
 
@@ -35,3 +35,10 @@ Focused verification: pytest evaluations/pack_judging -q, ruff check
 evaluations/pack_judging, and ruff format --check evaluations/pack_judging.
 The Engine integration test uses the retained real P1 group and controlled
 independent answers, with no model calls. Do not run the whole suite locally.
+
+The Requesty route is Case 2's JSON-object transport, with the exact closed
+string-id schema in the prompt and strict admission in code. Initial advertised
+JSON-schema replies were blank. Their 99 uncertain reservations remain charged
+against the cap and all raw attempts remain in failed-schema-transport. Systemic
+missing-content/usage failures halt dispatch. summarize.py reconciles the saved
+packets and the append-only ledger without a provider call.

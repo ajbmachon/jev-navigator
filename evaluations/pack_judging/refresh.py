@@ -10,12 +10,12 @@ from collections import defaultdict
 
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 
-from .designs import DESIGNS, identity, jev_request
+from .designs import DESIGNS, identity, jev_request, llm_request, scan_llm_request
 from .frozen import hits, load, richer_state, sha256
 from .prepare import PLANNING, free_meta, meta_candidate, price, write
 
-PREVIOUS = PLANNING / "search-design/judging/design-20261007-admitted-v3"
-ADMITTED = PLANNING / "search-design/judging/design-20261007-admitted-v4"
+PREVIOUS = PLANNING / "search-design/judging/design-20261007-admitted-v4"
+ADMITTED = PLANNING / "search-design/judging/design-20261007-admitted-v5"
 
 
 def main():
@@ -52,7 +52,7 @@ def main():
     arms, meta = [], []
     for design in DESIGNS:
         filename = f"{design.name}-requests.jsonl.gz"
-        changed = design.family == "J2" and design.wording == 2
+        changed = design.family == "L1"
         if not changed:
             os.link(PREVIOUS / filename, ADMITTED / filename)
         totals, violations, done = defaultdict(float), [], set()
@@ -72,14 +72,21 @@ def main():
                         record = next(records)
                         assert (record["case"], record["group"]) == (context["case"], group["ordinal"])
                         if changed:
-                            request = jev_request(design, group["request"], rich)
+                            request = (
+                                llm_request(design, group["request"])
+                                if design.family == "L1"
+                                else jev_request(design, group["request"], rich)
+                            )
+                            if design.family == "L1":
+                                scan_llm_request(request)
                             record.update(
                                 request=request,
                                 request_sha256=identity(request),
-                                eligible=not JEV_INPUT_LIMITS.exceeded_by(
-                                    request["state"], request["questions"]
+                                eligible=design.family == "L1"
+                                or not JEV_INPUT_LIMITS.exceeded_by(
+                                    request.get("state", {}), request.get("questions", {})
                                 ),
-                                price=price(request, False, rates),
+                                price=price(request, design.family == "L1", rates),
                             )
                             new.write(json.dumps(record, ensure_ascii=False) + "\n")
                         if not record["eligible"]:

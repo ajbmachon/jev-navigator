@@ -134,7 +134,19 @@ def llm_request(design: Design, baseline: dict) -> dict:
         + EXAMPLE
         + "\nEach id is the decimal index of its item in items. Return an empty list when none "
         "qualifies. This selects evidence; it does not classify the finding as true or false. "
-        "Return only the JSON object with one id list per supplied target.\n"
+        "Return only the JSON object with one id list per supplied target. "
+        'IDs must be JSON strings such as "0", never numbers. '
+        "Every id must be from the supplied list; lists must contain unique ids.\n"
+        + "OUTPUT_SCHEMA:\n"
+        + json.dumps(
+            {
+                "type": "object",
+                "properties": properties,
+                "required": list(properties),
+                "additionalProperties": False,
+            }
+        )
+        + "\n"
         + "STATE_JSON:\n"
         + json.dumps(state, ensure_ascii=False)
     )
@@ -143,19 +155,7 @@ def llm_request(design: Design, baseline: dict) -> dict:
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": 512,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "deciding_items",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": list(properties),
-                    "additionalProperties": False,
-                },
-            },
-        },
+        "response_format": {"type": "json_object"},
     }
 
 
