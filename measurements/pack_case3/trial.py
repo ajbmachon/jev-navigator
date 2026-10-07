@@ -150,11 +150,15 @@ class AgentProvider:
                 raise ValueError("Invalid reported token counts")
             if cached > input_tokens:
                 raise ValueError("Cached input exceeds total prompt usage")
-            usd = (
+            catalog_usd = (
                 (Decimal(input_tokens - cached) * Decimal(str(self.catalog["input_price"])))
                 + Decimal(cached) * Decimal(str(self.catalog["cached_price"]))
                 + Decimal(output_tokens) * Decimal(str(self.catalog["output_price"]))
             )
+            reported_usd = usage.get("cost")
+            usd = catalog_usd if reported_usd is None else Decimal(str(reported_usd))
+            if not usd.is_finite() or usd < 0:
+                raise ValueError("Invalid reported provider cost")
         except Exception:
             self.ledger.unknown(ticket, category="agent", case=case, turn=turn)
             raise
@@ -170,6 +174,8 @@ class AgentProvider:
             reasoning_tokens=usage.get("completion_tokens_details", {}).get("reasoning_tokens"),
             request_id=raw.get("id"),
             model=raw.get("model"),
+            catalog_usd=str(catalog_usd),
+            usd_source="catalog_usage" if reported_usd is None else "provider_usage.cost",
         )
         return raw
 

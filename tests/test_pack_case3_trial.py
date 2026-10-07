@@ -244,3 +244,16 @@ def test_continuation_preserves_five_used_calls_source_receipts_and_cumulative_u
     assert (out / "continued/input.json").stat().st_mtime_ns == original_input_time
     assert json.loads((out / "continued/result-before-resume.json").read_text())["jvn_calls"] == 5
     assert not ledger.reserved
+
+
+def test_reported_agent_dollars_are_ledger_authority_when_the_catalog_calculation_differs(tmp_path, endpoint):
+    url, _, responses = endpoint
+    raw = response({"role": "assistant", "content": "Done"})
+    raw["usage"]["cost"] = 0.00006
+    responses.append(raw)
+    ledger = ledger_at(tmp_path)
+    provider_at(ledger, url).ask("case", tmp_path, 1, [], 1000, False)
+    assert ledger.spent == Decimal("0.006004176")
+    [usage] = ledger.case_usage("case")
+    assert usage["usd"] == "0.00006" and usage["usd_source"] == "provider_usage.cost"
+    assert Decimal(usage["catalog_usd"]) == Decimal("0.0000406")
