@@ -14,6 +14,8 @@ from jev_navigator.judgments.secrets import SecretScanner, refuse_if_secret
 YES = "Locally implements a condition, value or action described by the point."
 NO = "Only calls, forwards, mentions or sits near that code, or implements something else."
 EXAMPLE = "Negative q: 'if q < 0: raise ValueError()' decides; 'return validate(q)' forwards."
+DECIDING_EXAMPLE = "if q < 0: raise ValueError()"
+FORWARDING_EXAMPLE = "return validate(q)"
 MATCH_WORDINGS = (
     "Does `unit.code` itself hold the condition, value or action described in `point`?",
     "Is `unit.code` the implementation of a behavior described in `point`?",
@@ -21,8 +23,10 @@ MATCH_WORDINGS = (
 )
 COUNTERFACTUAL_WORDINGS = (
     "Would changing the local logic in `unit.code` change whether the behavior in `point` happens?",
-    "With callees fixed, could changing `unit.code` change the answer to `point`?",
-    "Does the answer to `point` depend on a condition, value or action implemented in `unit.code`?",
+    "With callees fixed, could changing `unit.code` change whether the behavior described in `point` "
+    "happens?",
+    "Does whether the behavior described in `point` happens depend on a condition, value or action "
+    "implemented in `unit.code`?",
 )
 CHOICE_WORDINGS = (
     "Which item in `items` itself holds the code that decides `targets.{point}`?",
@@ -67,13 +71,18 @@ def profile(design: Design) -> QuestionProfile:
     if counterfactual:
         yes = "A local decision change could change the behavior, with inputs, wiring and callees fixed."
         no = "Decision lives elsewhere or is unrelated. Redirecting a forwarding call does not count."
+        if design.wording == 2:
+            no = "Decision elsewhere or unrelated. Redirecting a forwarding call does not count."
     return QuestionProfile(
         "match",
         {
             "match": {
                 "type": "noul",
                 "instructions": wording,
-                "criteria": {"true": {"what": yes, "examples": [EXAMPLE]}, "false": {"what": no}},
+                "criteria": {
+                    "true": {"what": yes, "examples": [DECIDING_EXAMPLE]},
+                    "false": {"what": no, "examples": [FORWARDING_EXAMPLE]},
+                },
             }
         },
     )
