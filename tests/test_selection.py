@@ -3,7 +3,9 @@
 from dataclasses import replace
 
 import pytest
+from git_repos import git, write_files
 
+from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.units import Reading, list_units
 from jev_navigator.judgments.answers import ChoiceAnswer
 from jev_navigator.selection import (
@@ -77,6 +79,28 @@ def test_graph_uses_real_binding_and_file_relations(sample_index):
     assert graph.edge_counts["same_file"] == len(units)
     walk = random_walk(graph, {caller.id: 1})
     assert walk[validator.id] > 0
+
+
+def test_cochange_keeps_a_relation_present_only_in_the_other_files_top_list(tmp_path):
+    git(tmp_path, "init", "-q", "-b", "main")
+    write_files(
+        tmp_path,
+        {"a.py": "def a(): return 0\n", "b.py": "def b(): return 0\n", "z.py": "def z(): return 0\n"},
+    )
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "initial")
+    for revision in range(1, 4):
+        write_files(
+            tmp_path, {"a.py": f"def a(): return {revision}\n", "b.py": f"def b(): return {revision}\n"}
+        )
+        git(tmp_path, "commit", "-qam", "a and b change together")
+    write_files(tmp_path, {"a.py": "def a(): return 4\n", "z.py": "def z(): return 4\n"})
+    git(tmp_path, "commit", "-qam", "a and z change together")
+    index = CodeIndex.from_git(tmp_path)
+    units = list_units(index, ["a.py", "z.py"], box_chars=50_000).units
+    graph = graph_from_index(index, units, cochange_limit=1)
+    assert graph.edge_counts["cochange"] == 1
+    assert "file:z.py" in graph.adjacency["file:a.py"]
 
 
 def test_walk_conserves_mass_and_penalizes_hubs_and_handles_dangling_nodes():

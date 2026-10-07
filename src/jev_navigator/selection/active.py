@@ -32,6 +32,7 @@ class ActivePolicy:
     min_requests: int = 1
     prior_positive: float = 1.0
     prior_negative: float = 15.0
+    propagation_iterations: int = 2
 
     def __post_init__(self):
         if self.max_requests < 1 or not 0 <= self.min_requests <= self.max_requests:
@@ -40,6 +41,8 @@ class ActivePolicy:
             raise ValueError("Marginal-value beta prior parameters must be positive")
         if self.propagation_weight < 0 or self.min_expected_gain < 0:
             raise ValueError("Active-search weights must be nonnegative")
+        if self.propagation_iterations < 1:
+            raise ValueError("Propagation must take at least one graph step")
 
 
 @dataclass(frozen=True)
@@ -87,7 +90,9 @@ def active_search(
         confirmed = {
             id: observation.probability for id, observation in observations.items() if observation.confirmed
         }
-        propagation = random_walk(graph, confirmed) if confirmed else {}
+        propagation = (
+            random_walk(graph, confirmed, max_iterations=policy.propagation_iterations) if confirmed else {}
+        )
         propagation_max = max((propagation.get(id, 0) for id in pending), default=0) or 1
         boost = {id: propagation.get(id, 0) / propagation_max for id in pending}
         pending.sort(key=lambda id: -(normalized[id] + policy.propagation_weight * boost[id]))
