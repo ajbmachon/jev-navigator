@@ -32,3 +32,32 @@ def test_meta_fragment_scan_uses_original_source_path_and_still_rejects_literals
     state["state_components"][0]["value"] = "api_key = 'fixture-secret-value'"
     with pytest.raises(SecretInRequestError):
         refuse_if_secret(state, {}, run.LocatedReviewScanner(prepared))
+
+
+def test_scalar_lab_accepts_groups_without_six_role_baseline_answers():
+    from paid_report import COMPARE, HARD_HISTORY, cases_only, historical_case
+    from paid_run import scopes
+
+    from .packing import lab_rooms
+
+    previous = {(r["case"], r["arm"]): r for r in load(run.OUT / "per-finding-results.json")}
+    dev, hard = cases_only(COMPARE / "step-3/metadata.json"), cases_only(HARD_HISTORY / "windows.json")
+    cases = load(ADMITTED / "frozen-cases.json")
+    chosen = [
+        next(c for c in cases if c["context"]["case"] == "P1"),
+        next(c for c in cases if c["context"]["dataset"] == "dev110"),
+    ]
+    cached = {}
+    for original in chosen:
+        context = original["context"]
+        _, index = scopes(context, cached)
+        case = {
+            **original,
+            "groups": [{k: v for k, v in g.items() if k != "baseline_rows"} for g in original["groups"]],
+        }
+        history = historical_case(context, case["labels"], dev, hard)
+        actual = lab_rooms(history, run.bindings(case), case, run.observations("J1-3", case), index)
+        expected = previous[context["case"], "J1-3"]["lab"]
+        assert {
+            room: [label["delivered"] for label in value["labels"]] for room, value in actual.items()
+        } == {room: [label["delivered"] for label in value["labels"]] for room, value in expected.items()}

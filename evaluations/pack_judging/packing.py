@@ -106,12 +106,17 @@ def lab_rooms(history, bindings, case, rows, index):
                 }
             )
     # Reuse geometry/source binding from Case 1; its scalar-independent renderer needs only a score.
-    keys = {(o["point"], o["place"]["id"]) for o in observations}
+    # Case 1's geometry adapter expects role fields to construct RankedUnit. These
+    # aliases carry the scalar score only for source sizing; they are not role answers.
     geometry = [
-        row
-        for group in case["groups"]
-        for row in group["baseline_rows"]
-        if (row["point"], row["place"]["id"]) in keys
+        {
+            **observation,
+            "probabilities": dict.fromkeys(
+                ("decide", "guard", "value", "effect", "satisfied"),
+                observation["probabilities"]["match"],
+            ),
+        }
+        for observation in observations
     ]
     pairs, units, _ = lab_inputs(bindings, geometry, index)
     answers = {f"{o['point']}:{o['place']['id']}": o["probabilities"] for o in observations}

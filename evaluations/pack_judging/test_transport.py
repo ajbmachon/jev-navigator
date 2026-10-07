@@ -99,3 +99,48 @@ def test_systemic_provider_failure_stops_pending_groups(tmp_path, monkeypatch):
     assert 1 <= len(sent) <= 4
     assert not any(group >= 4 for group in sent)
     assert list(tmp_path.glob("answers/L1-1/fixture/*/observation.json"))
+
+
+def test_exact_jev_group_cache_reuses_raw_but_changed_companion_requires_reserved_send(tmp_path, monkeypatch):
+    """An unchanged unit never authorizes cache reuse in a different sixteen-item group."""
+    import asyncio
+    from copy import deepcopy
+
+    import paid_client
+    from paid_client import JevSession
+    from paid_support import CapStopError
+
+    from jev_navigator.judgments.judge import Judge
+
+    from .consume import judge_group
+    from .designs import jev_request
+    from .prepare import write
+    from .reach import DESIGN, ordered_key
+
+    request = jev_request(
+        DESIGN,
+        {
+            "state": {
+                "targets": {"p0": "Reject negative quantities"},
+                "items": [{"file": "owner.py", "code": "return q"}] * 16,
+            }
+        },
+    )
+    raw = {
+        "model": "fixture",
+        "answers": {qid: {"type": "noul", "noul": 0.9} for qid in request["questions"]},
+        "usage": {"input_tokens": 10},
+    }
+    ledger = Ledger(tmp_path / "ledger.jsonl", cap="0")
+    session = JevSession(ledger, tmp_path / "http")
+    write(session.folder / "exact" / (ordered_key(request) + ".json"), raw)
+    monkeypatch.setattr(paid_client, "resources", lambda: None)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "fixture")
+    rows = asyncio.run(judge_group(Judge(session, masker=None, max_calls=1), DESIGN, request))
+    assert len(rows) == 16 and rows[0]["score"] == 0.9
+    assert not session.receipts and not ledger.events
+    changed = deepcopy(request)
+    changed["state"]["items"][15] = {"file": "other.py", "code": "raise ValueError()"}
+    with pytest.raises(CapStopError):
+        asyncio.run(judge_group(Judge(session, masker=None, max_calls=1), DESIGN, changed))
+    assert not session.receipts and not ledger.events
