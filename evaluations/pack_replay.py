@@ -141,12 +141,41 @@ def rank_positions(pairs, units, observations, evidence_type):
     }
 
 
+def verify_historical_whole(metadata, by_case, observations, reducer, required, historical_cases):
+    """Bind the retained whole baseline without adding historical selective arms."""
+    from find_eval.simulate import composed_case
+
+    totals = {}
+    for factor in [1, 3, 5]:
+        delivered = 0
+        for cid, original in metadata["cases"].items():
+            cap = original["pack_chars"] * factor
+            fixed_chars = original["pack_chars"] - original["ranked_capacity_chars"]
+            case = {**original, "ranked_capacity_chars": cap - fixed_chars}
+            result = composed_case(
+                case,
+                by_case[cid],
+                metadata["units"],
+                {pair: observations[pair] for pair in by_case[cid]},
+                reducer,
+                required,
+            )
+            expected = historical_cases[str(factor)]["cases"][cid]
+            assert result["selected"] == expected["selected"], (cid, factor, "original selection")
+            assert result["labels"] == expected["labels"], (cid, factor, "original labels")
+            delivered += sum(label["delivered"] for label in result["labels"])
+        assert delivered == {1: 80, 3: 115, 5: 126}[factor]
+        totals[f"x{factor}"] = delivered
+    return totals
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--proof", type=Path, default=PROOF)
     parser.add_argument("--planning", type=Path, default=PLANNING)
+    parser.add_argument("--rules", nargs="+", required=True)
     parser.add_argument(
-        "--rules", nargs="+", required=True, choices=["A", "B", "C", "D", "E", "F", "G15", "G25", "G40"]
+        "--selective", action="store_true", help="Compare selective rules in separate artifacts."
     )
     args = parser.parse_args()
     # No import-time global audit hooks: importing this module stays harmless.
@@ -155,11 +184,33 @@ def main():
     from enginepy.workflows.document_analysis.evidence_pack import PackUnit, RankedUnit
     from find_eval.simulate import _covers, _windows, composed_case, pair_probabilities, proposal_reducer
 
+    selective = None
+    extra_hashes = {}
+    if args.selective:
+        import selective_rules
+
+        selective = selective_rules
+        if not set(args.rules) <= set(selective.RULES):
+            parser.error("--rules must name existing selective rules")
+        owner_modules = selective.owners()
+        for module in (selective, *owner_modules):
+            path = Path(module.__file__)
+            extra_hashes[path] = digest(path)
+    elif not set(args.rules) <= set(excerpt_rules.RULES):
+        parser.error("--rules must name existing excerpt rules")
     helper_hash = digest(Path(excerpt_rules.__file__))
     script_hash = digest(Path(__file__))
     role_root = args.proof / "runs/roles-compare-20261006"
     out = args.planning / "search-design/excerpts"
+    if args.selective:
+        out /= "selective"
     out.mkdir(parents=True, exist_ok=True)
+    prior_controls = {}
+    if args.selective:
+        for line in (out.parent / "pack-cases.jsonl").open():
+            row = json.loads(line)
+            if row["variant"] in {"whole", "D"} and row["budget"].startswith("uniform"):
+                prior_controls[(row["variant"], row["budget"], row["case"])] = row
     metadata = load(role_root / "step-3/metadata.json")
     assert digest(role_root / "frozen-unit-points.jsonl") == metadata["pairs_sha256"] == FROZEN_SHA
     assert len(metadata["cases"]) == 110
@@ -212,6 +263,12 @@ def main():
     del masked_sources
     floor_data = historical_prefixes(metadata, role_root)
     historical_cases = load(role_root / "funnel/pack-curves.json")["roles16"]
+    baseline_verification = None
+    if args.selective:
+        baseline_verification = verify_historical_whole(
+            metadata, by_case, observations, reducer, policy["required_roles"], historical_cases
+        )
+        print("Original whole baselines verified:", baseline_verification, flush=True)
     windows = load(role_root / "line-windows/render-bindings.json")
     roots, files = {}, collections.defaultdict(set)
     for cid in metadata["cases"]:
@@ -221,6 +278,18 @@ def main():
         files[case["root"]].update(metadata["units"][p["unit_key"]]["file"] for p in by_case[cid].values())
         files[case["root"]].update(f["region"]["file"] for f in floor_data[cid]["floors"])
     structures = {root: excerpt_rules.Structure(root, sorted(paths)) for root, paths in files.items()}
+    selectors = {}
+    if selective is not None:
+        queries, citations, input_paths = selective.load_case_inputs(args.proof, metadata["cases"])
+        catalogue = args.planning / "search-design/case1/data/catalogue.sqlite"
+        for path in [catalogue, *input_paths]:
+            extra_hashes[path] = digest(path)
+        for root in files:
+            cases = [cid for cid in metadata["cases"] if roots[cid] == root]
+            scent = selective.repository_scent(root, catalogue)
+            selectors[root] = selective.Selector(
+                scent, {cid: queries[cid] for cid in cases}, {cid: citations[cid] for cid in cases}
+            )
     print(
         "Bound original masked request states, archived delivery bodies, prefixes, and parser roots.",
         flush=True,
@@ -230,8 +299,8 @@ def main():
         for cid, pairs in by_case.items()
     }
     summary, case_rows, line_rows, packet_rows, compression_rows = [], [], [], [], []
-    variants = ["whole", "window6", *args.rules]
-    budgets = [(f"x{factor}", factor, None) for factor in [1, 3, 5]]
+    variants = ["whole", "D", *args.rules] if args.selective else ["whole", "window6", *args.rules]
+    budgets = [] if args.selective else [(f"x{factor}", factor, None) for factor in [1, 3, 5]]
     budgets += [(f"uniform{tokens}", None, tokens) for tokens in [7200, 20000, 36000]]
 
     for variant in variants:
@@ -248,6 +317,10 @@ def main():
                     rendered = render_runs(sources[key], unit["runs"])
                 elif variant == "window6":
                     rendered = render_runs(sources[key], windows["ranked"]["6"][cid][key]["runs"])
+                elif selective is not None and variant in selective.RULES:
+                    rendered = selectors[roots[cid]].render(
+                        sources[key], structure.facts(unit["file"]), cid, variant, file=unit["file"]
+                    )
                 else:
                     rendered = excerpt_rules.render_excerpt(
                         sources[key], structure.facts(unit["file"]), points[cid], variant
@@ -266,6 +339,11 @@ def main():
                 elif variant == "window6":
                     rendered = render_runs(
                         floor["source"], windows["floor"]["6"][cid][index]["window"]["runs"]
+                    )
+                elif selective is not None and variant in selective.RULES:
+                    file = floor["region"]["file"]
+                    rendered = selectors[roots[cid]].render(
+                        floor["source"], structure.facts(file), cid, variant, file=file
                     )
                 else:
                     rendered = excerpt_rules.render_excerpt(
@@ -395,6 +473,14 @@ def main():
                     assert result["labels"] == expected["labels"], (key, cid, "original labels")
                 packet = "\n".join(packets)
                 assert len(packet) == len(fixed) + result["ranked_chars"] <= cap, (key, cid)
+                if args.selective and variant in {"whole", "D"}:
+                    prior = prior_controls[(variant, budget_name, cid)]
+                    assert result["selected"] == prior["selected_pairs"], (key, cid, "control selection")
+                    assert hashlib.sha256(packet.encode()).hexdigest() == prior["body_sha256"], (
+                        key,
+                        cid,
+                        "literal control packet",
+                    )
                 selected_whole = [
                     w
                     for p in result["selected"]
@@ -476,6 +562,8 @@ def main():
     assert digest(delivery_file) == delivery_hash
     assert digest(Path(excerpt_rules.__file__)) == helper_hash
     assert digest(Path(__file__)) == script_hash
+    for path, expected in extra_hashes.items():
+        assert digest(path) == expected, str(path)
     for name, data in [
         ("pack-summary.json", summary),
         ("pack-packet-manifest.json", packet_rows),
@@ -491,6 +579,14 @@ def main():
         "script_sha256": script_hash,
         "excerpt_rules_sha256": helper_hash,
         "source_roots": sorted(files),
+        "selective_owner_and_input_hashes": {str(path): value for path, value in extra_hashes.items()},
+        "selective_corpus_documents": {root: selector.documents for root, selector in selectors.items()},
+        "selective_seed_source": (
+            "Original finder claim.statement and exact claim.evidence integer line points; "
+            "no expanded floor ranges or deciding labels"
+        )
+        if args.selective
+        else None,
         "provider_calls": 0,
         "spend_usd": 0,
         "spend_sha256": spend_hash,
@@ -501,6 +597,8 @@ def main():
         "physically_verified_packets": len(case_rows),
         "labels_verified": len(line_rows),
         "whole_baseline": [80, 115, 126],
+        "historical_whole_verification": baseline_verification,
+        "prior_whole_D_literal_controls": len(prior_controls),
         "hard27": "unknown: no original roles16 groups available",
         "tokens": "4 characters per token estimate",
         "window6": "Original stored radius-six geometry; inline exact elisions counted in physical budget",

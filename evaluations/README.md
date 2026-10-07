@@ -16,6 +16,7 @@ proof_root="$HOME/.local/share/system-one-proof/jvn-eval-2026-10-03"
 proof_python="$proof_root/checkouts/engine-e733ea0c/.venv/bin/python"
 PYTHONPATH=src "$proof_python" evaluations/census.py
 PYTHONPATH=src "$proof_python" evaluations/agent_reads.py
+PYTHONPATH=src "$proof_python" evaluations/selective_census.py
 ```
 
 `excerpt_rules.py` owns the shared measurement rules. `census.py` resolves all
@@ -29,6 +30,16 @@ their original groups. Its pinned harness paths and command are in the planning
 repo's `search-design/excerpts/pack-REPRODUCE.md`. The fitting study owns archived
 delivery source bindings; this script reuses those bindings. It verifies the
 whole-unit selections before comparing B, D and G25.
+
+The follow-up `selective_rules.py` reuses case 1's `ScentIndex`, tokenizer and
+canonical source-unit owner from `~/Projects/jev-navigator-case1`. It ranks
+present finding terms by document frequency and seeds exact original finder
+citations, then compares local structure, function caps and wider windows.
+`selective_census.py` writes a separate census under `excerpts/selective/`.
+`pack_replay.py --selective` runs its eighteen variants beside whole and D at
+the three uniform rooms. Use the same pinned PYTHONPATH as the original replay.
+The new run checks the prior whole/D literal packet hashes as controls and
+leaves the original artifacts intact.
 
 Reports, compact TSV evidence and complete local JSON ledgers are written to
 the planning repo's `search-design/excerpts/`. The report distinguishes survival
