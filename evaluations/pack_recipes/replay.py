@@ -206,6 +206,7 @@ async def native_replay(records, exact, answers, inputs, out):
                 "spent_usd": 0,
             }
             results.append(result)
+            save_native_results(out, results)
             continue
         source = CandidateSource(tuple(record["units"]))
         version = record.get("version")
@@ -268,8 +269,12 @@ async def native_replay(records, exact, answers, inputs, out):
             ),
             flush=True,
         )
-        (out / "native-replay.json").write_text(json.dumps(results, indent=2) + "\n")
+        save_native_results(out, results)
     return results
+
+
+def save_native_results(out, results):
+    (out / "native-replay.json").write_text(json.dumps(results, indent=2) + "\n")
 
 
 def main():
