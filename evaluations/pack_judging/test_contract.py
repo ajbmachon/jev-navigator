@@ -9,9 +9,11 @@ from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswe
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.secrets import SecretInRequestError
 
+from . import consume
 from .consume import consume_jev, consume_llm, judge_group
 from .designs import DESIGNS, identity, jev_request, llm_request, scan_llm_request
 from .frozen import freeze_case
+from .prepare import meta_candidate
 
 
 def test_frozen_groups_use_existing_async_judge_without_changing_companions():
@@ -24,11 +26,12 @@ def test_frozen_groups_use_existing_async_judge_without_changing_companions():
     for design in (DESIGNS[0], DESIGNS[3], DESIGNS[12]):
         request = jev_request(design, baseline)
         observed = []
+        responses = []
 
         class Provider:
             model = "fixture"
 
-            async def ask(self, state, questions, observed=observed):
+            async def ask(self, state, questions, observed=observed, responses=responses):
                 observed.append({"state": state, "questions": questions})
                 answers = {}
                 for qid, question in questions.items():
@@ -39,7 +42,9 @@ def test_frozen_groups_use_existing_async_judge_without_changing_companions():
                         if question["type"] == "choice"
                         else NoulAnswer(0.9 if qid.endswith("#3") else 0.1)
                     )
-                return JevResponse(answers, self.model)
+                response = JevResponse(answers, self.model)
+                responses.append(response)
+                return response
 
         judge = Judge(Provider(), masker=None, max_calls=1)
         result = asyncio.run(judge_group(judge, design, request))
@@ -47,6 +52,13 @@ def test_frozen_groups_use_existing_async_judge_without_changing_companions():
         assert observed[0]["state"]["items"] == baseline["state"]["items"]
         assert len(result) == 16 and judge.calls == 1
         assert max(result, key=lambda row: row["score"])["slot"] == 3
+        # The code submitted for Meta review must accept the actual JVN typed response.
+        namespace = vars(consume).copy()
+        candidate = meta_candidate(design, request, "fixture", 0)
+        exec(candidate["workflow"]["consumer_code"], namespace)
+        reviewed_rows = namespace["consume_jev"](design, request, responses[0])
+        assert len(reviewed_rows) == 16
+        assert max(reviewed_rows, key=lambda row: row["score"])["slot"] == 3
 
 
 def test_choice_keeps_probability_confidence_and_none_separate():

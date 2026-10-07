@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import inspect
 import json
 import re
 import subprocess
@@ -16,6 +17,7 @@ from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.questions import serialized_chars
 from jev_navigator.judgments.secrets import SecretScanner, refuse_if_secret
 
+from .consume import consume_jev
 from .designs import DESIGNS, identity, jev_request, llm_request, scan_llm_request
 from .frozen import freeze_case, load, metrics, richer_state, sha256
 
@@ -61,26 +63,6 @@ def pilot_cases(cases: list[dict]) -> tuple[set[str], dict]:
     return chosen, assignment
 
 
-def consumer_code(design, request):
-    """Executable consumer bindings for Meta's Python analysis, with actual question ids."""
-    if design.family == "J4":
-        lines = ["def consume(answers):", "    rows = []"]
-        for qid in request["questions"]:
-            lines.extend(
-                [
-                    f"    distribution = answers[{qid!r}].probabilities",
-                    f"    winner = answers[{qid!r}].choice",
-                    f"    confidence = answers[{qid!r}].confidence",
-                    "    rows.append((distribution, winner, confidence))",
-                ]
-            )
-        return "\n".join([*lines, "    return rows"])
-    lines = ["def consume(answers):", "    scores = {}"]
-    for qid in request["questions"]:
-        lines.append(f"    scores[{qid!r}] = answers[{qid!r}].noul")
-    return "\n".join([*lines, "    return sorted(scores.items(), key=lambda pair: -pair[1])"])
-
-
 def meta_candidate(design, request, dataset, group):
     return {
         "case_id": f"judging-{dataset}-{group}",
@@ -97,7 +79,8 @@ def meta_candidate(design, request, dataset, group):
         },
         "workflow": {
             "purpose": "Rank the frozen units for the existing lab and Engine pack allocators.",
-            "consumer_code": consumer_code(design, request),
+            # Supply the real JVN consumer, even when Meta cannot bind its dynamic question IDs.
+            "consumer_code": inspect.getsource(consume_jev),
         },
     }
 
@@ -110,11 +93,13 @@ def free_meta(candidate: Path, destination: Path) -> dict:
     prepared = json.loads(result.stdout)
     requests = prepared["requests"]
     unresolved = [
-        path for row in requests for path in row["state_path_coverage"].get("unresolved_backticked_paths", [])
+        path
+        for row in requests
+        for path in row.get("state_path_coverage", {}).get("unresolved_backticked_paths", [])
     ]
     if unresolved:
         raise ValueError(f"Unresolved state paths: {unresolved}")
-    bodies = [row["submitted"] for row in requests]
+    bodies = [row["submitted"] for row in requests if "submitted" in row]
     return {
         "review_requests": len(bodies),
         "prepare_sha256": sha256(destination),
@@ -122,6 +107,10 @@ def free_meta(candidate: Path, destination: Path) -> dict:
         "forecast_usd": sum((254 + 0.30 * len(json.dumps(body).encode())) * 0.042 / 1e6 for body in bodies),
         "reservation_usd": sum((len(json.dumps(body).encode()) + 1024) * 0.042 / 1e6 for body in bodies),
         "atomicity": "not_reviewed_without_source_backed_independent_proposition_pair",
+        "workflow_coverage": [
+            row.get("workflow_coverage", {}) for row in requests if row.get("scope") == "workflow"
+        ],
+        "unreviewed": [row for row in requests if "submitted" not in row],
     }
 
 
