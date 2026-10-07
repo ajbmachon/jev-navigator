@@ -247,14 +247,16 @@ class RankingProvider:
             raise
 
 
-def run_case(pack, out, prompt, provider, encoding):
+def run_case(pack, out, prompt, provider, encoding, *, resume=False):
     """One adaptive search. Its observed output is scored only after all runs complete."""
     cid = pack["case"]
     directory = out / cid.replace(":", "_")
-    directory.mkdir()
+    if not resume:
+        directory.mkdir()
     start = time.perf_counter()
     resources = check_resources()
-    save(directory / "input.json", pack)
+    if not resume:
+        save(directory / "input.json", pack)
     messages = [
         {"role": "system", "content": prompt},
         {"role": "user", "content": json.dumps(pack["claim"], ensure_ascii=False)},
@@ -263,6 +265,53 @@ def run_case(pack, out, prompt, provider, encoding):
     calls, returned_tokens, final, status = 0, 0, "", "searching"
     tool_errors, uninspected_pages, turn = [], [], 0
     ranking = RankingProvider(provider.ledger, cid, directory)
+    previous = None
+    started_at = time.time()
+    if resume:
+        previous = json.loads((directory / "result.json").read_text())
+        if previous["status"] != "agent_output_cap":
+            raise ValueError("Only the prematurely capped response is eligible for this continuation")
+        save(directory / "result-before-resume.json", previous)
+        started_at = (directory / "input.json").stat().st_mtime
+        messages = json.loads((directory / "messages.json").read_text())
+        save(directory / "messages-before-resume.json", messages)
+        # An incomplete model tool request was never executed and must not become an action.
+        if messages[-1].get("tool_calls"):
+            messages[-1].pop("tool_calls")
+            messages[-1]["content"] = (messages[-1].get("content") or "") + (
+                "\nThe incomplete tool request was not executed."
+            )
+        calls = previous["jvn_calls"]
+        returned_tokens = previous["returned_tokens_cl100k"]
+        tool_errors = previous["tool_errors"]
+        uninspected_pages = previous["issued_continuations"]
+        turn = previous["agent_requests"]
+        ranking.calls = previous["jev_requests"]
+        with (directory / "source-lines.jsonl").open() as source:
+            for line in source:
+                row = json.loads(line)
+                shown[(row["file"], row["line"])] = row
+        for number in range(1, calls + 1):
+            request = json.loads((directory / f"tool-{number:02d}-request.json").read_text())
+            payload = json.loads((directory / f"tool-{number:02d}-response.json").read_text())
+            if "pages" not in payload:
+                continue
+            operations = tuple(
+                Operation.from_dict(op) for op in json.loads(request["function"]["arguments"])["operations"]
+            )
+            list(source_rows(payload, fragments, operations))
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Your previous response hit a per-response ceiling below the case's allowance. "
+                    "Continue from this saved transcript without repeating inspected evidence. "
+                    f"You have {MAX_TOOL_CALLS - calls} batched tool calls remaining. "
+                    "Finish with exact source ranges and remaining gaps "
+                    "under the existing case token allowance."
+                ),
+            }
+        )
     try:
         with CodeIndex.from_git(Path(pack["repository"])) as tracked:
             files = [
@@ -277,7 +326,7 @@ def run_case(pack, out, prompt, provider, encoding):
                 )
                 judge = Judge(
                     ranking,
-                    max_calls=MAX_JEV,
+                    max_calls=MAX_JEV - ranking.calls,
                     items_per_request=16,
                     max_concurrency=1,
                     store=SqliteAnswerStore(directory / "answers.sqlite"),
@@ -298,7 +347,7 @@ def run_case(pack, out, prompt, provider, encoding):
                         directory,
                         turn,
                         messages,
-                        min(2000, MAX_OUTPUT - billed_output),
+                        MAX_OUTPUT - billed_output,
                         calls < MAX_TOOL_CALLS,
                     )
                     choice = raw["choices"][0]
@@ -399,7 +448,9 @@ def run_case(pack, out, prompt, provider, encoding):
         "jev_usd": str(sum((Decimal(r["usd"]) for r in jev), Decimal(0))),
         "jev_input_tokens": sum(r["input_tokens"] for r in jev),
         "jev_output_tokens": sum(r["output_tokens"] for r in jev),
-        "wall_seconds": time.perf_counter() - start,
+        "wall_seconds": time.time() - started_at if resume else time.perf_counter() - start,
+        "active_wall_seconds": time.perf_counter() - start + (previous["wall_seconds"] if previous else 0),
+        "resumed_response_ceiling": resume,
         "source_lines": len(shown),
         "source_files": len({file for file, _ in shown}),
         "final": final,
@@ -423,8 +474,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case-folder", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--resume-output-caps", action="store_true")
     args = parser.parse_args()
-    args.out.mkdir(exist_ok=False)
+    if not args.resume_output_caps:
+        args.out.mkdir(exist_ok=False)
     ledger = SpendLedger(args.case_folder / "spend-ledger.jsonl")
     catalog = json.loads((args.case_folder / "requesty-model-catalog.json").read_text())["models"][0]
     assert catalog["id"] == MODEL and catalog["geolocation"] == "eu"
@@ -437,7 +490,7 @@ def main():
     prompt = frozen_prompt.split("# Host measurement contract")[0]
     prompt += "\nPublic tool contract supplied inline:\n" + Path("docs/batch.md").read_text()
     save(
-        args.out / "provenance.json",
+        args.out / ("resume-provenance.json" if args.resume_output_caps else "provenance.json"),
         {
             "model": MODEL,
             "provider": "requesty",
@@ -467,9 +520,19 @@ def main():
         },
     )
     encoding = tiktoken.get_encoding("cl100k_base")
+    unchanged = []
+    if args.resume_output_caps:
+        existing = json.loads((args.out / "results.json").read_text())
+        unchanged = [row for row in existing if row["status"] != "agent_output_cap"]
+        selected = {row["case"] for row in existing if row["status"] == "agent_output_cap"}
+        packs = [pack for pack in packs if pack["case"] in selected]
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(run_case, pack, args.out, prompt, provider, encoding) for pack in packs]
+        futures = [
+            pool.submit(run_case, pack, args.out, prompt, provider, encoding, resume=args.resume_output_caps)
+            for pack in packs
+        ]
         results = [future.result() for future in as_completed(futures)]
+    results.extend(unchanged)
     save(args.out / "results.json", results)
     save(
         args.out / "source-after.json",

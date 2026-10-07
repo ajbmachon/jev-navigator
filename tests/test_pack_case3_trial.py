@@ -131,6 +131,7 @@ def test_real_batch_source_and_withheld_exclusion_reach_agent_with_reconciled_bi
     out.mkdir()
     result = run_case(pack, out, "Find deciding source.", provider_at(ledger, url), CharacterCounter())
     assert result["status"] == "agent_final"
+    assert received[0]["max_tokens"] == 8000
     assert result["jvn_calls"] == 1 and result["agent_requests"] == 2 and result["jev_requests"] == 0
     assert Decimal(result["agent_usd"]) == Decimal("0.0000812")
     assert ledger.spent == Decimal("0.006025376")
@@ -203,3 +204,43 @@ def test_rank_sdk_preserves_wire_receipts_and_accounts_usage_before_answer_decod
     assert not ledger.reserved
     assert json.loads((tmp_path / "jev-01.request.bin").read_bytes())["state"] == state
     assert json.loads((tmp_path / "jev-01.response.bin").read_bytes())["usage"]["input_tokens"] == 200
+
+
+def test_continuation_preserves_five_used_calls_source_receipts_and_cumulative_usage(tmp_path, endpoint):
+    url, received, responses = endpoint
+    root = tmp_path / "repo"
+    root.mkdir()
+    with shop_index(root, {"limit.py": "MAX = 4\ndef check(n):\n    return n <= MAX\n"}) as index:
+        pack = {
+            "case": "continued",
+            "repository": str(root),
+            "commit": index.commit,
+            "withheld": [],
+            "claim": {"statement": "check limits", "evidence": [{"file": "limit.py"}]},
+        }
+    arguments = json.dumps({"operations": [{"op": "show", "file": "limit.py", "line": 1, "end": 3}]})
+    tool_calls = [
+        {"id": f"call-{i}", "type": "function", "function": {"name": "batched_jvn", "arguments": arguments}}
+        for i in range(5)
+    ]
+    partial = response({"role": "assistant", "content": "The final answer was cut"})
+    partial["choices"][0]["finish_reason"] = "length"
+    responses.extend([response({"role": "assistant", "tool_calls": tool_calls}), partial])
+    ledger = ledger_at(tmp_path)
+    provider = provider_at(ledger, url)
+    out = tmp_path / "output"
+    out.mkdir()
+    first = run_case(pack, out, "Find evidence.", provider, CharacterCounter())
+    assert first["status"] == "agent_output_cap" and first["jvn_calls"] == 5
+    original_request = (out / "continued/agent-01-request.bin").read_bytes()
+    original_input_time = (out / "continued/input.json").stat().st_mtime_ns
+    responses.append(response({"role": "assistant", "content": "limit.py:1-3. Enough evidence."}))
+    final = run_case(pack, out, "Find evidence.", provider, CharacterCounter(), resume=True)
+    assert final["status"] == "agent_final" and final["jvn_calls"] == 5
+    assert final["agent_requests"] == 3 and final["source_lines"] == 3
+    assert Decimal(final["agent_usd"]) == Decimal("0.0001218")
+    assert "tools" not in received[-1] and received[-1]["max_tokens"] == 7940
+    assert (out / "continued/agent-01-request.bin").read_bytes() == original_request
+    assert (out / "continued/input.json").stat().st_mtime_ns == original_input_time
+    assert json.loads((out / "continued/result-before-resume.json").read_text())["jvn_calls"] == 5
+    assert not ledger.reserved
