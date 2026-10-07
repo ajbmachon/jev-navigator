@@ -10,9 +10,17 @@ import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from enginepy.workflows.document_analysis import evidence_pack as owner
 from enginepy.workflows.document_analysis.code_relations import CodeRelations
 from jev_navigator.judgments.profiles import ROLES_V2
-from paid_pack import answered_observations, filter_observations, pack_lab, pack_native, score_windows
+from paid_pack import (
+    answered_observations,
+    filter_observations,
+    native_scope,
+    pack_lab,
+    pack_native,
+    score_windows,
+)
 from paid_shape import prepare
 
 from jev_navigator.index.code_index import CodeIndex
@@ -30,16 +38,38 @@ class OriginalGroupPackingTest(unittest.TestCase):
             "config.py": "FIRST = 1\n\ndef between():\n    return 2\n\nLAST = 3\n",
             "plan.py": "def planned():\n    return " + repr("v" * 31000) + "\n",
             "unasked.py": "def unasked():\n    return 5\n",
+            "enginepy/protocol/generated/remediation_contract.py": "def remediation():\n    return 6\n",
+            "enginepy/protocol/generated/event_contract.py": "def event():\n    return 7\n",
+            "private.py": "def private():\n    return 8\n",
+            "untracked.py": "def untracked():\n    return 9\n",
         }
         for file, source in sources.items():
+            (root / file).parent.mkdir(parents=True, exist_ok=True)
             (root / file).write_text(source)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(root), "rm", "--cached", "-q", "untracked.py"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "-c",
+                "user.name=Pack test",
+                "-c",
+                "user.email=pack@test",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            check=True,
+        )
         self.index = CodeIndex(root, sources)
         self.addCleanup(self.index.close)
         self.relations = CodeRelations(str(root), ({}, {}))
         self.row = {
             "repository": str(root),
+            "withheld": [],
             "claim": {
                 "id": "fixture",
                 "statement": "Check the behavior",
@@ -155,6 +185,62 @@ class OriginalGroupPackingTest(unittest.TestCase):
         result = pack_native(row, self.relations, self.index, observations, 20000)
         self.assertTrue(result["no_anchor"])
         self.assertEqual(result["consumer_windows"], [])
+
+    def test_explicit_union_scope_renders_generated_brothers_and_reports_ineligible_sources(self):
+        generated = "enginepy/protocol/generated/remediation_contract.py"
+        brother = "enginepy/protocol/generated/event_contract.py"
+        files = [generated, brother, "private.py", "untracked.py"]
+        row = {**self.row, "withheld": [str(Path(self.row["repository"]) / "private.py")]}
+        candidates, entries = [], []
+        for unit in list_units(self.index, files, box_chars=70000).units:
+            items = [
+                {**asdict(item), "code": read_ranges(self.index, item.file, item.ranges)}
+                for item in items_to_judge(unit)
+            ]
+            candidates.append({"unit": asdict(unit), "items": items, "source_flags": ["ranking"]})
+            entries.extend(
+                ({"file": item["file"], "code": item["code"]}, place)
+                for item, place in zip(items, items_to_judge(unit), strict=True)
+            )
+        requests, members, refusals = prepare(
+            ROLES_V2.questions("p0"), entries, {"targets": {"p0": "Check the behavior"}}
+        )
+        self.assertFalse(refusals)
+        request = requests[0]
+        digest = content_hash({"state": request["state"], "questions": request["questions"]})
+        membership = [
+            {**member, "unit_id": member["id"], "source_flags": ["ranking"]} for member in members[0]
+        ]
+        prepared = [{"ordinal": 1, "request": request, "members": membership, "request_sha256": digest}]
+        responses = [
+            {
+                **self.responses[0],
+                "request_sha256": digest,
+                "response": {
+                    "model": "jev-1.13.0",
+                    "answers": {qid: {"type": "noul", "noul": 0.9} for qid in request["questions"]},
+                },
+            }
+        ]
+        observations = answered_observations(prepared, responses, candidates)
+        self.assertFalse(self.relations.readable(generated))  # The real native inventory rejects this class.
+        normal_index = owner.pack_index(self.relations, row["repository"])
+        self.addCleanup(normal_index.close)
+        with self.assertRaisesRegex(ValueError, "outside the index scope"):
+            normal_index.lines(generated)  # Original live failure at the actual index boundary.
+        relations, index, scope = native_scope(row, files)
+        self.addCleanup(index.close)
+        self.assertEqual(set(scope["added_files"]), {generated, brother})
+        self.assertEqual({item["file"] for item in scope["excluded_files"]}, {"private.py", "untracked.py"})
+        result = pack_native(row, relations, index, observations, 20000)
+        self.assertEqual(result["excluded_observation_count"], 2)
+        self.assertEqual(
+            {item["file"] for item in result["excluded_observations"]}, {"private.py", "untracked.py"}
+        )
+        self.assertEqual(
+            {w["file"] for w in result["consumer_windows"] if w["file"] in files}, {generated, brother}
+        )
+        self.assertEqual({w["file"] for w in result["asked_windows"]}, set(files))
 
 
 if __name__ == "__main__":

@@ -16,11 +16,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from enginepy.workflows.document_analysis import evidence_pack as owner
+from enginepy.workflows.document_analysis.repo_relative_path import repo_relative_path
 from enginepy.workflows.document_analysis.skeptic_packet import PacketBudget, SkepticPacket
 from find_eval.simulate import composed_case, consumer_windows
 from jev_navigator.judgments.profiles import LOCAL_ROLES, ROLES_V2, RoleAnswers, compose_roles, retain_roles
 
 from jev_navigator.directives.find_all import UnitScore
+from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.units import Item, Piece, Unit, UnitKind
 from jev_navigator.judgments.answers import response_from_raw
 from jev_navigator.judgments.judge import CheckResult
@@ -29,7 +31,7 @@ from jev_navigator.judgments.thresholds import Thresholds
 
 VIEWS = ("union", "plan-only", "ranking-only")
 ROOMS = (7200, 20000, 36000)
-CHECKPOINTS = (4, 8, 16, 24)
+CHECKPOINTS = (0, 4, 8, 16, 24)
 BASE = Path.home() / ".local/share/system-one-proof/jvn-eval-2026-10-03"
 
 
@@ -298,6 +300,88 @@ def _small_packet(pack, room_chars):
     return candidate
 
 
+def native_scope(row, admitted_files):
+    """Configure the native renderer for this trial's explicit external sources.
+
+    Engine's normal inventory excludes generated/vendor code; the trial's source
+    configuration may explicitly admit tracked regular files from those classes.
+    The normal relations/floor stay owned by Engine. Withheld paths, untracked
+    files, links and paths outside the repository never extend the renderer.
+    """
+    from evidence_pack_mode import _scope
+
+    root = Path(row["repository"]).resolve()
+    withheld = {repo_relative_path(file, row["repository"]) for file in row.get("withheld", ())}
+    relations, original_index = _scope(
+        {**row, "withheld": sorted(file for file in withheld if file is not None)}
+    )
+    original_files = set(original_index.files) if original_index is not None else set()
+    requested, excluded = set(), []
+    for file in sorted(set(admitted_files)):
+        normalized = repo_relative_path(file, str(root))
+        reason = ""
+        if normalized is None or normalized != file:
+            reason = "source path is not canonical within repository"
+        elif normalized in withheld:
+            reason = "withheld source file"
+        elif not (root / file).resolve().is_relative_to(root):
+            reason = "source path resolves outside repository"
+        if reason:
+            excluded.append({"file": file, "reason": reason})
+        else:
+            requested.add(file)
+    files = sorted(original_files | requested)
+    index = original_index
+    if requested - original_files:
+        index = CodeIndex.from_git(root, files, max_files=len(files))
+        if original_index is not None:
+            original_index.close()
+    indexed_files = set(index.files) if index is not None else set()
+    excluded.extend(
+        {"file": file, "reason": "not a Git-tracked regular source file"}
+        for file in sorted(requested - indexed_files)
+    )
+    return (
+        relations,
+        index,
+        {
+            "configuration": "normal Engine scope plus explicitly admitted tracked union source files",
+            "normal_files": len(original_files),
+            "admitted_files": len(requested),
+            "added_files": sorted(indexed_files - original_files),
+            "excluded_files": excluded,
+        },
+    )
+
+
+def _native_observations(row, index, observations):
+    withheld = {repo_relative_path(file, row["repository"]) for file in row.get("withheld", ())}
+    indexed = set(index.files) if index is not None else set()
+    eligible, excluded = [], []
+    for observed in observations:
+        file = observed.answer.place.file
+        reason = "withheld source file" if repo_relative_path(file, row["repository"]) in withheld else ""
+        if not reason and file not in indexed:
+            reason = "source file outside native renderer index scope"
+        if reason:
+            excluded.append(
+                {
+                    "file": file,
+                    "place": observed.answer.place.id,
+                    "ordinal": observed.ordinal,
+                    "request_sha256": observed.answer.request_sha256,
+                    "reason": reason,
+                }
+            )
+        else:
+            eligible.append(observed)
+    return tuple(eligible), {
+        "excluded_observations": excluded,
+        "excluded_observation_count": len(excluded),
+        "eligible_observation_count": len(eligible),
+    }
+
+
 def pack_native(row, relations, index, observations, room_tokens):
     """Native selection and rendered consumer packet from original CheckResults.
 
@@ -306,6 +390,7 @@ def pack_native(row, relations, index, observations, room_tokens):
     cannot acquire inferred answers here. Native no-anchor behavior remains intact.
     """
     started = time.monotonic()
+    eligible, scope_receipt = _native_observations(row, index, observations)
     budget = PacketBudget(max(20000, room_tokens))
     request = owner.pack_request(relations, row["repository"], row["claim"], budget=budget)
     if request is None:
@@ -317,6 +402,7 @@ def pack_native(row, relations, index, observations, room_tokens):
             "owner_path": "evidence_pack.pack_request (no anchor)",
             "room_axis": "total rendered consumer packet allowance",
             "coverage": _coverage(observations),
+            **scope_receipt,
             "packet": "",
             "packet_chars": 0,
             "packet_estimated_tokens": 0,
@@ -328,7 +414,7 @@ def pack_native(row, relations, index, observations, room_tokens):
         floor = owner.build_packet(relations, row["repository"], row["claim"], budget_chars=sys.maxsize)
         floor = floor.within_budget(room_tokens * 2)
         request = replace(request, floor=floor.regions, searches=floor.receipts, trimmed=floor.trimmed)
-    rankings = _rankings(observations)
+    rankings = _rankings(eligible)
     settings = owner.PackSettings(callee_round=False, question_profile=ROLES_V2, required_roles=LOCAL_ROLES)
     shown = (
         (owner._with_registration(relations, unit), reasons)
@@ -338,6 +424,8 @@ def pack_native(row, relations, index, observations, room_tokens):
     facts = (
         f"original union observations: {len(observations)} answered source piece(s); "
         "view filtered after judgment; no new groups or callee round",
+        f"native source scope: {len(eligible)} eligible; "
+        f"{scope_receipt['excluded_observation_count']} excluded",
     )
     pack = owner.EvidencePack(
         request.claim_id,
@@ -362,7 +450,8 @@ def pack_native(row, relations, index, observations, room_tokens):
         "packet_estimated_tokens": len(rendered) / 4,
         "packet_sha256": content_hash(rendered),
         "facts": list(facts),
-        "coverage": _coverage(observations),
+        "coverage": _coverage(eligible),
+        **scope_receipt,
         "selected_sources": [
             {
                 "place": observed.answer.place.id,
@@ -375,7 +464,7 @@ def pack_native(row, relations, index, observations, room_tokens):
                     for role, answer in observed.answer.components.items()
                 },
             }
-            for observed in observations
+            for observed in eligible
             if observed.answer.place.id in {unit.unit.place for unit in units}
         ],
         "seconds": time.monotonic() - started,
@@ -429,7 +518,7 @@ def _workload():
 
 def main():
     """Persist every packing checkpoint as receipts land; rerunning incurs zero cost."""
-    from evidence_pack_mode import _floor_window, _scope
+    from evidence_pack_mode import _floor_window
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", type=lambda value: Path(value).expanduser())
@@ -443,10 +532,21 @@ def main():
             continue
         if not (folder / "prepared-requests.jsonl").exists():
             continue
-        by_repository[row["repository"]].append((cid, dataset, row, folder))
+        by_repository[(row["repository"], tuple(sorted(row["withheld"])))].append((cid, dataset, row, folder))
     summary = []
     for cases in by_repository.values():
-        relations, index = _scope(cases[0][2])
+        admitted_files = {
+            candidate["unit"]["path"]
+            for _, _, _, folder in cases
+            for candidate in _rows(folder / "union-candidates.jsonl")
+        }
+        relations, index, native_source_scope = native_scope(cases[0][2], admitted_files)
+        for exclusion in native_source_scope["excluded_files"]:
+            print(
+                f"Native source exclusion: {exclusion['file']}: {exclusion['reason']}",
+                file=sys.stderr,
+                flush=True,
+            )
         try:
             for cid, dataset, row, folder in cases:
                 prepared = tuple(_rows(folder / "prepared-requests.jsonl"))
@@ -482,6 +582,7 @@ def main():
                                 ("native", pack_native(row, relations, index, selected, room)),
                             ):
                                 if path == "native":
+                                    packed["native_source_scope"] = native_source_scope
                                     packet_name = f"{view}-{checkpoint}-{room}-native-packet.txt"
                                     (folder / packet_name).write_text(packed.pop("packet") + "\n")
                                     packed["packet_file"] = packet_name
@@ -494,7 +595,13 @@ def main():
                                     "view": view,
                                     "checkpoint": checkpoint,
                                     "checkpoint_complete": complete,
-                                    "checkpoint_status": "complete" if complete else "observed_lower_bound",
+                                    "checkpoint_status": (
+                                        "floor_only_baseline"
+                                        if checkpoint == 0
+                                        else "complete"
+                                        if complete
+                                        else "observed_lower_bound"
+                                    ),
                                     "prepared_requests": len(prepared),
                                     "answered_ordinals": sorted(answered_ordinals),
                                     "room_tokens": room,
