@@ -56,6 +56,7 @@ from .scope_scan import (
 from .source_files import DISAPPEARED, SourceFiles
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .text_blocks import TextBlock, text_blocks
+from .text_search import TextMatcher
 from .tsconfig import ScriptPaths, nearest_script_paths
 
 DEFAULT_WINDOW_RADIUS = 10
@@ -525,12 +526,10 @@ class CodeIndex:
             for call in self._facts_in(function.file).calls
             if function.start <= call.line <= function.end
         ]
-        edges: dict[str, CallEdge] = {}
-        for call in calls:
-            if call.name not in edges:
-                binding = self.binding_of(call.file, call.line, call.name, call.receiver)
-                edges[call.name] = CallEdge(call.name, call.line, binding)
-        return tuple(edges.values())
+        return tuple(
+            CallEdge(call.name, call.line, self.binding_of(call.file, call.line, call.name, call.receiver))
+            for call in calls
+        )
 
     def find_references(self, name: str) -> tuple[Reference, ...]:
         """Uses of ``name`` that are not calls: arguments, collection entries, assignments,
@@ -1218,6 +1217,41 @@ class CodeIndex:
         hit's text is the line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word``
         keeps only matches no word character touches."""
         return self._search_text(text, max_hits, whole_word)
+
+    def search_texts(self, texts: Iterable[str]) -> dict[str, tuple[TextHit, ...]]:
+        """Exact hits for many terms in one repository scan, cached like search_text.
+
+        Ripgrep returns only line identities. The literal matcher retains every overlapping term
+        on those lines and gives each its own bounded context, so batching never drops provenance.
+        """
+        texts = tuple(dict.fromkeys(texts))
+        cache = self.__dict__.setdefault("_memoized__search_text", {})
+        missing = [text for text in texts if (text, None, False) not in cache]
+        ordinary = [text for text in missing if text and "\n" not in text and "\r" not in text]
+        for text in missing:
+            if text not in ordinary:
+                self.search_text(text)
+        if ordinary:
+            matches = self._on_available(
+                self._available_files(self.files),
+                lambda files: tools.ripgrep_term_lines(ordinary, files, self.root),
+            )
+            matcher = TextMatcher(ordinary)
+            hits: dict[str, list[TextHit]] = {text: [] for text in ordinary}
+            for line in sorted(matches):
+                source = self.lines(line.file)[line.line - 1]
+                seen = set()
+                for term, position in matcher.matches(source):
+                    if term not in seen:
+                        seen.add(term)
+                        context = source[
+                            max(0, position - TEXT_HIT_CONTEXT_BYTES) : position
+                            + len(term)
+                            + TEXT_HIT_CONTEXT_BYTES
+                        ]
+                        hits[term].append(TextHit(line.file, line.line, context))
+            cache.update(((text, None, False), tuple(hits[text])) for text in ordinary)
+        return {text: cache[(text, None, False)] for text in texts}
 
     @memoized
     def _search_text(self, text: str, max_hits: int | None, whole_word: bool) -> tuple[TextHit, ...]:
