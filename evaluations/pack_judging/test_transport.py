@@ -61,3 +61,41 @@ def test_blank_reply_preserves_wire_and_bill_and_valid_typed_reply_settles(tmp_p
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_systemic_provider_failure_stops_pending_groups(tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    baseline = {
+        "state": {"targets": {"p0": "Reject negative quantity"}, "items": [{"code": "return q"}] * 16}
+    }
+    request = llm_request(DESIGNS[-3], baseline)
+    from .designs import identity
+
+    records = [
+        {
+            "case": "fixture",
+            "group": group,
+            "eligible": True,
+            "request": request,
+            "request_sha256": identity(request),
+        }
+        for group in range(12)
+    ]
+    sent = []
+
+    def broken_provider(record, destination, ledger):
+        sent.append(record["group"])
+        time.sleep(0.01)
+        raise run.ProviderContractError("Recorded blank provider reply")
+
+    monkeypatch.setattr(run, "OUT", tmp_path)
+    monkeypatch.setattr(run, "records", lambda name: iter(records))
+    monkeypatch.setattr(run, "load", lambda path: {"groups": {"fixture": [0]}})
+    monkeypatch.setattr(run, "llm_call", broken_provider)
+    with pytest.raises(run.ProviderContractError):
+        asyncio.run(run.evaluate(["L1-1"], Ledger(tmp_path / "ledger.jsonl", cap="7"), pilot=False))
+    assert 1 <= len(sent) <= 4
+    assert not any(group >= 4 for group in sent)
+    assert list(tmp_path.glob("answers/L1-1/fixture/*/observation.json"))
