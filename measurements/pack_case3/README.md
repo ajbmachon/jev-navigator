@@ -67,3 +67,23 @@ This command makes paid calls. Run it only under the specific recorded approval.
 labels. Each search saves every agent and tool request and response, actual literal source lines,
 its final response, reported token usage, separate agent and Jev dollars and complete wall time.
 Post-run scoring joins those literal lines to the already frozen deciding references.
+
+After every search has ended, score the saved literal source against the existing dev110 references:
+
+```sh
+uv run python measurements/pack_case3/score_trial.py \
+  --case-folder ~/.local/share/jvn-takeover/2026-10-03/search-design/case3 \
+  --run /path/to/completed/trial-folder
+```
+
+The scorer verifies actual source text and unchanged source revision, reconciles provider-reported
+agent dollars, and writes per-finding and per-line comparisons beside the lab and native baselines.
+It makes no paid call. Reference locations never enter the search runner.
+
+The 7 October pilot corrected an unintended 2,000-token per-response ceiling by continuing only the
+eight affected transcripts under their original remaining 8,000-token case allowance. The repaired
+runner uses that entire remaining allowance. The `--resume-output-caps` switch preserves prior tool
+calls, billing and literal source receipts. It is not permission to repeat completed searches.
+Elapsed resumed wall time includes the operator repair pause; active wall time is reported separately.
+The nominal input envelope is checked against reported usage after a response, so the report retains
+any last-request overshoot. The hard dollar cap is reserved before every paid request.
