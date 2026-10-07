@@ -82,7 +82,11 @@ def test_llm_scan_preserves_code_references_and_rejects_literal_secrets():
     baseline = {
         "state": {
             "targets": {"p0": "Read a token from config"},
-            "items": [{"file": "owner.py", "code": "token = config.token"}],
+            "items": [
+                {"file": "owner.py", "code": "token = config.token"},
+                # Reduced from P6: a JavaScript object field is code, not a config secret.
+                {"file": "src/Options/Definitions.js", "code": "  allowExpiredAuthDataToken: {"},
+            ],
         }
     }
     request = llm_request(DESIGNS[-1], baseline)
