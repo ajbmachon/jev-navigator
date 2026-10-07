@@ -54,8 +54,10 @@ def test_budget_keeps_the_entire_reached_population_and_preserves_file_first_bat
     )
     assert result.stopped_by == "scope_examined"
     assert len(result.judged["p"]) == 37
-    assert [len(state["items"]) for state, _ in client.requests] == [16, 16, 5]
-    assert client.requests[-1][0]["items"][-1]["file"] == "a/unrelated.py"
+    # Concurrent sends can arrive in any order. Their batch membership remains file first.
+    assert sorted(len(state["items"]) for state, _ in client.requests) == [5, 16, 16]
+    [last_batch] = [state["items"] for state, _ in client.requests if len(state["items"]) == 5]
+    assert last_batch[-1]["file"] == "a/unrelated.py"
 
 
 def test_follow_imported_owner_callee_and_literal_even_after_a_no_answer(tmp_path: Path) -> None:
