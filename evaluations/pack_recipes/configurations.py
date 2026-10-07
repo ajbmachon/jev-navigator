@@ -60,8 +60,28 @@ RECIPES = (LOCAL, NAMED, CONVENTION)
 
 # Category priors describe which blocks help; they do not assert that every
 # member of a category is local or needs an absence proof.
-GUARD_CATEGORIES = {"authorization", "identity", "input-validation", "injection", "path-safety"}
-VALUE_CATEGORIES = {"configuration", "runtime-compatibility", "dependencies"}
+GUARD_CATEGORIES = {"authorization", "identity", "input", "injection", "paths", "trust", "consent"}
+VALUE_CATEGORIES = {"configuration", "secrets", "values", "keys", "storage-version"}
+PRESENCE_CATEGORIES = {
+    "authorization",
+    "identity",
+    "input",
+    "consent",
+    "retention",
+    "ai-governance",
+    "audit",
+    "licenses",
+    "test-reach",
+    "agent-map",
+    "repo-state",
+}
+
+
+def category_recipes(category: str) -> tuple[str, ...]:
+    """Priors are capabilities, not a category-only decision about a finding's locality."""
+    if category in GUARD_CATEGORIES | VALUE_CATEGORIES | PRESENCE_CATEGORIES:
+        return (LOCAL.name, NAMED.name, CONVENTION.name)
+    return (LOCAL.name, NAMED.name)
 
 
 def primary_recipe(statement: str, names: tuple[str, ...]) -> SearchRecipe:

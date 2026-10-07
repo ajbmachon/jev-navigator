@@ -53,6 +53,7 @@ configuration: a recipe the caller passes as data names them, never an environme
 | `find` and `trace` as compositions of sources | not yet: they keep their own moves and call graph |
 | The spelling map | being built |
 | Typed configurations | being built |
+| Named source recipes, downward chain evidence, setting sources and scoped presence checks | built; [caller configuration](docs/recipes.md) |
 | `jvn search` | being built |
 
 The spelling map is an index block. It splits every identifier, file name, config key and string

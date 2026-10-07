@@ -56,12 +56,17 @@ class SearchRecipe:
         provenance: dict[str, list[Reach]] = {}
         unresolved = []
         resolved = {}
+        reader = None
+        current_file = None
         for source in sources:
             for reach in source.reach(index, seeds):
-                # A reader lives for one place only, keeping parser/source memory
-                # bounded instead of accumulating a repository's materialized units.
+                # Reuse a file's materialized units across its anchors, while
+                # retaining only one file reader rather than an entire repository.
                 if reach.at not in resolved:
-                    reader = UnitReader(index, box_chars, listed_only=False, reading=Reading.MIXED)
+                    file = reach.at if isinstance(reach.at, str) else reach.at.file
+                    if file != current_file:
+                        reader = UnitReader(index, box_chars, listed_only=False, reading=Reading.MIXED)
+                        current_file = file
                     if isinstance(reach.at, str):
                         listing = reader.list_files([reach.at])
                         found = listing.units
