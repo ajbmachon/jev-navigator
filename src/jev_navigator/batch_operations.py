@@ -39,7 +39,7 @@ def rows_for(
     elif op.op == "show":
         yield from source_rows(index, op.file, op.line - op.window, (op.end or op.line) + op.window)
     elif op.op == "named_files":
-        if op.patterns or op.scopes:
+        if op.patterns or op.scopes or not op.query:
             yield from ({"file": file} for file in selected_files(index, op))
         else:
             named = operations.files_named_by(index, (op.query,), (op.file,) if op.file else ())

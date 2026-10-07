@@ -29,7 +29,7 @@ globs are supported. `limit` bounds records on a page, default 80.
 | `refs` | `name`, optional owning `file`, or `query` with `regex`, `window`, `scopes`, `patterns` | syntactic references and calls with binding status, or literal source matches with context |
 | `callers` | `name`, optional owning `file` | call sites, including imported aliases of that owner |
 | `callees` | `file`, `line` inside a symbol | outgoing calls and bindings resolved through imports and reexports |
-| `named_files` | `query` containing path tokens, or `patterns` / `scopes` | files resolved from those inputs |
+| `named_files` | `query` containing path tokens, or `patterns` / `scopes` | files resolved from those inputs; no inputs lists the index |
 | `show` | `file`, `line` (default 1), optional `end`, `window` | exact source blocks with inclusive line and end numbers |
 | `cochange` | `file` | neighbors and shared commit counts in the index's last 200 commits |
 | `tests_of` | `file` or `name`, optional `scopes` | candidate tests with reasons: sibling name, imports source, mentions name |

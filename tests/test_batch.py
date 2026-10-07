@@ -52,10 +52,11 @@ def test_batch_resolves_owners_barrels_and_test_candidates(tmp_path):
                 Operation("names", name="check"),
                 Operation("refs", name="check", file="app/core.py"),
                 Operation("callers", name="check", file="web/core.ts"),
+                Operation("named_files"),
             ],
         )
     assert not any(page.error for page in result.pages)
-    assert [page.number for page in result.pages] == list(range(1, 10))
+    assert [page.number for page in result.pages] == list(range(1, 11))
     assert result.pages[0].items[0]["imports"] == ("app/core.py",)
     assert result.pages[1].items[0]["file"] == "app/core.py"
     assert [row["file"] for row in result.pages[2].items] == ["app/use.py"]
@@ -68,6 +69,8 @@ def test_batch_resolves_owners_barrels_and_test_candidates(tmp_path):
     assert result.pages[6].items[0]["name"] == "check"
     assert any(row["file"] == "app/use.py" for row in result.pages[7].items)
     assert [row["file"] for row in result.pages[8].items] == ["web/use.ts"]
+    assert result.pages[9].total == 8
+    assert "README.md" in {row["file"] for row in result.pages[9].items}
     assert result.calls == 0
 
 
