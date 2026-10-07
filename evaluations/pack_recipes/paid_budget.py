@@ -34,7 +34,7 @@ class SpendLedger:
             elif row["event"] == "usage":
                 self.spent += Decimal(row["usd"])
                 self.pending.pop(row["ticket"])
-        self.halted = bool(self.pending)
+        self.halted = bool(self.pending) or self.spent >= self.cap
 
     def append(self, row):
         with self.path.open("a") as handle:
@@ -45,6 +45,7 @@ class SpendLedger:
     def reserve(self, category, case, request_sha256, maximum=MAX_REQUEST_USD):
         with self.lock:
             if self.halted or self.spent + sum(self.pending.values()) + maximum > self.cap:
+                self.halted = True
                 self.append(
                     {
                         "event": "stop",
@@ -71,9 +72,10 @@ class SpendLedger:
 
     def settle(self, ticket, raw, **context):
         with self.lock:
-            usage = raw["usage"]
-            tokens = usage["input_tokens"]
+            usage = raw.get("usage", {})
+            tokens = usage.get("input_tokens")
             if type(tokens) is not int or tokens < 0:
+                self.unknown(ticket, reason="Missing valid provider input usage", **context)
                 raise ValueError("Missing valid provider input usage")
             usd = Decimal(tokens) * RATE
             maximum = self.pending.pop(ticket)

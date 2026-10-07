@@ -58,3 +58,13 @@ def test_reported_usage_cannot_silently_exceed_reserved_projection(tmp_path):
     assert ledger.halted
     with pytest.raises(MODULE.SpendStopError):
         ledger.reserve("jev", "second", "hash2")
+
+
+def test_unparseable_reported_usage_keeps_reservation_and_stops_further_sends(tmp_path):
+    ledger = MODULE.SpendLedger(tmp_path / "usage.jsonl")
+    ticket = ledger.reserve("jev", "finding", "hash")
+    with pytest.raises(ValueError):
+        ledger.settle(ticket, {"usage": {"input_tokens": None}, "model": "jev-1.13.0"})
+    with pytest.raises(MODULE.SpendStopError):
+        ledger.reserve("jev", "next", "hash2")
+    assert ticket in ledger.pending
