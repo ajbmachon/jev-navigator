@@ -172,6 +172,7 @@ async def native_replay(records, exact, answers, inputs, out):
     from find_eval.simulate import consumer_windows
     from jev_navigator.judgments.profiles import LOCAL_ROLES, ROLES_V2
 
+    from jev_navigator.directives.frontier import Policy
     from jev_navigator.judgments.judge import Judge
 
     scopes = {}
@@ -207,10 +208,15 @@ async def native_replay(records, exact, answers, inputs, out):
             results.append(result)
             continue
         source = CandidateSource(tuple(record["units"]))
+        version = record.get("version")
 
-        async def configured(index, judge, targets, _source=source, **options):
+        async def configured(index, judge, targets, _source=source, _version=version, **options):
             options["sources"] = (_source,)
             options["hops"] = ()
+            if _version == 2:
+                # Preserve the caller's shared-ranker order rather than silently
+                # replacing it with the Engine's separate VALUE queue policy.
+                options["policy"] = Policy("recipe-v2-combined", ranked=False)
             return await original_search(index, judge, targets, **options)
 
         client = ExactCacheClient(exact, answers)
