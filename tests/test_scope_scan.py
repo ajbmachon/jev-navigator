@@ -2348,7 +2348,7 @@ def test_a_name_a_python_module_imports_and_passes_on_binds_to_its_definition(tm
 def test_a_call_through_a_package_init_reaches_the_definition_it_passes_on(tmp_path: Path) -> None:
     """A package's __init__.py passes on a name from its submodule (`from .check import check`), or
     every name (`from .rules import *`); a caller importing from the package reaches the definition.
-    A name the package imports under another name is not followed."""
+    A renamed export reaches the original declaration too."""
     # Arrange
     index = committed(
         tmp_path,
@@ -2370,7 +2370,7 @@ def test_a_call_through_a_package_init_reaches_the_definition_it_passes_on(tmp_p
     assert {name: (binding.status.value, binding.target) for name, binding in edges.items()} == {
         "check": ("resolved", index.find_definition("check")[0]),
         "rule": ("resolved", index.find_definition("rule")[0]),
-        "new": ("candidate", None),
+        "new": ("resolved", Span("pkg/legacy.py", 1, 2, "old")),
     }
 
 

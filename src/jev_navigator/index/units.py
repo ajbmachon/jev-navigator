@@ -70,6 +70,7 @@ class Reading(StrEnum):
 
     CODE = "code"
     TEXT = "text"
+    MIXED = "mixed"
 
 
 @dataclass(frozen=True)
@@ -143,16 +144,7 @@ def list_units(
     reason where it has one. ``box_chars`` is the room one unit's text has in a request, as
     ``serialized_chars`` counts it: the client's box (``InputLimits.box_chars``) less what the request
     carries beside the unit."""
-    files = tuple(dict.fromkeys(files))
-    in_scope = frozenset(index.files)
-    not_indexed = index.not_indexed_files
-    unlisted = {file: not_indexed.get(file, OUTSIDE_SCOPE) for file in files if file not in in_scope}
-    unlisted |= _left_out(index, [file for file in files if file in in_scope], reading)
-    read_files = tuple(file for file in files if file in in_scope and file not in unlisted)
-    index.functions_in_files(tuple(file for file in read_files if language_of(file)))
-    units = tuple(unit for file in read_files for unit in _file_units(index, file, box_chars).listed)
-    unlisted |= {file: reason for file, reason in index.unavailable_files.items() if file in files}
-    return UnitListing(units, unlisted)
+    return UnitReader(index, box_chars, listed_only=True, reading=reading).list_files(files)
 
 
 @dataclass(frozen=True)
@@ -264,7 +256,7 @@ def resolve_each(
 ) -> Iterator[tuple[Anchor, tuple[Unit, ...], str]]:
     """Each anchor with the units it names and its problem (empty when it named one), in the anchors'
     order, as ``resolve_anchors`` names them; each file is read once for all of them."""
-    resolver = _AnchorResolver(index, box_chars, listed_only, reading)
+    resolver = UnitReader(index, box_chars, listed_only, reading)
     for anchor in anchors:
         units, problem = resolver.resolve(anchor)
         yield anchor, units, problem
@@ -276,6 +268,8 @@ def _left_out(index: CodeIndex, files: Sequence[str], reading: Reading) -> dict[
     ``CodeIndex.text_files_left_out`` names."""
     if reading is Reading.CODE:
         return {file: UNSUPPORTED_LANGUAGE for file in files if not language_read(file)}
+    if reading is Reading.MIXED:
+        return index.text_files_left_out([file for file in files if not language_read(file)])
     code = {file: CODE_FILE for file in files if language_read(file)}
     return code | index.text_files_left_out([file for file in files if file not in code])
 
@@ -486,13 +480,28 @@ class _TextFile(_FileUnits):
         return cuts
 
 
-class _AnchorResolver:
+class UnitReader:
+    """A search-lifetime code/text unit reader. Each file is built once for one request room."""
+
     def __init__(self, index: CodeIndex, box_chars: int, listed_only: bool, reading: Reading) -> None:
         self._index = index
         self._box_chars = box_chars
         self._listed_only = listed_only
         self._reading = reading
         self._sources: dict[str, _FileUnits] = {}
+
+    def list_files(self, files: Sequence[str]) -> UnitListing:
+        """List through the same file units used to resolve later anchors in this search."""
+        files = tuple(dict.fromkeys(files))
+        in_scope = frozenset(self._index.files)
+        not_indexed = self._index.not_indexed_files
+        unlisted = {file: not_indexed.get(file, OUTSIDE_SCOPE) for file in files if file not in in_scope}
+        unlisted |= _left_out(self._index, [file for file in files if file in in_scope], self._reading)
+        read_files = tuple(file for file in files if file in in_scope and file not in unlisted)
+        self._index.functions_in_files(tuple(file for file in read_files if language_of(file)))
+        units = tuple(unit for file in read_files for unit in self._source(file).listed)
+        unlisted |= {file: reason for file, reason in self._index.unavailable_files.items() if file in files}
+        return UnitListing(units, unlisted)
 
     def resolve(self, anchor: Anchor) -> tuple[tuple[Unit, ...], str]:
         start, end = (

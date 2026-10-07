@@ -106,3 +106,19 @@ class TextNames:
 def names_from_text(text: str) -> TextNames:
     """Extract spelled identifiers and paths using the shared mention rules."""
     return TextNames(tuple(code_names_in(text)), tuple(paths_in(text)))
+
+
+def literal_names_in(text: str) -> tuple[str, ...]:
+    """Exact quoted keys, identifiers and paths, without generating domain vocabulary."""
+    literals = re.findall(r"[\"']([A-Za-z_$][\w$./:#-]{2,120})[\"']", text)
+    return tuple(dict.fromkeys(literals))
+
+
+def spelling_variants(name: str) -> tuple[str, ...]:
+    """Bounded case, separator and identifier-component spellings of an existing name."""
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    parts = re.split(r"[_./:#-]+", separated)
+    snake = "_".join(part.lower() for part in parts)
+    camel = parts[0].lower() + "".join(part.title() for part in parts[1:])
+    variants = (name, snake, camel, snake.upper(), *(part.lower() for part in parts if len(part) >= 3))
+    return tuple(dict.fromkeys(variant for variant in variants if variant))

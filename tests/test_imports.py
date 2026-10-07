@@ -76,11 +76,11 @@ import { ignored } from "./ignored";
     # Assert
     assert exports == (
         (None, "./orders"),
-        (frozenset({"refund", "placeOrder"}), "./commands"),
+        ({"refund": "refund", "placeOrder": "createOrder"}, "./commands"),
     )
 
 
-def test_a_python_module_passes_on_the_names_it_imports_by_their_own_name() -> None:
+def test_a_python_module_passes_on_imports_under_their_outward_names() -> None:
     # Arrange
     source = "from .orders import create_order, refund as give_back\nfrom .audit import *\nimport json\n"
 
@@ -88,7 +88,7 @@ def test_a_python_module_passes_on_the_names_it_imports_by_their_own_name() -> N
     exports = reexported_names(source, "app/__init__.py")
 
     # Assert
-    assert exports == ((frozenset({"create_order"}), ".orders"), (None, ".audit"))
+    assert exports == (({"create_order": "create_order", "give_back": "refund"}, ".orders"), (None, ".audit"))
 
 
 def test_destructuring_a_require_imports_each_local_name_under_its_exported_name() -> None:
@@ -257,6 +257,41 @@ def test_a_call_imported_through_a_barrel_has_a_proven_target(tmp_path: Path) ->
     # Assert
     assert call.binding.status == "resolved"
     assert call.binding.target == Span("src/services/orders.ts", 1, 1, "createOrder")
+
+
+@pytest.mark.parametrize(
+    "files,caller_name,target",
+    [
+        (
+            {
+                "core.ts": "export function check() { return true; }\n",
+                "first.ts": "export { check as validate } from './core';\n",
+                "second.ts": "export { validate as accept } from './first';\nexport * from './second';\n",
+                "use.ts": (
+                    "import { accept as approved } from './second';\napproved();\nconst handler = approved;\n"
+                ),
+            },
+            "approved",
+            Span("core.ts", 1, 1, "check"),
+        ),
+        (
+            {
+                "app/core.py": "def check():\n    return True\n",
+                "app/__init__.py": "from .core import check as validate\n",
+                "use.py": "from app import validate as approved\napproved()\nhandler = approved\n",
+            },
+            "approved",
+            Span("app/core.py", 1, 2, "check"),
+        ),
+    ],
+)
+def test_renamed_reexport_chains_bind_the_original_definition(tmp_path, files, caller_name, target):
+    index = indexed(tmp_path, files)
+    binding = index.find_callers(caller_name)[0].binding
+    assert binding.status == "resolved"
+    assert binding.target == target
+    assert [(site.file, site.line) for site in index.callers_of(target)] == [(f"use.{target.file[-2:]}", 2)]
+    assert any(ref.file.startswith("use.") and ref.line == 3 for ref in index.references_to(target))
 
 
 def test_two_wildcard_reexports_with_the_same_name_stay_ambiguous(tmp_path: Path) -> None:

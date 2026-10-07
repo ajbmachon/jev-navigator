@@ -1301,3 +1301,40 @@ def test_a_repository_without_commits_indexes_its_files_with_no_revision(tmp_pat
     # Assert
     assert index.commit == ""
     assert "a.py" in index.files
+
+
+def test_batched_text_search_retains_overlapping_terms_and_literal_punctuation(tmp_path: Path) -> None:
+    from shop_search import shop_index
+
+    index = shop_index(
+        tmp_path,
+        {
+            "app.py": "value = 'abab copy_sandbox_tree config/limits.toml'\nvalue = 'sandbox'\n",
+            "docs/policy.md": "# Policy\nconfig/limits.toml is read here.\n",
+        },
+    )
+    terms = ("aba", "bab", "copy_sandbox_tree", "sandbox", "config/limits.toml", "absent")
+    hits = index.search_texts(terms)
+    locations = {term: [(hit.file, hit.line) for hit in rows] for term, rows in hits.items()}
+    assert locations == {
+        "aba": [("app.py", 1)],
+        "bab": [("app.py", 1)],
+        "copy_sandbox_tree": [("app.py", 1)],
+        "sandbox": [("app.py", 1), ("app.py", 2)],
+        "config/limits.toml": [("app.py", 1), ("docs/policy.md", 2)],
+        "absent": [],
+    }
+    assert [(hit.file, hit.line) for hit in index.search_text("bab")] == [("app.py", 1)]
+    assert index.search_text("sandbox", whole_word=True)[0].line == 2
+
+
+def test_binary_matches_cannot_corrupt_the_next_text_hit_path(tmp_path: Path) -> None:
+    from shop_search import shop_index
+
+    index = shop_index(
+        tmp_path,
+        {"a.png": "\0sandbox\0", "config.yaml": "sandbox: enabled\n"},
+    )
+    for hits in (index.search_texts(["sandbox"])["sandbox"], index.search_text("sandbox", whole_word=True)):
+        assert {(hit.file, hit.line) for hit in hits} == {("a.png", 1), ("config.yaml", 1)}
+        assert all(hit.file in index.files for hit in hits)

@@ -320,14 +320,24 @@ def _script_imported(specifier: str, exported: str) -> ImportedName:
     return ImportedName(specifier, None if exported == "default" else exported)
 
 
-def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
-    """Names a module passes on from each module it names; ``None`` means every name (``export *``,
-    ``from m import *``). A Python module passes on what it imports by name, as a package's
-    ``__init__.py`` does; a name it imports under another name is left out, since its module exports
-    it under the first."""
-    if path.endswith(".py"):
-        return _python_reexports(source)
+def reexported_names(source: str, path: str) -> tuple[tuple[dict[str, str] | None, str], ...]:
+    """Each outward name mapped to its source export, per module. None means a wildcard.
+
+    Keeping both names lets a chain of barrels translate aliases at every hop, including Python
+    package imports. A renamed export is never looked up under its outward name in the source.
+    """
     exports = []
+    if path.endswith(".py"):
+        for match in _PYTHON_FROM.finditer(source):
+            parts = _PYTHON_COMMENT.sub("", match.group(2)).strip("()\n ").split(",")
+            names = (
+                None
+                if any(part.strip() == "*" for part in parts)
+                else {_local(part): _exported(part) for part in parts if part.strip()}
+            )
+            if names is None or names:
+                exports.append((names, match.group(1)))
+        return tuple(exports)
     for match in _SCRIPT_FROM.finditer(_without_script_comments(source)):
         keyword, clause, specifier = match.groups()
         if keyword != "export":
@@ -336,27 +346,14 @@ def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | Non
         if stripped == "*":
             exports.append((None, specifier))
             continue
-        names = frozenset(
-            _local(part)
+        names = {
+            _local(part): _exported(part)
             for braces in _SCRIPT_BRACES.findall(clause)
             for part in braces.split(",")
             if part.strip()
-        )
+        }
         if names:
             exports.append((names, specifier))
-    return tuple(exports)
-
-
-def _python_reexports(source: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
-    exports = []
-    for match in _PYTHON_FROM.finditer(source):
-        parts = [part.strip() for part in _PYTHON_COMMENT.sub("", match.group(2)).strip("()\n ").split(",")]
-        if "*" in parts:
-            exports.append((None, match.group(1)))
-            continue
-        names = frozenset(part for part in parts if part and _local(part) == _exported(part))
-        if names:
-            exports.append((names, match.group(1)))
     return tuple(exports)
 
 

@@ -15,6 +15,7 @@ bar expands through, the frontier's policy and shares, and Jev judging in queue 
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -26,6 +27,7 @@ from .index.languages import language_read
 from .index.scope import is_lockfile
 from .index.spans import Span, TextHit
 from .index.units import Anchor, LineAnchor, Unit, UnitKind, read_ranges
+from .mentions import literal_names_in, spelling_variants
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class Seeds:
     files: tuple[str, ...] = ()
     anchors: tuple[Anchor, ...] = ()
     units: tuple[Unit, ...] = ()
+    literals: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,7 @@ class NameSource:
     label: ClassVar[str] = "from name hits"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        index.search_texts(seeds.names)
         hits = {name: self._hits(index, name) for name in dict.fromkeys(seeds.names)}
         return [
             Reach(LineAnchor(hit.file, hit.line), self.name, name, 3, frozenset({name}))
@@ -232,7 +236,7 @@ class NamedFileSource:
     label: ClassVar[str] = "named files"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
-        named = operations.files_named_by(index, seeds.texts, [anchor.file for anchor in seeds.anchors])
+        named = operations.files_named_by(index, seeds.texts, pointed_files(index, seeds))
         files = named.text if self.text_files else named.code
         return [Reach(file, self.name, named.named_by[file], 1) for file in files]
 
@@ -264,6 +268,82 @@ class TextFileNameSource:
                     reached.append(Reach(file, self.name, name, 1, frozenset({name})))
                     break
         return reached
+
+
+@dataclass(frozen=True)
+class FileWordSource:
+    """List files whose path components contain words already present in the request.
+
+    Exact named paths come first through NAMED_FILES. This source also admits ordinary words and
+    identifier components, so a file can be opened without its body repeating the search word.
+    """
+
+    name: ClassVar[str] = "file_word"
+    label: ClassVar[str] = "files matching request words"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        words = dict.fromkeys(
+            word.casefold() for text in seeds.texts for word in re.findall(r"[\w$-]+", text) if len(word) >= 3
+        )
+        words.update(
+            dict.fromkeys(
+                variant.casefold()
+                for name in seeds.names
+                for variant in spelling_variants(name)
+                if len(variant) >= 3
+            )
+        )
+        reached = []
+        for file in index.files:
+            if is_lockfile(file):
+                continue
+            components = re.split(r"[/_.-]+", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", file).casefold())
+            if matches := [word for word in words if word in components]:
+                reached.append(Reach(file, self.name, matches[0], 1, frozenset(matches)))
+        return sorted(reached, key=lambda reach: -len(reach.names))
+
+
+@dataclass(frozen=True)
+class LiteralSource:
+    """Find exact quoted identifiers, setting keys and path literals in the seed text."""
+
+    name: ClassVar[str] = "literal"
+    label: ClassVar[str] = "literal uses"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        literals = seeds.literals
+        if literals is None:
+            literals = tuple(
+                dict.fromkeys(literal for text in seeds.texts for literal in literal_names_in(text))
+            )
+        index.search_texts(literals)
+        return [
+            Reach(LineAnchor(hit.file, hit.line), self.name, literal, 2, frozenset({literal}))
+            for literal in literals
+            for hit in index.search_text(literal)
+            if not is_lockfile(hit.file)
+        ]
+
+
+@dataclass(frozen=True)
+class SpellingSource:
+    """Search only bounded spellings of supplied identifiers, preserving the original term."""
+
+    name: ClassVar[str] = "spelling"
+    label: ClassVar[str] = "spelling variants"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        index.search_texts(
+            variant for name in seeds.names for variant in spelling_variants(name) if variant != name
+        )
+        return [
+            Reach(LineAnchor(hit.file, hit.line), self.name, name, 3, frozenset({name}))
+            for name in dict.fromkeys(seeds.names)
+            for variant in spelling_variants(name)
+            if variant != name
+            for hit in index.search_text(variant)
+            if not is_lockfile(hit.file)
+        ]
 
 
 @dataclass(frozen=True)
@@ -314,6 +394,9 @@ TEXT_NAMED_FILES = NamedFileSource(text_files=True)
 TEXT_FILE_NAMES = TextFileNameSource()
 MODELS = ModelSource()
 CLIENT_CALLS = ClientCallSource()
+FILE_WORDS = FileWordSource()
+LITERALS = LiteralSource()
+SPELLINGS = SpellingSource()
 
 
 def anchor_text(anchor: Anchor) -> str:
@@ -339,7 +422,7 @@ def near_files(index: CodeIndex, anchors: Sequence[Anchor]) -> frozenset[str]:
 def pointed_files(index: CodeIndex, seeds: Seeds) -> tuple[str, ...]:
     """The scope files the anchors and the seed units sit in, in that order, each once."""
     scope = frozenset(index.files)
-    pointed = [*(anchor.file for anchor in seeds.anchors), *(unit.path for unit in seeds.units)]
+    pointed = [*seeds.files, *(anchor.file for anchor in seeds.anchors), *(unit.path for unit in seeds.units)]
     return tuple(file for file in dict.fromkeys(pointed) if file in scope)
 
 

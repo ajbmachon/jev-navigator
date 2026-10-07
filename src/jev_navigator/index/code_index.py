@@ -24,6 +24,7 @@ from .bindings import (
     binding_from_facts,
     binding_in_namespace,
     local_binding,
+    names_exactly,
     unparsed_binding,
 )
 from .fact_cache import FactCache
@@ -56,6 +57,7 @@ from .scope_scan import (
 from .source_files import DISAPPEARED, SourceFiles
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .text_blocks import TextBlock, text_blocks
+from .text_search import TextMatcher
 from .tsconfig import ScriptPaths, nearest_script_paths
 
 DEFAULT_WINDOW_RADIUS = 10
@@ -514,6 +516,65 @@ class CodeIndex:
         """How many call sites in scope call ``name``; a name called from fewer places is more specific."""
         return len(self._calls_with_name(name))
 
+    def callers_of(self, definition: Span) -> tuple[CallSite, ...]:
+        """Calls to this definition, including aliases imported through chains of reexports.
+
+        Read import surfaces first, then parse only calls under the resulting real spellings.
+        Unknown bindings remain candidates; a proven target elsewhere never joins this result.
+        """
+        sites = {
+            (site.file, site.line): site
+            for name in self.spellings_of(definition)
+            for site in self.find_callers(name)
+            if names_exactly(site.binding, definition)
+        }
+        return tuple(sites[key] for key in sorted(sites))
+
+    def references_to(self, definition: Span) -> tuple[Reference, ...]:
+        """Non-call uses of a definition under its real import/reexport spellings."""
+        references = {
+            (ref.file, ref.line, ref.role): ref
+            for name in self.spellings_of(definition)
+            for ref in self.find_references(name)
+            if names_exactly(ref.binding, definition)
+        }
+        return tuple(references[key] for key in sorted(references))
+
+    @memoized
+    def spellings_of(self, definition: Span) -> tuple[str, ...]:
+        """Names under which the definition is exported or imported, following finite import surfaces."""
+        names = {definition.name}
+        pending = [(definition.file, definition.name)]
+        if language_of(definition.file) != "python":
+            pending += [
+                (definition.file, outward)
+                for outward, own in self._read_export_names(definition.file).items()
+                if definition.name in own
+            ]
+        seen: set[tuple[str, str]] = set()
+        while pending:
+            file, exported = pending.pop()
+            if (file, exported) in seen:
+                continue
+            seen.add((file, exported))
+            for importer in self.dependents(file):
+                for local, imported in self._read_imported_names(importer).items():
+                    if (imported.exported or "default") == exported and self._module_path(
+                        importer, imported.specifier
+                    ) == file:
+                        names.add(local)
+                for outward, specifier in self._read_reexports(importer):
+                    if self._module_path(importer, specifier) != file:
+                        continue
+                    inherited = (
+                        [exported]
+                        if outward is None
+                        else [alias for alias, original in outward.items() if original == exported]
+                    )
+                    pending.extend((importer, alias) for alias in inherited)
+                    names.update(inherited)
+        return tuple(sorted(names))
+
     def find_callees(self, function: Span) -> tuple[str, ...]:
         """Names called inside ``function``; see ``callee_edges`` for their bindings."""
         return tuple(dict.fromkeys(edge.name for edge in self.callee_edges(function)))
@@ -525,12 +586,10 @@ class CodeIndex:
             for call in self._facts_in(function.file).calls
             if function.start <= call.line <= function.end
         ]
-        edges: dict[str, CallEdge] = {}
-        for call in calls:
-            if call.name not in edges:
-                binding = self.binding_of(call.file, call.line, call.name, call.receiver)
-                edges[call.name] = CallEdge(call.name, call.line, binding)
-        return tuple(edges.values())
+        return tuple(
+            CallEdge(call.name, call.line, self.binding_of(call.file, call.line, call.name, call.receiver))
+            for call in calls
+        )
 
     def find_references(self, name: str) -> tuple[Reference, ...]:
         """Uses of ``name`` that are not calls: arguments, collection entries, assignments,
@@ -1052,12 +1111,21 @@ class CodeIndex:
             return None
         definitions = tuple(
             span
-            for exporter in exporters
-            for span in self._read_importable_definitions(exporter.path, name, role)
+            for exporter, exported in exporters
+            for span in self._read_importable_definitions(exporter.path, exported, role)
         )
-        hiding = {exporter.path for exporter in exporters if self._hides(exporter.path, name)}
+        hiding = {exporter.path for exporter, exported in exporters if self._hides(exporter.path, exported)}
         return binding_from_facts(
-            CallFacts(file, name, None, definitions, (), definitions, exporters, hiding)
+            CallFacts(
+                file,
+                name,
+                None,
+                definitions,
+                (),
+                definitions,
+                tuple(exporter for exporter, _ in exporters),
+                hiding,
+            )
         )
 
     def _hides(self, exporter: str, name: str) -> bool:
@@ -1129,7 +1197,7 @@ class CodeIndex:
         return own_names | {exported: frozenset(owns) for exported, owns in renamed.items()}
 
     @memoized
-    def _read_exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
+    def _read_exporters(self, file: str, specifier: str, name: str) -> tuple[tuple[ImportFact, str], ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
         ``name`` from that exports it or may hide it (see ``_hides``), with the evidence for each."""
         resolved = resolve_import(
@@ -1137,14 +1205,15 @@ class CodeIndex:
         )
         if resolved is None:
             return ()
-        found = {resolved.path: resolved}
-        pending = [resolved]
-        seen = {(resolved.path, resolved.proven)}
+        found = {(resolved.path, name): (resolved, name)}
+        pending = [(resolved, name)]
+        seen = {(resolved.path, name, resolved.proven)}
         while pending:
-            exporter = pending.pop()
+            exporter, exported = pending.pop()
             for names, target_specifier in self._read_reexports(exporter.path):
-                if names is not None and name not in names:
+                if names is not None and exported not in names:
                     continue
+                source_name = exported if names is None else names[exported]
                 target = resolve_import(
                     target_specifier,
                     exporter.path,
@@ -1159,19 +1228,19 @@ class CodeIndex:
                     exporter.proven and target.proven,
                     target.reason if exporter.proven else exporter.reason,
                 )
-                identity = (inherited.path, inherited.proven)
+                identity = (inherited.path, source_name, inherited.proven)
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if self._hides(inherited.path, name) or self._exports(inherited.path, name):
-                    prior = found.get(inherited.path)
+                if self._hides(inherited.path, source_name) or self._exports(inherited.path, source_name):
+                    prior = found.get((inherited.path, source_name))
                     if prior is None or inherited.proven:
-                        found[inherited.path] = inherited
-                pending.append(inherited)
+                        found[(inherited.path, source_name)] = (inherited, source_name)
+                pending.append((inherited, source_name))
         return tuple(found.values())
 
     @memoized
-    def _read_reexports(self, file: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
+    def _read_reexports(self, file: str) -> tuple[tuple[dict[str, str] | None, str], ...]:
         return reexported_names("\n".join(self._lines_of(file)), file)
 
     @memoized
@@ -1218,6 +1287,41 @@ class CodeIndex:
         hit's text is the line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word``
         keeps only matches no word character touches."""
         return self._search_text(text, max_hits, whole_word)
+
+    def search_texts(self, texts: Iterable[str]) -> dict[str, tuple[TextHit, ...]]:
+        """Exact hits for many terms in one repository scan, cached like search_text.
+
+        Ripgrep returns only line identities. The literal matcher retains every overlapping term
+        on those lines and gives each its own bounded context, so batching never drops provenance.
+        """
+        texts = tuple(dict.fromkeys(texts))
+        cache = self.__dict__.setdefault("_memoized__search_text", {})
+        missing = [text for text in texts if (text, None, False) not in cache]
+        ordinary = [text for text in missing if text and "\n" not in text and "\r" not in text]
+        for text in missing:
+            if text not in ordinary:
+                self.search_text(text)
+        if ordinary:
+            matches = self._on_available(
+                self._available_files(self.files),
+                lambda files: tools.ripgrep_term_lines(ordinary, files, self.root),
+            )
+            matcher = TextMatcher(ordinary)
+            hits: dict[str, list[TextHit]] = {text: [] for text in ordinary}
+            for line in sorted(matches):
+                source = self.lines(line.file)[line.line - 1]
+                seen = set()
+                for term, position in matcher.matches(source):
+                    if term not in seen:
+                        seen.add(term)
+                        context = source[
+                            max(0, position - TEXT_HIT_CONTEXT_BYTES) : position
+                            + len(term)
+                            + TEXT_HIT_CONTEXT_BYTES
+                        ]
+                        hits[term].append(TextHit(line.file, line.line, context))
+            cache.update(((text, None, False), tuple(hits[text])) for text in ordinary)
+        return {text: cache[(text, None, False)] for text in texts}
 
     @memoized
     def _search_text(self, text: str, max_hits: int | None, whole_word: bool) -> tuple[TextHit, ...]:

@@ -57,6 +57,8 @@ class Policy:
     settles: bool = False
     weights: Weights = field(default_factory=Weights)
     role_coverage: RoleCoverage | None = None
+    expands: bool = False
+    search_order: bool = False
 
     def __post_init__(self) -> None:
         if self.settles and not self.ranked:
@@ -81,6 +83,7 @@ class RoleCoverage:
 
 STAGE_ORDER = Policy("stage_order", ranked=False)
 VALUE = Policy("value", ranked=True, settles=True)
+WHOLE_FRONTIER = Policy("whole_frontier", ranked=False, expands=True, search_order=True)
 
 
 @dataclass(frozen=True)

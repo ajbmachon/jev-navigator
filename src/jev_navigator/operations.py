@@ -355,7 +355,7 @@ def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ..
                 TraceLink(hop, function, target, "call", edge.name, function.file, edge.line, edge.binding)
                 for target in targets
             )
-    for site in index.find_callers(function.name):
+    for site in index.callers_of(function):
         if not names_exactly(site.binding, function):
             continue
         links.append(
@@ -405,7 +405,7 @@ def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ..
                 )
                 for target in targets
             )
-    for reference in index.find_references(function.name):
+    for reference in index.references_to(function):
         if not names_exactly(reference.binding, function):
             continue
         links.append(
@@ -448,7 +448,7 @@ def caller_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Bindi
     """Each function holding a call that may reach ``function`` itself, with the call's binding."""
     return [
         (site.caller, site.binding)
-        for site in index.find_callers(function.name)
+        for site in index.callers_of(function)
         if site.caller is not None and names_exactly(site.binding, function)
     ]
 
