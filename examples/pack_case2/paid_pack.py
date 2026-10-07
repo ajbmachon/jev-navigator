@@ -401,7 +401,7 @@ def pack_native(row, relations, index, observations, room_tokens):
             "selected_chars": 0,
             "owner_path": "evidence_pack.pack_request (no anchor)",
             "room_axis": "total rendered consumer packet allowance",
-            "coverage": _coverage(observations),
+            "coverage": _coverage(eligible),
             **scope_receipt,
             "packet": "",
             "packet_chars": 0,
@@ -519,11 +519,13 @@ def _workload():
 def main():
     """Persist every packing checkpoint as receipts land; rerunning incurs zero cost."""
     from evidence_pack_mode import _floor_window
+    from trial_resources import resources
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", type=lambda value: Path(value).expanduser())
     parser.add_argument("--case", action="append", dest="cases")
     options = parser.parse_args()
+    resources()
     inputs, labels, lab = _workload()
     by_repository = defaultdict(list)
     for cid, (dataset, row) in inputs.items():
@@ -549,6 +551,7 @@ def main():
             )
         try:
             for cid, dataset, row, folder in cases:
+                resources()
                 prepared = tuple(_rows(folder / "prepared-requests.jsonl"))
                 response_path = folder / "responses.jsonl"
                 receipts = tuple(_rows(response_path)) if response_path.exists() else ()

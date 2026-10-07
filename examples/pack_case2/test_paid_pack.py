@@ -179,6 +179,12 @@ class OriginalGroupPackingTest(unittest.TestCase):
         prepared, responses = copy.deepcopy(self.prepared), copy.deepcopy(self.responses)
         prepared[0]["ordinal"] = responses[0]["ordinal"] = 5
         observations = answered_observations(prepared, responses, self.candidates)
+        self.assertEqual(filter_observations(observations, "union", 0), ())
+        for room in (7200, 20000, 36000):
+            baseline = pack_native(self.row, self.relations, self.index, (), room)
+            self.assertEqual(baseline["original_requests"], 0)
+            self.assertEqual(baseline["selected_units"], 0)
+            self.assertTrue(baseline["consumer_windows"])
         self.assertEqual(filter_observations(observations, "union", 4), ())
         self.assertEqual(len(filter_observations(observations, "union", 8)), 2)
         row = {**self.row, "claim": {**self.row["claim"], "evidence": []}}
