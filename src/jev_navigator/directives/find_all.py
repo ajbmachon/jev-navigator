@@ -22,6 +22,7 @@ import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from itertools import groupby
 from typing import TypeVar
 
@@ -33,16 +34,17 @@ from ..index.units import (
     RangeAnchor,
     Reading,
     Unit,
+    UnitReader,
     UnresolvedAnchor,
     best_piece,
     items_to_judge,
-    list_units,
     read_ranges,
-    resolve_each,
 )
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, item_path, serialized_chars
+from ..judgments.secrets import DEFAULT_MASKER
 from ..judgments.thresholds import NoulVerdict
+from ..mentions import code_names_in, literal_names_in
 from ..sources import ANCHORS, CALLEES, CALLERS, FILES, NAMES, TEXT_NAMES, Reach, Seeds, Source
 from .find_code import search_failure
 from .frontier import (
@@ -223,6 +225,7 @@ def find_all(
     policy: Policy = STAGE_ORDER,
     shares: Mapping[str, float] | None = None,
     sources: Sequence[Source] = CODE_SOURCES,
+    reading: Reading = Reading.CODE,
     hops: Sequence[Source] = HOP_SOURCES,
 ) -> FindAllResult:
     """Judge the units ``sources`` reach from ``anchors``, ``files``, ``names`` and the targets'
@@ -248,7 +251,7 @@ def find_all(
     """
     composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
     search = _begin(
-        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, composition
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, reading, composition
     )
     return _finished(search, _seeds(targets, files, anchors, names))
 
@@ -335,6 +338,7 @@ async def find_all_async(
     policy: Policy = STAGE_ORDER,
     shares: Mapping[str, float] | None = None,
     sources: Sequence[Source] = CODE_SOURCES,
+    reading: Reading = Reading.CODE,
     hops: Sequence[Source] = HOP_SOURCES,
 ) -> FindAllResult:
     """``find_all`` with each wave's requests sent concurrently through the Judge's async form, for an
@@ -343,7 +347,7 @@ async def find_all_async(
     form reads none; a cancelled task's ``CancelledError`` is never caught."""
     composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
     search = _begin(
-        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, composition
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, reading, composition
     )
     return await _finished_async(search, _seeds(targets, files, anchors, names))
 
@@ -407,11 +411,22 @@ def _begin(
     if batches_per_wave < 1:
         raise ValueError("batches_per_wave must be at least 1")
     shares = checked_shares(composition.shares, targets, composition.policy)
+    scoped = judge.scope()
+    if scoped.masker is DEFAULT_MASKER:
+        scoped.masker = _SearchMasker()
     search = _Search(
-        index, judge.scope(), targets, delivered, cancelled, batches_per_wave, reading, composition, shares
+        index, scoped, targets, delivered, cancelled, batches_per_wave, reading, composition, shares
     )
     search.resume(completed or {})
     return search
+
+
+class _SearchMasker:
+    """Reuse deterministic built-in scans for this search, with bounded string retention."""
+
+    def __init__(self) -> None:
+        self.mask = lru_cache(maxsize=256)(DEFAULT_MASKER.mask)
+        self.masked_values = lru_cache(maxsize=256)(DEFAULT_MASKER.masked_values)
 
 
 def _stop_by(error: KeyboardInterrupt | Exception | None) -> tuple[str, Exception | None]:
@@ -463,11 +478,14 @@ class _Search:
         self.target_of = {check.name: target for check, target in zip(self.checks, targets, strict=True)}
         self.shared = {TARGETS: self.targets}
         self.room = _room(judge, index, self.checks, self.shared)
+        self.reader = UnitReader(index, self.room, listed_only=True, reading=reading)
         self.delivered = _lines_by_file(delivered)
+        self.delivered_units: set[str] = set()
         self.cancelled = cancelled
         self.answered: set[tuple[str, str]] = set()
         self.judged: dict[str, list[CheckResult]] = {target: [] for target in targets}
         self.units: dict[str, Unit] = {}
+        self.resolved_units: dict[str | Anchor, tuple[Unit, ...]] = {}
         self.entered_by: dict[str, str] = {}
         self.features: dict[str, dict[str, Features]] = {target: {} for target in targets}
         self.repeat_of: dict[str, str] = {}
@@ -515,7 +533,7 @@ class _Search:
                 list_name=ITEMS,
                 places=places,
                 refusals=self.refusals,
-                keep_order=self.policy.ranked,
+                keep_order=self.policy.ranked or self.policy.search_order,
             ):
                 self._record(self.target_of[name], answer)
 
@@ -538,7 +556,58 @@ class _Search:
         size = self.judge.items_per_request * self.batches_per_wave
         if self.policy.ranked:
             return self._ranked_waves(size)
+        if self.policy.expands:
+            return self._expanding_waves(size)
         return _chunks(self._staged_population(), size)
+
+    def _expanding_waves(self, size: int) -> Iterator[list[Item]]:
+        """Register the entire reached frontier before judging, then expand newly judged units.
+
+        Answers control neither admission nor expansion. Every unit is expanded once, and fresh
+        terms are searched once. A spent call budget leaves the full pending population visible.
+        """
+        pending = list(self._staged_population())
+        expanded: set[str] = set()
+        terms = set(self.seeds.names)
+        searched_literals: set[str] = set()
+        while not self.stopped():
+            yield from _chunks(pending, size)
+            judged = self.delivered_units | {
+                self.unit_of_place[answer.place.id]
+                for answers in self.judged.values()
+                for answer in answers
+                if answer.place is not None and answer.place.id in self.unit_of_place
+            }
+            fresh_ids = judged - expanded
+            fresh = [unit for unit in self.units.values() if unit.id in fresh_ids]
+            if not fresh:
+                return
+            expanded.update(unit.id for unit in fresh)
+            codes = tuple(read_ranges(self.index, unit.path, unit.ranges) for unit in fresh)
+            names = tuple(
+                dict.fromkeys(name for code in codes for name in code_names_in(code) if name not in terms)
+            )
+            terms.update(names)
+            literals = tuple(
+                dict.fromkeys(
+                    literal
+                    for code in codes
+                    for literal in literal_names_in(code)
+                    if literal not in searched_literals
+                )
+            )
+            searched_literals.update(literals)
+            seeds = Seeds(
+                names=names,
+                texts=codes,
+                files=tuple(dict.fromkeys(unit.path for unit in fresh)),
+                units=tuple(fresh),
+                literals=literals,
+            )
+            pending = []
+            for source in self.hops:
+                reaches = list(source.reach(self.index, seeds))
+                pending.extend(self._admitted(self._units_reached(reaches)))
 
     def _next_wave(self, waves: Iterator[list[Item]]) -> tuple[list[Item], list[dict]] | None:
         """The next wave's places and the entries Jev reads for them; None when the population is spent."""
@@ -727,16 +796,36 @@ class _Search:
     def _units_reached(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:
         """The units ``reaches`` name, each with the reach that named it: every listed unit of a file,
         the units an anchor names."""
-        files = [reach for reach in reaches if _is_file_reach(reach)]
-        anchors = [reach for reach in reaches if not _is_file_reach(reach)]
-        return self._units_of_files(files) + self._units_at_anchors(anchors)
+        if not self.policy.expands:
+            files = [reach for reach in reaches if _is_file_reach(reach)]
+            anchors = [reach for reach in reaches if not _is_file_reach(reach)]
+            return self._units_of_files(files) + self._units_at_anchors(anchors)
+        unseen = list(
+            {reach.at: reach for reach in reversed(reaches) if reach.at not in self.resolved_units}.values()
+        )
+        unseen.reverse()
+        files = [reach for reach in unseen if _is_file_reach(reach)]
+        anchors = [reach for reach in unseen if not _is_file_reach(reach)]
+        resolved = self._units_of_files(files) + self._units_at_anchors(anchors)
+        by_place: dict[str | Anchor, list[Unit]] = {reach.at: [] for reach in unseen}
+        for unit, reach in resolved:
+            by_place[reach.at].append(unit)
+        self.resolved_units.update((at, tuple(units)) for at, units in by_place.items())
+        result = []
+        admitted = set(self.units)
+        for reach in reaches:
+            units = self.resolved_units[reach.at]
+            self._record_name_resolution(reach, not units)
+            for unit in units:
+                if unit.id not in admitted:
+                    admitted.add(unit.id)
+                    result.append((unit, reach))
+        return result
 
     def _units_of_files(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:
         if not reaches:
             return []
-        listing = list_units(
-            self.index, [reach.at for reach in reaches], box_chars=self.room, reading=self.reading
-        )
+        listing = self.reader.list_files([reach.at for reach in reaches])
         self.unlisted.update(listing.unlisted)
         reach_of: dict[str, Reach] = {}
         for reach in reaches:
@@ -744,7 +833,11 @@ class _Search:
         listed = {unit.path for unit in listing.units}
         for reach in reaches:
             self._record_name_resolution(reach, reach.at not in listed)
-        return [(unit, reach_of[unit.path]) for unit in listing.units]
+        units = listing.units
+        if self.policy.search_order:
+            order = {file: position for position, file in enumerate(reach_of)}
+            units = sorted(units, key=lambda unit: order[unit.path])
+        return [(unit, reach_of[unit.path]) for unit in units]
 
     def _record_name_resolution(self, reach: Reach, without_unit: bool) -> None:
         for name in reach.names:
@@ -756,9 +849,7 @@ class _Search:
         """The units each anchor names. An anchor reached by a name that names none counts against that
         name; any other is ``unresolved``."""
         anchors = [reach.at for reach in reaches]
-        resolved = resolve_each(
-            self.index, anchors, box_chars=self.room, listed_only=True, reading=self.reading
-        )
+        resolved = ((anchor, *self.reader.resolve(anchor)) for anchor in anchors)
         units = []
         for reach, (anchor, named, problem) in zip(reaches, resolved, strict=True):
             self._record_name_resolution(reach, bool(problem))
@@ -780,6 +871,10 @@ class _Search:
         return places
 
     def _pending_places(self, unit: Unit) -> list[Item]:
+        if self.policy.expands and unit.ranges:
+            delivered = self.delivered.get(unit.path, frozenset())
+            if all(line in delivered for first, last in unit.ranges for line in range(first, last + 1)):
+                self.delivered_units.add(unit.id)
         for piece in unit.too_large_pieces:
             self.not_judged[unit.piece_id(piece)] = TOO_LARGE
         pending = []
@@ -816,7 +911,7 @@ class _Search:
             cancelled=self.cancelled,
             places=places,
             refusals=self.refusals,
-            keep_order=self.policy.ranked,
+            keep_order=self.policy.ranked or self.policy.search_order,
         ):
             self._record(self.target_of[name], answer)
 

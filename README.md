@@ -1224,6 +1224,37 @@ MIT, see [LICENSE](LICENSE).
 
 ## Compose code and named text with reserved calls
 
+For a search that judges everything it reaches, use one shared frontier instead:
+
+```python
+from jev_navigator.composition import FrontierConfiguration
+
+result = await FrontierConfiguration(max_calls=4096).search(
+    index, judge, {"p": description}, files=scope, anchors=anchors
+)
+```
+
+`FrontierConfiguration` combines code and plain text under one Jev call budget. Its default is
+4,096 requests, at most 16 items each. This permits up to 65,536 items before request-size cuts;
+it is a generous starting allowance for full-frontier measurements, not a recommended spending
+limit for every repository. Set `max_calls` from the measured request count and your spending
+allowance. An ancestor Judge's cap still applies. A large frontier can exceed any fixed allowance;
+`stopped_by == "budget"` and `not_judged` expose the remaining work.
+
+Discovery has no unit or code-search cap. Named paths and files whose path components match the
+target's words come first, with more matched words first. Opening a file admits all its units.
+Initial sources register their entire population before the first request. Requests preserve source
+and file order, with up to 16 items and a smaller final or size-limited batch.
+
+After each population is judged, every newly judged unit expands once, regardless of its score.
+The shared frontier follows named code and text files, imports, owner-resolved callees and callers,
+models and client calls, fresh identifiers through definitions and references, literal uses, and
+bounded identifier spellings. New terms are exact code-derived strings. No domain vocabulary or
+model-generated search terms are built into these operations. The result records sources and cuts.
+Pass `completed=result.judged` to continue with already answered units; they still expand.
+This configuration has no relevance-based early stop. Relevance ranks the delivered material in
+the caller; it does not prevent the search from judging a reached unit.
+
 `mentions.names_from_text(text)` returns `TextNames(code=..., paths=...)`, using the existing
 mention rules. Bare `copy_sandbox_tree` and `copySandbox` are code names, while `pyproject.toml`
 remains a whole path. `sources.TEXT_FILE_NAMES` reaches a text file by its basename or stem even
