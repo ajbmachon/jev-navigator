@@ -260,7 +260,6 @@ def run_case(pack, out, prompt, provider, encoding, *, resume=False):
     if not resume:
         directory.mkdir()
     start = time.perf_counter()
-    resources = check_resources()
     if not resume:
         save(directory / "input.json", pack)
     messages = [
@@ -328,7 +327,7 @@ def run_case(pack, out, prompt, provider, encoding, *, resume=False):
             with CodeIndex(tracked.root, files, commit=tracked.commit) as index:
                 save(
                     directory / "revision.json",
-                    {"index_commit": tracked.commit, "pack_commit": pack["commit"], "resources": resources},
+                    {"index_commit": tracked.commit, "pack_commit": pack["commit"]},
                 )
                 judge = Judge(
                     ranking,
@@ -532,11 +531,14 @@ def main():
         unchanged = [row for row in existing if row["status"] != "agent_output_cap"]
         selected = {row["case"] for row in existing if row["status"] == "agent_output_cap"}
         packs = [pack for pack in packs if pack["case"] in selected]
+
+    def checked_case(pack):
+        resources = check_resources()
+        save(args.out / f"resources-{pack['case'].replace(':', '_')}.json", resources)
+        return run_case(pack, args.out, prompt, provider, encoding, resume=args.resume_output_caps)
+
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [
-            pool.submit(run_case, pack, args.out, prompt, provider, encoding, resume=args.resume_output_caps)
-            for pack in packs
-        ]
+        futures = [pool.submit(checked_case, pack) for pack in packs]
         results = [future.result() for future in as_completed(futures)]
     results.extend(unchanged)
     save(args.out / "results.json", results)

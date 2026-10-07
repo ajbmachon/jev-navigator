@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import threading
 from decimal import Decimal
@@ -83,7 +84,9 @@ def response(message, *, usage=True):
     return raw
 
 
-def test_real_batch_source_and_withheld_exclusion_reach_agent_with_reconciled_billing(tmp_path, endpoint):
+def test_real_batch_source_and_withheld_exclusion_reach_agent_with_reconciled_billing(
+    tmp_path, endpoint, monkeypatch
+):
     url, received, responses = endpoint
     root = tmp_path / "repo"
     root.mkdir()
@@ -129,6 +132,14 @@ def test_real_batch_source_and_withheld_exclusion_reach_agent_with_reconciled_bi
     ledger = ledger_at(tmp_path)
     out = tmp_path / "output"
     out.mkdir()
+    original_check_output = subprocess.check_output
+
+    def without_mac_memory_probe(command, *args, **kwargs):
+        if command[0] == "vm_stat":
+            raise FileNotFoundError("vm_stat is absent on Linux")
+        return original_check_output(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", without_mac_memory_probe)
     result = run_case(pack, out, "Find deciding source.", provider_at(ledger, url), CharacterCounter())
     assert result["status"] == "agent_final"
     assert received[0]["max_tokens"] == 8000
