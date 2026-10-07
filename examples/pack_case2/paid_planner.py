@@ -13,12 +13,38 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
 
+import msgspec
 from planner import MODEL, PlannerContract, PlannerInput
 from receipts import write_json
 from spend import SpendLedger
 
+from jev_navigator.search_plan import Approach, SearchPlan
+
 ENDPOINT = "https://router.eu.requesty.ai/v1"
 MAX_OUTPUT = 3000
+
+
+def validated_approaches(text, context):
+    """Reject malformed approaches independently. Never rewrite their arguments."""
+    try:
+        return PlannerContract().parse(text, context), []
+    except ValueError as error:
+        document = json.loads(text)
+        if set(document) != {"approaches"} or not isinstance(document["approaches"], list):
+            raise error
+        if len(document["approaches"]) > 10:
+            raise error
+        accepted, rejected, ranks = [], [], set()
+        for position, proposal in enumerate(document["approaches"]):
+            try:
+                approach = msgspec.convert(proposal, type=Approach)
+                if approach.rank in ranks:
+                    raise ValueError("duplicate rank")
+                ranks.add(approach.rank)
+                accepted.append(approach)
+            except (ValueError, TypeError) as failure:
+                rejected.append({"position": position, "proposal": proposal, "error": str(failure)})
+        return SearchPlan(tuple(accepted)), rejected
 
 
 def resources():
@@ -103,9 +129,10 @@ def main():
             "finish_reason": reply["choices"][0].get("finish_reason"),
         }
         try:
-            plan = PlannerContract().parse(reply["choices"][0]["message"]["content"], context)
+            plan, rejected = validated_approaches(reply["choices"][0]["message"]["content"], context)
             write_json(folder / "plan.json", plan)
             receipt["approaches"] = len(plan.approaches)
+            receipt["rejected_approaches"] = rejected
         except (ValueError, TypeError, RuntimeError) as error:
             receipt["parse_error"] = str(error)
         write_json(folder / "planner-receipt.json", receipt)

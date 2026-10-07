@@ -1,6 +1,7 @@
 """The paid recipe must retain reservations across a process restart."""
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -36,3 +37,56 @@ def test_reported_overrun_is_retained_and_blocks_another_dispatch(tmp_path):
         trial.settle("finding-1", "1.01")
     with pytest.raises(RuntimeError, match="Cap stop"):
         ledger(path).reserve("finding-2", "planner", "0.001")
+
+
+def test_one_invalid_approach_keeps_valid_neighbors_and_the_original_failure(monkeypatch):
+    directory = Path(__file__).parents[1] / "examples/pack_case2"
+    monkeypatch.syspath_prepend(str(directory))
+    import paid_planner
+    from planner import PlannerInput
+
+    invalid = {
+        "rank": 2,
+        "call": {"operation": "file_units", "path": "invented.py"},
+        "provenance": [],
+        "source": "unsupported field",
+    }
+    reply = json.dumps(
+        {
+            "approaches": [
+                {"rank": 1, "call": {"operation": "file_units", "path": "real.py"}, "provenance": []},
+                invalid,
+            ]
+        }
+    )
+    plan, rejected = paid_planner.validated_approaches(reply, PlannerInput("", (), "", (), {}))
+    assert [approach.call.path for approach in plan.approaches] == ["real.py"]
+    assert rejected[0]["proposal"] == invalid
+    assert "unknown field" in rejected[0]["error"]
+
+
+def test_binding_report_distinguishes_real_empty_search_from_invented_path(monkeypatch, tmp_path):
+    from shop_search import shop_index
+
+    from jev_navigator.search_plan import Approach, FileUnits, FindText, SearchPlan, execute_plan
+
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "examples/pack_case2"))
+    from paid_execute import binding_status
+
+    index = shop_index(tmp_path, {"real.py": "def alpha():\n    return 7\n"})
+    result = execute_plan(
+        index,
+        SearchPlan(
+            (
+                Approach(1, FindText("absent_word"), ()),
+                Approach(2, FileUnits("invented.py"), ()),
+                Approach(3, FileUnits("real.py"), ()),
+            )
+        ),
+        box_chars=70000,
+    )
+    assert [binding_status(outcome) for outcome in result.outcomes] == [
+        "valid empty search",
+        "invalid or unbound argument",
+        "bound to real code",
+    ]
