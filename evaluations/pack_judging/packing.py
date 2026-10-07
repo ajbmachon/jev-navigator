@@ -94,7 +94,7 @@ async def native_pack(relations, index, case, bindings, judge, rows=None, design
     return pack, recipe.result
 
 
-def lab_rooms(history, bindings, case, rows, index):
+def lab_rooms(history, bindings, case, rows, index, rooms=ROOMS):
     observations = []
     for group in case["groups"]:
         for row in rows.get(group["ordinal"], []):
@@ -135,13 +135,13 @@ def lab_rooms(history, bindings, case, rows, index):
             proposal_reducer(None),
             (),
         )
-        for room in ROOMS
+        for room in rooms
     }
 
 
-def native_rooms(pack, relations, context, labels, destination):
+def native_rooms(pack, relations, context, labels, destination, rooms=ROOMS):
     result = {}
-    for room in ROOMS:
+    for room in rooms:
         packet = packet_in_room(pack, relations, context, room)
         text = packet.render() if packet else ""
         (destination / f"native-{room}.txt").write_text(text)
