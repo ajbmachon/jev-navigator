@@ -330,9 +330,11 @@ def reexported_names(source: str, path: str) -> tuple[tuple[dict[str, str] | Non
     if path.endswith(".py"):
         for match in _PYTHON_FROM.finditer(source):
             parts = _PYTHON_COMMENT.sub("", match.group(2)).strip("()\n ").split(",")
-            names = None if any(part.strip() == "*" for part in parts) else {
-                _local(part): _exported(part) for part in parts if part.strip()
-            }
+            names = (
+                None
+                if any(part.strip() == "*" for part in parts)
+                else {_local(part): _exported(part) for part in parts if part.strip()}
+            )
             if names is None or names:
                 exports.append((names, match.group(1)))
         return tuple(exports)

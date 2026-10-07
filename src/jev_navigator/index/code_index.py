@@ -24,6 +24,7 @@ from .bindings import (
     binding_from_facts,
     binding_in_namespace,
     local_binding,
+    names_exactly,
     unparsed_binding,
 )
 from .fact_cache import FactCache
@@ -514,6 +515,65 @@ class CodeIndex:
     def call_site_count(self, name: str) -> int:
         """How many call sites in scope call ``name``; a name called from fewer places is more specific."""
         return len(self._calls_with_name(name))
+
+    def callers_of(self, definition: Span) -> tuple[CallSite, ...]:
+        """Calls to this definition, including aliases imported through chains of reexports.
+
+        Read import surfaces first, then parse only calls under the resulting real spellings.
+        Unknown bindings remain candidates; a proven target elsewhere never joins this result.
+        """
+        sites = {
+            (site.file, site.line): site
+            for name in self.spellings_of(definition)
+            for site in self.find_callers(name)
+            if names_exactly(site.binding, definition)
+        }
+        return tuple(sites[key] for key in sorted(sites))
+
+    def references_to(self, definition: Span) -> tuple[Reference, ...]:
+        """Non-call uses of a definition under its real import/reexport spellings."""
+        references = {
+            (ref.file, ref.line, ref.role): ref
+            for name in self.spellings_of(definition)
+            for ref in self.find_references(name)
+            if names_exactly(ref.binding, definition)
+        }
+        return tuple(references[key] for key in sorted(references))
+
+    @memoized
+    def spellings_of(self, definition: Span) -> tuple[str, ...]:
+        """Names under which the definition is exported or imported, following finite import surfaces."""
+        names = {definition.name}
+        pending = [(definition.file, definition.name)]
+        if language_of(definition.file) != "python":
+            pending += [
+                (definition.file, outward)
+                for outward, own in self._read_export_names(definition.file).items()
+                if definition.name in own
+            ]
+        seen: set[tuple[str, str]] = set()
+        while pending:
+            file, exported = pending.pop()
+            if (file, exported) in seen:
+                continue
+            seen.add((file, exported))
+            for importer in self.dependents(file):
+                for local, imported in self._read_imported_names(importer).items():
+                    if (imported.exported or "default") == exported and self._module_path(
+                        importer, imported.specifier
+                    ) == file:
+                        names.add(local)
+                for outward, specifier in self._read_reexports(importer):
+                    if self._module_path(importer, specifier) != file:
+                        continue
+                    inherited = (
+                        [exported]
+                        if outward is None
+                        else [alias for alias, original in outward.items() if original == exported]
+                    )
+                    pending.extend((importer, alias) for alias in inherited)
+                    names.update(inherited)
+        return tuple(sorted(names))
 
     def find_callees(self, function: Span) -> tuple[str, ...]:
         """Names called inside ``function``; see ``callee_edges`` for their bindings."""
@@ -1056,8 +1116,16 @@ class CodeIndex:
         )
         hiding = {exporter.path for exporter, exported in exporters if self._hides(exporter.path, exported)}
         return binding_from_facts(
-            CallFacts(file, name, None, definitions, (), definitions,
-                      tuple(exporter for exporter, _ in exporters), hiding)
+            CallFacts(
+                file,
+                name,
+                None,
+                definitions,
+                (),
+                definitions,
+                tuple(exporter for exporter, _ in exporters),
+                hiding,
+            )
         )
 
     def _hides(self, exporter: str, name: str) -> bool:
