@@ -72,6 +72,7 @@ def test_actual_sdk_dispatch_reserves_before_send_and_finishes_lower_rounds(tria
         attempts = list(trial.rows(folder / "transport-attempts.jsonl"))
         assert len(receipts) == len(attempts) == 6
         assert {r["ordinal"] for r in receipts} == set(range(1, 7))
+        assert all(r["started_at"] <= r["finished_at"] for r in receipts)
     trial.dispatch(trial.SpendLedger(tmp_path / "ledger.jsonl", cap="3.00"))
     assert len(seen) == 18
 

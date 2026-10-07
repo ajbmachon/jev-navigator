@@ -75,12 +75,34 @@ up to eight actual 16-item requests per finding, including size splits and tails
 Its neutral answers serve shape rehearsal only. Source places are retained per
 physical request occurrence, including identical bodies at different places.
 
-The trial requires free Meta prepare and one paid guard for the exact candidate
-before any Jev candidate call. It stops after guard so the lead can show André the
-scores. These launchers construct no Jev candidate transport. The spend ledger
-includes guard charges separately from planner charges. The initial $1 cap and
-the lead's later $3 next-stage allowance are recorded in `TRIAL.md`; the resumed
-candidate stage must use its explicitly authorized cap and preserve the ledger.
+The resumed trial has a $3 total cap, including the existing planner and guard
+spend. `union_prepare.py` reuses Case 1's frozen features and held-out weights to
+compare plan results, the census and their canonical union at equal source-unit
+counts. Unknown source bindings stay unavailable. Outside-census plan units use
+a declared ordinal fallback rather than invented scent or graph scores.
+
+`paid_trial.py prepare` runs with the pinned #148 profile on `PYTHONPATH`. It
+prepares the first 384 pieces through the real Judge, retaining at most 24 physical
+requests per finding. `guard` reviews an exact union request; `judge` dispatches
+the immutable groups with a durable reservation before each physical send,
+explicitly disabled SDK retries, a final secret scan and exact wire receipts.
+Rounds complete four requests across all findings before eight, sixteen and
+twenty-four. A cap stop preserves completed lower checkpoints and marks the rest
+pending. Recorded guard scores are advisory under André's resumed authorization.
+
+`paid_pack.py` runs on the pinned lab and Engine owners. It decodes the original
+six-role answers and filters observations into union, plan-only and ranking-only
+views, without asking new groups. It packs each checkpoint into rooms of about
+7,200, 20,000 and 36,000 tokens. The lab room is ranked-code allowance plus the
+original floor; the native room is the total rendered packet allowance. The
+legacy 7,200 native room uses the owner's lower-level explicit-character
+allocator. The other native rooms use `EvidencePack.packet()`. Conditional subset
+views retain the original union companions and do not claim independent trials.
+
+The spend ledger separates planner, Meta review and candidate Jev charges. The
+first-stage receipts and the union-stage receipts remain separate, with no paid
+planner repetition. `trial_report.py` derives the marginal curve, per-finding
+usage and deciding-line provenance from receipts and actual consumer windows.
 
 Results and the separately priced trial proposal belong in
 `~/.local/share/jvn-takeover/2026-10-03/search-design/case2/REPORT.md` and `TRIAL.md`.

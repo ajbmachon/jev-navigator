@@ -26,7 +26,7 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.units import Item, Piece, Unit, UnitKind
 from jev_navigator.judgments.answers import response_from_raw
 from jev_navigator.judgments.judge import CheckResult
-from jev_navigator.judgments.questions import content_hash, item_path
+from jev_navigator.judgments.questions import content_hash
 from jev_navigator.judgments.thresholds import Thresholds
 
 VIEWS = ("union", "plan-only", "ranking-only")
@@ -115,6 +115,14 @@ def answered_observations(prepared, responses, candidates):
         raw_response = response_from_raw(receipt["response"])
         if set(raw_response.answers) != set(questions):
             raise ValueError(f"incomplete original answers at ordinal {ordinal}")
+        expected_questions = {
+            f"{check.question_id}#{slot}"
+            for slot in range(len(members))
+            for target in state["targets"]
+            for check in ROLES_V2.questions(target)
+        }
+        if set(questions) != expected_questions or any(q["type"] != "noul" for q in questions.values()):
+            raise ValueError(f"original role question IDs or types mismatch at ordinal {ordinal}")
         for slot, member in enumerate(members):
             unit, item, flags = source_items[(member["unit_id"], member["id"])]
             place = Item(member["id"], member["file"], tuple(map(tuple, member["ranges"])))
@@ -122,15 +130,16 @@ def answered_observations(prepared, responses, candidates):
                 raise ValueError(f"source geometry mismatch for {place.id}")
             if member.get("unit_id", unit.id) != unit.id:
                 raise ValueError(f"source unit mismatch for {place.id}")
-            # Masking can change code, but the original physical state's path is fixed.
-            if state["items"][slot]["file"] != place.file:
-                raise ValueError(f"original request member mismatch for {place.id}")
+            # Judge masking can hide companion values in file fields as well as
+            # code. Original captured places own source geometry; the exact wire
+            # hash above owns the masked state and its ordered companions.
             for target, target_text in state["targets"].items():
                 components = {}
                 for check in ROLES_V2.questions(target):
                     qid = f"{check.question_id}#{slot}"
-                    if questions.get(qid) != check.to_question(item_path("items", slot)):
-                        raise ValueError(f"original question contract mismatch: {qid}")
+                    # The pinned IDs bind role/target/slot. Their original wire
+                    # bodies can also contain legitimate companion masking;
+                    # the request hash validates those actual questions.
                     probability = raw_response.noul(qid).probability
                     if not 0 <= probability <= 1:
                         raise ValueError(f"invalid probability: {qid}")
@@ -291,12 +300,10 @@ def _small_packet(pack, room_chars):
     )
     candidate = packet.within_budget(room_chars)
     while len(candidate.render()) > room_chars and candidate.regions:
-        region_chars = sum(len(r.render()) + 1 for r in candidate.regions)
+        region_chars = sum(len(r.render()) for r in candidate.regions)
         overhead = len(candidate.render()) - region_chars
-        next_packet = candidate.within_budget(max(0, room_chars - overhead))
-        if next_packet.regions == candidate.regions:
-            next_packet = candidate.within_budget(max(0, region_chars - 1))
-        candidate = next_packet
+        allowance = min(region_chars - 1, max(0, room_chars - overhead))
+        candidate = candidate.within_budget(allowance)
     return candidate
 
 
@@ -492,6 +499,10 @@ def _write(path, value):
     temporary.replace(path)
 
 
+def _packing_key(row):
+    return row["case"], row["path"], row["view"], row["checkpoint"], row["room_tokens"]
+
+
 def _workload():
     """Read only admitted case input/label records; never deserialize the unit census."""
     import ijson
@@ -524,7 +535,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", type=lambda value: Path(value).expanduser())
     parser.add_argument("--case", action="append", dest="cases")
+    parser.add_argument("--checkpoint", action="append", type=int, choices=CHECKPOINTS, dest="checkpoints")
     options = parser.parse_args()
+    checkpoints = tuple(sorted(set(options.checkpoints or CHECKPOINTS)))
     resources()
     inputs, labels, lab = _workload()
     by_repository = defaultdict(list)
@@ -535,7 +548,9 @@ def main():
         if not (folder / "prepared-requests.jsonl").exists():
             continue
         by_repository[(row["repository"], tuple(sorted(row["withheld"])))].append((cid, dataset, row, folder))
-    summary = []
+    summary_path = options.stage / "packing-summary.json"
+    saved_summary = json.loads(summary_path.read_text())["cases"] if summary_path.exists() else []
+    summary = {_packing_key(row): row for row in saved_summary}
     for cases in by_repository.values():
         admitted_files = {
             candidate["unit"]["path"]
@@ -573,8 +588,11 @@ def main():
                         if floor_request is None
                         else [_floor_window(region) for region in floor_request.floor]
                     }
-                results = []
-                for checkpoint in CHECKPOINTS:
+                result_path = folder / "packing-results.json"
+                saved_results = json.loads(result_path.read_text())["results"] if result_path.exists() else []
+                results = [_row for _row in saved_results if _row["checkpoint"] not in checkpoints]
+                refreshed = 0
+                for checkpoint in checkpoints:
                     complete = set(range(1, min(checkpoint, len(prepared)) + 1)) <= answered_ordinals
                     for view in VIEWS:
                         selected = filter_observations(observations, view, checkpoint)
@@ -618,9 +636,11 @@ def main():
                                     "frozen_lab_baseline_available": frozen_lab,
                                 }
                                 results.append(result)
-                _write(folder / "packing-results.json", {"case": cid, "results": results})
-                summary.extend(
-                    {
+                                refreshed += 1
+                results.sort(key=_packing_key)
+                _write(result_path, {"case": cid, "results": results})
+                for result in results:
+                    summary[_packing_key(result)] = {
                         key: result[key]
                         for key in (
                             "case",
@@ -639,12 +659,10 @@ def main():
                             "original_usd",
                         )
                     }
-                    for result in results
-                )
                 _write(
                     options.stage / "packing-summary.json",
                     {
-                        "cases": summary,
+                        "cases": sorted(summary.values(), key=_packing_key),
                         "provider_calls": 0,
                         "usd": 0,
                         "engine": "91f57ab4",
@@ -653,7 +671,7 @@ def main():
                         "native_room_axis": "total rendered consumer packet room",
                     },
                 )
-                print(f"{cid}: packed {len(results)} view/checkpoint/room/path results", flush=True)
+                print(f"{cid}: refreshed {refreshed}; retained {len(results)} packing results", flush=True)
         finally:
             if index is not None:
                 index.close()

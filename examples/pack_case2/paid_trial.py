@@ -206,6 +206,7 @@ def send(ledger, folder, record):
     identifier = f"union:{folder.name}:{record['ordinal']}"
     ledger.reserve(identifier, "jev", str(reserve_price(request)))
     started = time.perf_counter()
+    started_at = time.time()
     # Retries are explicitly disabled: every physical send must have a reservation.
     capture = CapturingTransport(httpx2.HTTPTransport())
 
@@ -259,6 +260,8 @@ def send(ledger, folder, record):
         "usage": raw.get("usage"),
         "usd": str(RATE * tokens) if tokens is not None else None,
         "seconds": time.perf_counter() - started,
+        "started_at": started_at,
+        "finished_at": time.time(),
     }
     append(folder / "responses.jsonl", receipt)
     if tokens is None:

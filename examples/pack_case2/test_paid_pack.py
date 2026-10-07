@@ -12,8 +12,10 @@ from pathlib import Path
 
 from enginepy.workflows.document_analysis import evidence_pack as owner
 from enginepy.workflows.document_analysis.code_relations import CodeRelations
+from enginepy.workflows.document_analysis.skeptic_packet import PacketRegion, SkepticPacket
 from jev_navigator.judgments.profiles import ROLES_V2
 from paid_pack import (
+    _small_packet,
     answered_observations,
     filter_observations,
     native_scope,
@@ -42,6 +44,9 @@ class OriginalGroupPackingTest(unittest.TestCase):
             "enginepy/protocol/generated/event_contract.py": "def event():\n    return 7\n",
             "private.py": "def private():\n    return 8\n",
             "untracked.py": "def untracked():\n    return 9\n",
+            "src/rest.js": "export function rest() { return 10; }\n",
+            "secrets.py": "PASSWORD = 'rest'\n",
+            "question_secret.py": "PASSWORD = 'value'\n",
         }
         for file, source in sources.items():
             (root / file).parent.mkdir(parents=True, exist_ok=True)
@@ -192,11 +197,7 @@ class OriginalGroupPackingTest(unittest.TestCase):
         self.assertTrue(result["no_anchor"])
         self.assertEqual(result["consumer_windows"], [])
 
-    def test_explicit_union_scope_renders_generated_brothers_and_reports_ineligible_sources(self):
-        generated = "enginepy/protocol/generated/remediation_contract.py"
-        brother = "enginepy/protocol/generated/event_contract.py"
-        files = [generated, brother, "private.py", "untracked.py"]
-        row = {**self.row, "withheld": [str(Path(self.row["repository"]) / "private.py")]}
+    def original_observations(self, files):
         candidates, entries = [], []
         for unit in list_units(self.index, files, box_chars=70000).units:
             items = [
@@ -228,7 +229,14 @@ class OriginalGroupPackingTest(unittest.TestCase):
                 },
             }
         ]
-        observations = answered_observations(prepared, responses, candidates)
+        return answered_observations(prepared, responses, candidates), prepared
+
+    def test_explicit_union_scope_renders_generated_brothers_and_reports_ineligible_sources(self):
+        generated = "enginepy/protocol/generated/remediation_contract.py"
+        brother = "enginepy/protocol/generated/event_contract.py"
+        files = [generated, brother, "private.py", "untracked.py"]
+        row = {**self.row, "withheld": [str(Path(self.row["repository"]) / "private.py")]}
+        observations, _ = self.original_observations(files)
         self.assertFalse(self.relations.readable(generated))  # The real native inventory rejects this class.
         normal_index = owner.pack_index(self.relations, row["repository"])
         self.addCleanup(normal_index.close)
@@ -247,6 +255,39 @@ class OriginalGroupPackingTest(unittest.TestCase):
             {w["file"] for w in result["consumer_windows"] if w["file"] in files}, {generated, brother}
         )
         self.assertEqual({w["file"] for w in result["asked_windows"]}, set(files))
+
+    def test_companion_masked_file_keeps_original_judge_place_and_wire_receipt(self):
+        observations, prepared = self.original_observations(["src/rest.js", "secrets.py"])
+        request = prepared[0]["request"]
+        self.assertIn("src/[MASKED].js", [item["file"] for item in request["state"]["items"]])
+        rest = next(observed for observed in observations if observed.answer.place.file == "src/rest.js")
+        self.assertEqual(rest.answer.request_sha256, prepared[0]["request_sha256"])
+        self.assertEqual(rest.answer.item["file"], "src/[MASKED].js")
+        result = pack_native(self.row, self.relations, self.index, observations, 20000)
+        self.assertTrue(any(window["file"] == "src/rest.js" for window in result["consumer_windows"]))
+
+    def test_companion_masked_question_keeps_original_role_ids_and_wire_body(self):
+        observations, prepared = self.original_observations(["src/rest.js", "question_secret.py"])
+        original = copy.deepcopy(prepared)
+        questions = prepared[0]["request"]["questions"]
+        value_question = next(question for qid, question in questions.items() if qid.startswith("value_p0@"))
+        self.assertIn("[MASKED]", value_question["instructions"])
+        self.assertIn("[MASKED]", value_question["criteria"]["true"]["what"])
+        for observed in observations:
+            self.assertIn(observed.answer.components["value"].question_id, questions)
+            self.assertEqual(observed.answer.request_sha256, prepared[0]["request_sha256"])
+        result = pack_native(self.row, self.relations, self.index, observations, 20000)
+        self.assertTrue(result["consumer_windows"])
+        self.assertEqual(prepared, original)
+
+    def test_native_legacy_allocator_progresses_when_numbering_exceeds_room_by_one(self):
+        regions = tuple(PacketRegion("ranked", f"unit{i}", "fixture.py", i, i, "line") for i in range(1, 4))
+        pack = owner.EvidencePack("boundary", regions, (), (), owner.PackCost(0, 0, ()))
+        unbounded = SkepticPacket(pack.claim_id, regions, (), 0)
+        room_chars = len(unbounded.render()) - 1
+        packet = _small_packet(pack, room_chars)
+        self.assertLess(len(packet.regions), len(regions))
+        self.assertLessEqual(len(packet.render()), room_chars)
 
 
 if __name__ == "__main__":
