@@ -7,7 +7,7 @@ the proposed calls. There is no paid execution mode. Stop for the lead's design
 check before adding or invoking paid dispatch.
 
 The prepared artifact directory is
-`~/.local/share/jvn-takeover/2026-10-03/search-design/judging/design-20261007-reviewed`.
+`~/.local/share/jvn-takeover/2026-10-03/search-design/judging/design-20261007-actual-consumer`.
 `REPORT.md`, `TRIAL.md` and `DESIGN-REVIEW.json` beside it own the review packet.
 Earlier preparation directories are incomplete drafts and are not admitted inputs.
 
@@ -36,6 +36,10 @@ actual sent baseline requests to raw provider answers and source addresses.
 `prepare.py` generates every candidate group and retains canonical identities,
 admissibility and prices. It prepares two full-group prototypes per Jev variant,
 one on each dataset. Prototype review is not review of every changing state.
+The packet supplies the real consumer. Meta cannot resolve its dynamic JVN
+answer reads, so workflow coverage remains explicitly unreviewed. Local tests
+execute that submitted code with JVN typed responses; SDK-field snippets are
+not substitutes for this interface.
 
 The paid continuation must reuse Case 1's reservation ledger and receipt
 transport. It must scan the complete semantic LLM input with `scan_llm_request`
