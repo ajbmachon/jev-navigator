@@ -4,20 +4,18 @@ from __future__ import annotations
 
 import argparse
 import base64
-import importlib.util
 import itertools
 import json
 import os
 import subprocess
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
 
-from paid_planner import resources
 from paid_shape import entries, prepare
 from spend import SpendLedger
+from trial_resources import resources
 
 from jev_navigator.judgments.answers import reported_input_tokens, response_from_raw
 from jev_navigator.judgments.questions import content_hash
@@ -27,7 +25,6 @@ RATE = Decimal("0.000000042")
 ROOT = Path.home() / ".local/share/jvn-takeover/2026-10-03/search-design/case2"
 PAID = ROOT / "paid-trial-20261007"
 OUT = PAID / "union-stage-20261007"
-PROFILE = Path.home() / "Projects/jev-navigator-role-profile/src/jev_navigator/judgments/profiles.py"
 
 
 def rows(path):
@@ -56,16 +53,18 @@ def reserve_price(request):
     return RATE * min(size, 64000)
 
 
-def profile():
-    spec = importlib.util.spec_from_file_location("jev_navigator.judgments.profiles", PROFILE)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module.ROLES_V2
+def prepared_price(records):
+    """Unreviewed coverage rows are not submitted Meta requests."""
+    submitted = [record["submitted"] for record in records if "submitted" in record]
+    if not submitted:
+        raise ValueError("Meta prepare produced no submitted review requests")
+    return sum((reserve_price(request) for request in submitted), Decimal(0))
 
 
 def prepare_union():
-    role_profile = profile()
+    from jev_navigator.judgments.profiles import ROLES_V2
+
+    role_profile = ROLES_V2
     summaries = []
     for folder in sorted((OUT / "cases").iterdir()):
         resources()
@@ -151,7 +150,7 @@ def guard(ledger):
             check=True,
         )
     requests = json.loads(prepared.read_text())["requests"]
-    quote = sum((reserve_price(r["submitted"]) for r in requests), Decimal(0))
+    quote = prepared_price(requests)
     ledger.reserve(identifier, "meta", str(quote))
     started = time.perf_counter()
     with (OUT / "guard-report.json").open("w") as stream:

@@ -3,9 +3,6 @@
 import hashlib
 import json
 import os
-import re
-import shutil
-import subprocess
 import sys
 import time
 import urllib.request
@@ -17,6 +14,7 @@ import msgspec
 from planner import MODEL, PlannerContract, PlannerInput
 from receipts import write_json
 from spend import SpendLedger
+from trial_resources import resources
 
 from jev_navigator.search_plan import Approach, SearchPlan
 
@@ -45,16 +43,6 @@ def validated_approaches(text, context):
             except (ValueError, TypeError) as failure:
                 rejected.append({"position": position, "proposal": proposal, "error": str(failure)})
         return SearchPlan(tuple(accepted)), rejected
-
-
-def resources():
-    disk = shutil.disk_usage(Path.home()).free
-    vm = subprocess.check_output(["vm_stat"], text=True)
-    page = int(re.search(r"page size of (\d+)", vm)[1])
-    counts = {name: int(n) for name, n in re.findall(r"(Pages [^:]+):\s+(\d+)", vm)}
-    memory = sum(counts.get(f"Pages {name}", 0) for name in ("free", "inactive", "speculative")) * page
-    if disk < 30 * 10**9 or memory < 8 * 10**9:
-        raise RuntimeError(f"Resource stop: disk={disk}, available memory={memory}")
 
 
 def provider_cost(usage, model):

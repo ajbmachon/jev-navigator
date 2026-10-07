@@ -17,7 +17,8 @@ def trial(monkeypatch):
 
 
 def test_actual_sdk_dispatch_reserves_before_send_and_finishes_lower_rounds(trial, monkeypatch, tmp_path):
-    import httpx2
+    httpx2 = pytest.importorskip("httpx2")
+    pytest.importorskip("typesafe_sdk")
 
     seen = []
     lock = Lock()
@@ -76,8 +77,8 @@ def test_actual_sdk_dispatch_reserves_before_send_and_finishes_lower_rounds(tria
 
 
 def test_failed_physical_send_is_not_retried_and_keeps_unknown_spend_reserved(trial, monkeypatch, tmp_path):
-    import httpx2
-    from typesafe_sdk import TypeSafeInternalServerError
+    httpx2 = pytest.importorskip("httpx2")
+    sdk = pytest.importorskip("typesafe_sdk")
 
     seen = []
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
@@ -104,11 +105,26 @@ def test_failed_physical_send_is_not_retried_and_keeps_unknown_spend_reserved(tr
             "questions": record["request"]["questions"],
         }
     )
-    with pytest.raises(TypeSafeInternalServerError):
+    with pytest.raises(sdk.TypeSafeInternalServerError):
         trial.send(ledger, tmp_path, record)
     assert len(seen) == 1
+
     assert list(trial.rows(tmp_path / "transport-attempts.jsonl"))[0]["status"] == 503
     assert ledger.events[-1]["status"] == "reserved"
     with pytest.raises(RuntimeError, match="already recorded"):
         trial.send(trial.SpendLedger(tmp_path / "ledger.jsonl", cap="3.00"), tmp_path, record)
     assert len(seen) == 1
+
+
+def test_meta_unreviewed_coverage_record_does_not_become_a_paid_request(trial):
+    submitted = {"model": "jev-latest", "state": "test", "questions": {}}
+    review = {"scope": "question", "submitted": submitted}
+    missing_consumer = {
+        "kind": "review",
+        "scope": "workflow",
+        "status": "not_reviewed",
+        "reason": "workflow.consumer_code was not supplied",
+    }
+    assert trial.prepared_price([review, missing_consumer]) == trial.prepared_price([review])
+    with pytest.raises(ValueError, match="no submitted review requests"):
+        trial.prepared_price([missing_consumer])
