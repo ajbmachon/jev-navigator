@@ -146,7 +146,9 @@ def test_exact_jev_group_cache_reuses_raw_but_changed_companion_requires_reserve
     assert not session.receipts and not ledger.events
 
 
-def test_provider_overload_retries_exact_group_with_a_new_counted_reservation(tmp_path, monkeypatch):
+def test_provider_overload_and_connection_loss_retry_exact_group_with_counted_reservations(
+    tmp_path, monkeypatch
+):
     import asyncio
     from functools import partial
 
@@ -168,6 +170,12 @@ def test_provider_overload_retries_exact_group_with_a_new_counted_reservation(tm
             if len(sent) == 1:
                 status = 529
                 reply = {"detail": {"error_type": "system_overloaded", "message": "Try again later"}}
+            elif len(sent) == 2:
+                import socket
+
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+                return
             else:
                 status = 200
                 reply = {
@@ -219,19 +227,22 @@ def test_provider_overload_retries_exact_group_with_a_new_counted_reservation(tm
     )
     try:
         asyncio.run(reach.run_paid())
-        assert len(sent) == 2 and sent[0] == sent[1]
+        assert len(sent) == 3 and sent[0] == sent[1] == sent[2]
         ledger = Ledger(tmp_path / "spend-ledger.jsonl", cap="2.00")
-        assert sorted(e["status"] for e in ledger.latest().values()) == ["reserved", "settled"]
+        assert sorted(e["status"] for e in ledger.latest().values()) == ["reserved", "reserved", "settled"]
         base = tmp_path / "answers/fixture/0"
-        failure = load(next((base / "failures").glob("*.json")))
-        assert failure["receipt"]["status"] == 529
+        failures = [load(p) for p in (base / "failures").glob("*.json")]
+        assert len(failures) == 2
+        failure = next(f for f in failures if f["receipt"]["status"] == 529)
+        lost = next(f for f in failures if f["receipt"]["status"] is None)
+        assert lost["receipt"]["failure"].startswith("TypeSafeAPIConnectionError:")
         observation = load(base / "observation.json")
         assert observation["failure"] is None and len(observation["rows"]) == 16
         assert float(observation["pending_reserved_usd"]) > 0
         assert (
-            load(base / "http" / failure["receipt"]["id"].replace(":", "_") / "response.json")[
-                "detail"
-            ]["error_type"]
+            load(base / "http" / failure["receipt"]["id"].replace(":", "_") / "response.json")["detail"][
+                "error_type"
+            ]
             == "system_overloaded"
         )
     finally:

@@ -134,9 +134,12 @@ async def main():
     for receipt_path in (OUT / "answers").glob("*/*/http/reach_*/receipt.json"):
         receipt = load(receipt_path)
         if receipt["id"] in pending_ids:
-            assert receipt["status"] == 529
-            raw = load(receipt_path.with_name("response.json"))
-            assert raw["detail"]["error_type"] == "system_overloaded"
+            if receipt["status"] == 529:
+                raw = load(receipt_path.with_name("response.json"))
+                assert raw["detail"]["error_type"] == "system_overloaded"
+            else:
+                assert receipt["status"] is None
+                assert receipt["failure"].startswith("TypeSafeAPIConnectionError:")
             verified_overloads.add(receipt["id"])
     assert pending_ids == verified_overloads
     write(OUT / "results.json", results)
@@ -155,7 +158,7 @@ async def main():
             "step_counted_usd": str(ledger.cap - ledger.balance()),
             "known_spend_usd": str(known),
             "pending_reserved_usd": str(pending),
-            "overload_attempts": len(pending_ids),
+            "unpriced_attempts": len(pending_ids),
             "totals": {k: dict(v) for k, v in totals.items()},
             "costs": {k: str(v) for k, v in costs.items()},
         },
