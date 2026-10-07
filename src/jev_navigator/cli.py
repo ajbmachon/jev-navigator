@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from .adapters.routes import RoutedJevClient, system_one_client
 from .cache_root import cache_root
+from .cli_batch import add_batch_parser, run_batch_command
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
@@ -104,6 +105,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "cache":
         return run_cache_command(args.action)
+    if args.command == "batch":
+        return run_batch_command(args)
     status = _run_statistics(args) if args.command == "stats" else _run_search(args)
     return 130 if tidy_after_run() else status
 
@@ -590,6 +593,7 @@ A completed search can have a non-found outcome; inspect search.outcome in JSON 
         "--json", metavar="REQUEST", help="JSON object, request file, or - for stdin; emit JSON"
     )
     commands = parser.add_subparsers(dest="command")
+    add_batch_parser(commands)
     find = commands.add_parser(
         "find",
         help="find semantically described code and write a versioned evidence pack",
@@ -618,7 +622,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     help_command = commands.add_parser("help", help="show general or command-specific help")
     help_command.add_argument(
-        "topic", nargs="?", choices=("find", "findall", "trace", "stats", "schema", "cache")
+        "topic", nargs="?", choices=("find", "findall", "trace", "stats", "schema", "cache", "batch")
     )
     cache = commands.add_parser(
         "cache",
@@ -838,6 +842,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     if not isinstance(payload, dict):
         parser.error("JSON request must be an object")
     command = payload.get("command", "find")
+    if command == "batch":
+        parsed = parser.parse_args(["batch", "-"])
+        parsed.payload = payload
+        parsed.json = args.json
+        return parsed
     # The command parser is the option schema for both input formats.
     if command not in ("find", "findall", "trace", "stats"):
         parser.error(f"unknown JSON command: {command!r}; expected find, findall, trace or stats")

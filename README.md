@@ -48,6 +48,7 @@ configuration: a recipe the caller passes as data names them, never an environme
 | Mini-workflows `find_code`, `find_all` and `trace` | built |
 | The frontier: the order a search judges what its sources reach, a named policy, `STAGE_ORDER` or `VALUE` (per-target queues and shares, settling after one step of hops); see [Sources, the frontier and each workflow's composition](#sources-the-frontier-and-each-workflows-composition) | built |
 | `LlmStep` | built |
+| Explicit batched agent operations (`run_batch`, `run_batch_async`, `jvn batch`), bounded output with continuations | built |
 | Text search: the mini-workflows `find_text` and `find_all_text` | built |
 | Sources: one contract (`sources.Source`) for every primitive that reaches candidates; `find_all`, `find_all_text` and `find_text` are compositions of them | built |
 | `find` and `trace` as compositions of sources | not yet: they keep their own moves and call graph |
@@ -76,6 +77,13 @@ Three rules hold for every change:
 
 Until typed configurations exist, a composition is a plain function of the blocks; see
 [docs/extending.md](docs/extending.md).
+
+## Batch explicit agent operations
+
+`jvn batch` runs several code operations in one call, with numbered results, total counts and
+continuations. Facts need no credentials. Ranking uses a caller-supplied `Judge` and preserves the
+candidate order in requests of at most 16 items. See [the batch guide](docs/batch.md) for JSON,
+operation semantics and the synchronous and asynchronous library entries.
 
 ## Trace a known workflow
 

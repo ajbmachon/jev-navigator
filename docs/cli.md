@@ -17,6 +17,7 @@ that are absent from the source?” rather than “find everything important”.
 - [Agent workflow](#agent-workflow)
 - [Find All unit search](#find-all-unit-search)
 - [Workflow trace](#workflow-trace)
+- [Batched agent operations](batch.md)
 - [Structural measurements](#structural-measurements)
 - [Disk use and housekeeping](#disk-use-and-housekeeping)
 
