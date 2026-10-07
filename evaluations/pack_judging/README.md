@@ -38,8 +38,9 @@ independent answers, with no model calls. Do not run the whole suite locally.
 
 The Requesty route is Case 2's JSON-object transport, with the exact closed
 string-id schema in the prompt and strict admission in code. Initial advertised
-JSON-schema replies were blank. Their 99 uncertain reservations remain charged
-against the cap and all raw attempts remain in failed-schema-transport. Systemic
+JSON-schema replies were blank. Their 99 initially uncertain reservations and all raw attempts remain in
+failed-schema-transport. The zero-cost Engine follow-up reconciles those
+reservations to zero against Requesty usage records, with a matching paid control. Systemic
 missing-content/usage failures halt dispatch. summarize.py reconciles the saved
 packets and the append-only ledger without a provider call.
 
@@ -51,3 +52,23 @@ as modules to reconcile costs, verify original companions and literal packet
 sizes, compare gained/lost lines against R0, and hash raw artifacts. The report
 is search-design/judging/REPORT.md in the planning repository. Production
 profiles remain unchanged, and this branch is not merged.
+
+The fixed-Engine follow-up uses repack.py with before, fixed, then audit. Before
+must resolve Engine 91f57ab4; fixed must resolve a separate scratch archive of
+that same commit with Case 1's packet-candidates and generated-citation patches
+applied in order. Set only that Engine entry on PYTHONPATH to choose the runtime.
+The same pinned JVN, Case 1 modules and frozen answers remain in use. The existing
+Case 1 offline replay installs a socket audit that refuses network operations;
+R0 requires exact original request keys and scalar recipes have zero-call Judges.
+Both paths replay all 123 findings and all three rooms. Unpatched packets must
+match the original bytes, lab delivery must stay unchanged, and no original
+native deciding line may disappear. Audit reads the literal numbered packets
+independently and calculates delivery per dollar from the original inference
+bills. Packing costs zero. The retained evidence is under the planning repo's
+search-design/judging/engine-fixed-20261007.
+
+reconcile.py consumes already-saved read-only Requesty management records. It
+makes no requests, verifies a positive paid control and all 99 unique failed
+attempt bindings, backs up the original ledger, then appends zero settlements
+through Case 1's Ledger. The original summary stays a historical snapshot; the
+follow-up reconciliation records the current balance.
