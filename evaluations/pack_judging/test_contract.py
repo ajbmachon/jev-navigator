@@ -54,6 +54,7 @@ def test_frozen_groups_use_existing_async_judge_without_changing_companions():
         assert max(result, key=lambda row: row["score"])["slot"] == 3
         # The code submitted for Meta review must accept the actual JVN typed response.
         namespace = vars(consume).copy()
+        namespace.pop("consume_jev")
         candidate = meta_candidate(design, request, "fixture", 0)
         exec(candidate["workflow"]["consumer_code"], namespace)
         reviewed_rows = namespace["consume_jev"](design, request, responses[0])
