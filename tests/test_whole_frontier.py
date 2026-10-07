@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,20 @@ def test_budget_keeps_the_entire_reached_population_and_preserves_file_first_bat
             "docs/limits.md": "# Limits\nEvery answer matters.\n",
         },
     )
+
+    class TailBeforeMiddleClient(AsyncScriptedJevClient):
+        def __init__(self):
+            super().__init__()
+            self.tail_seen = asyncio.Event()
+
+        async def send(self, state, questions):
+            if "def check_15(" in state["items"][0]["code"]:
+                await self.tail_seen.wait()
+            response = await super().send(state, questions)
+            if len(state["items"]) == 5:
+                self.tail_seen.set()
+            return response
+
     client = ScriptedJevClient()
     config = FrontierConfiguration(max_calls=1, sources=(FILE_WORDS, FILES), hops=())
     result = asyncio.run(config.search(index, Judge(client), {"p": "check limits"}, files=["a/unrelated.py"]))
@@ -43,7 +58,7 @@ def test_budget_keeps_the_entire_reached_population_and_preserves_file_first_bat
     [state, _] = client.requests[0]
     assert state["items"][0]["file"] == "docs/limits.md"
     assert all(item["file"] == "z/limits.py" for item in state["items"][1:])
-    client = ScriptedJevClient()
+    client = TailBeforeMiddleClient()
     result = asyncio.run(
         FrontierConfiguration(max_calls=3, sources=config.sources, hops=()).search(
             index,
@@ -54,8 +69,21 @@ def test_budget_keeps_the_entire_reached_population_and_preserves_file_first_bat
     )
     assert result.stopped_by == "scope_examined"
     assert len(result.judged["p"]) == 37
-    assert [len(state["items"]) for state, _ in client.requests] == [16, 16, 5]
-    assert client.requests[-1][0]["items"][-1]["file"] == "a/unrelated.py"
+
+    def first_unit(request):
+        item = request[0]["items"][0]
+        match = re.search(r"def check_(\d+)\(", item["code"])
+        return int(match[1]) if match else -1
+
+    batches = sorted(client.requests, key=first_unit)
+    assert [len(state["items"]) for state, _ in batches] == [16, 16, 5]
+    assert batches[-1][0]["items"][-1]["file"] == "a/unrelated.py"
+    seen = [
+        f"check_{match[1]}" if (match := re.search(r"def check_(\d+)\(", item["code"])) else item["file"]
+        for state, _ in batches
+        for item in state["items"]
+    ]
+    assert seen == ["docs/limits.md", *(f"check_{i}" for i in range(35)), "a/unrelated.py"]
 
 
 def test_follow_imported_owner_callee_and_literal_even_after_a_no_answer(tmp_path: Path) -> None:

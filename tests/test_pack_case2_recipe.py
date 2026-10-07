@@ -132,15 +132,20 @@ def test_shortlist_stream_uses_real_judge_with_16_item_groups_and_final_tail(tmp
     candidates = execute_plan(
         index, SearchPlan((Approach(1, FileUnits("a.py"), ()),)), box_chars=70000
     ).candidates
-    entries = (
-        ({"file": item.file, "code": read_ranges(index, item.file, item.ranges)}, item)
-        for candidate in candidates
-        for item in items_to_judge(candidate.unit)
-    )
     client = ScriptedJevClient()
+
+    def entries():
+        position = 0
+        for candidate in candidates:
+            for item in items_to_judge(candidate.unit):
+                if position == 16:
+                    assert len(client.requests) == 1
+                yield ({"file": item.file, "code": read_ranges(index, item.file, item.ranges)}, item)
+                position += 1
+
     answers = list(
         recipe("request_batches").judge_in_order(
-            Judge(client, items_per_request=16), [Check("read", "Read `{item}.code`.")], entries, {}, []
+            Judge(client, items_per_request=16), [Check("read", "Read `{item}.code`.")], entries(), {}, []
         )
     )
     assert len(answers) == 35
