@@ -90,3 +90,22 @@ def test_binding_report_distinguishes_real_empty_search_from_invented_path(monke
         "invalid or unbound argument",
         "bound to real code",
     ]
+
+
+def test_prepared_membership_tracks_physical_splits_instead_of_sixteen_item_assumptions(monkeypatch):
+    from jev_navigator.index.units import Item
+    from jev_navigator.judgments.questions import Check
+
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "examples/pack_case2"))
+    from paid_shape import prepare
+
+    entries = (
+        ({"file": "large.py", "code": "x" * 90000}, Item(f"unit-{i}", "large.py", ((i + 1, i + 1),)))
+        for i in range(16)
+    )
+    requests, members, refusals = prepare((Check("match", "Does {item}.code contain x?"),), entries, {})
+    assert not refusals
+    assert len(requests) > 4
+    assert [len(group) for group in members] == [len(r["state"]["items"]) for r in requests]
+    assert [item["id"] for group in members[:4] for item in group] == [f"unit-{i}" for i in range(4)]
+    assert [item["id"] for group in members for item in group] == [f"unit-{i}" for i in range(16)]
