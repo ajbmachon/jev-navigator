@@ -6,11 +6,11 @@ changes and a $7 cap, including guards. No merge or production profile change.
 
 Use Case 1's environment with the pinned runtime on PYTHONPATH:
 
-- /Users/andremachon/Projects/jev-navigator-role-profile/src
+- /tmp/jvn-reach-677ef3e/src (immutable historical archive)
 - /Users/andremachon/Projects/analysis-engine-role-profile
 - ~/.local/share/system-one-proof/jvn-eval-2026-10-03/jev-lab-roles/find-eval/src
 - ~/.local/share/system-one-proof/jvn-eval-2026-10-03/jev-lab-roles/navigator-evals/src
-- /Users/andremachon/Projects/jev-navigator-case1/measurements/selection
+- ~/.local/share/jvn-takeover/2026-10-03/search-design/case1/selection-harness
 - /Users/andremachon/Projects/jev-navigator-judging
 
 The frozen requests are in the planning repository's
@@ -72,3 +72,23 @@ makes no requests, verifies a positive paid control and all 99 unique failed
 attempt bindings, backs up the original ledger, then appends zero settlements
 through Case 1's Ledger. The original summary stays a historical snapshot; the
 follow-up reconciliation records the current balance.
+
+
+The oversized reach follow-up is split_reach.py (prepare, paid) plus
+split_reach_audit.py. Its paid runtime uses main 7d1686ee extracted to
+/tmp/jvn-main-7d1686ee/src, with the external selection-harness and this
+checkout on PYTHONPATH. It delegates recursive splitting and remeasurement
+to main Judge, preserves frozen original slots and unchanged J1 questions,
+and reuses Case 1 transport/ledger owners through reach_transport.py.
+Every physical send reserves under its separate $0.40 cap. Completed original
+answers are reused only in their full unchanged context.
+
+split_reach_pack.py (before, after) runs in a separate historical-runtime
+process: /tmp/jvn-reach-677ef3e/src and the planning repo's
+search-design/judging/engine-fixed-20261007/scratch replace the JVN and Engine
+entries above. It uses four rooms, including 64,000 characters, under socket
+refusal. It reproduces all old packet hashes before applying new split answers.
+The source, exact wires, raw replies, ledger, results and literal packets are
+retained in search-design/judging/split-reach-20261007. This follow-up judges
+259 excluded logical groups through 573 fresh item batches, reuses 1,709
+unchanged groups and settles $0.273081060 with no remaining reservations.
