@@ -47,3 +47,23 @@ The requested cheap-agent trial is priced and documented in the takeover Case 3 
 `sference/deepseek-v4-flash-0731`, at most five batched tool calls per finding, a 24,000-character
 response cap and an optional total of eight Jev requests per finding. Calls and cumulative billed
 tokens are guards, never elapsed time. No guard or paid agent trial is part of these scripts.
+
+The separately authorized adaptive pilot uses `trial.py`. It reads the frozen sample and prompt,
+continues the existing spend ledger, and exposes only the documented batched tool to the pinned
+Requesty EU model. The provider model catalog is fetched freely before dispatch. Each agent request
+reserves the catalog's complete context-window input bill plus its output allowance, then settles
+reported uncached, cached and output tokens. Unknown usage retains its reservation and stops new
+spend. Optional rank uses the existing Judge, one in-flight group, an isolated persistent answer
+store and exact SDK request and response bytes. No ranking question is changed.
+
+```sh
+uv run --env-file /path/to/requesty.env --env-file /path/to/typesafe.env \
+  --extra typesafe --with tiktoken python measurements/pack_case3/trial.py \
+  --case-folder ~/.local/share/jvn-takeover/2026-10-03/search-design/case3 \
+  --out /path/to/new/authorized-trial-folder
+```
+
+This command makes paid calls. Run it only under the specific recorded approval. The trial reads no
+labels. Each search saves every agent and tool request and response, actual literal source lines,
+its final response, reported token usage, separate agent and Jev dollars and complete wall time.
+Post-run scoring joins those literal lines to the already frozen deciding references.
