@@ -52,8 +52,14 @@ async def main():
                 assert not observed["failure"]
                 rows[group["ordinal"]] = observed["rows"]
                 receipts.append(observed)
-                costs[f"{dataset}:{prefix}:cash_usd"] += Decimal(observed["cash_usd"])
+                costs[f"{dataset}:{prefix}:counted_usd"] += Decimal(observed["cash_usd"])
                 costs[f"{dataset}:{prefix}:configuration_usd"] += Decimal(observed["configuration_usd"])
+                costs[f"{dataset}:{prefix}:known_spend_usd"] += Decimal(
+                    observed.get("known_spend_usd", observed["cash_usd"])
+                )
+                costs[f"{dataset}:{prefix}:pending_reserved_usd"] += Decimal(
+                    observed.get("pending_reserved_usd", "0")
+                )
             judge = Judge(NoProvider(), masker=None, max_calls=0)
             pack, result = await native_pack(relations, index, case, source, judge, rows)
             assert judge.calls == 0 and result.failure is None
@@ -119,7 +125,20 @@ async def main():
             )
         print(f"packed: {cid}", flush=True)
     ledger = Ledger(OUT / "spend-ledger.jsonl", cap="2.00")
-    assert all(e["status"] == "settled" for e in ledger.latest().values())
+    latest = ledger.latest()
+    known = sum((Decimal(e["usd"]) for e in latest.values() if e["status"] == "settled"), Decimal(0))
+    pending = sum((Decimal(e["usd"]) for e in latest.values() if e["status"] == "reserved"), Decimal(0))
+    assert known + pending <= ledger.cap
+    pending_ids = {e["id"] for e in latest.values() if e["status"] == "reserved"}
+    verified_overloads = set()
+    for receipt_path in (OUT / "answers").glob("*/*/http/reach_*/receipt.json"):
+        receipt = load(receipt_path)
+        if receipt["id"] in pending_ids:
+            assert receipt["status"] == 529
+            raw = load(receipt_path.with_name("response.json"))
+            assert raw["detail"]["error_type"] == "system_overloaded"
+            verified_overloads.add(receipt["id"])
+    assert pending_ids == verified_overloads
     write(OUT / "results.json", results)
     write(OUT / "packet-hashes.json", packet_hashes)
     write(
@@ -133,8 +152,10 @@ async def main():
             "weights": prepared["weights"],
             "engine_sha256": sha256(Path(ep.__file__)),
             "paid_attempts": len(ledger.latest()),
-            "step_cash_usd": str(ledger.cap - ledger.balance()),
-            "pending_reserved_usd": "0",
+            "step_counted_usd": str(ledger.cap - ledger.balance()),
+            "known_spend_usd": str(known),
+            "pending_reserved_usd": str(pending),
+            "overload_attempts": len(pending_ids),
             "totals": {k: dict(v) for k, v in totals.items()},
             "costs": {k: str(v) for k, v in costs.items()},
         },

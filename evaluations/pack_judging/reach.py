@@ -9,6 +9,7 @@ import hashlib
 import json
 import time
 from collections import defaultdict
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -240,12 +241,101 @@ def prepared_records():
             yield record
 
 
+def retained_overload(base, observation):
+    if not observation["failure"].startswith("TypeSafeInternalServerError:"):
+        return None
+    paths = list((base / "http").glob("reach_*/receipt.json"))
+    if not paths:
+        return None
+    path = max(paths, key=lambda p: p.stat().st_mtime_ns)
+    receipt = load(path)
+    response = load(path.with_name("response.json"))
+    if receipt["status"] != 529 or response.get("detail", {}).get("error_type") != "system_overloaded":
+        return None
+    return receipt
+
+
+def group_invoice(base, ledger):
+    receipts = [load(p) for p in (base / "http").glob("reach_*/receipt.json")]
+    entries = ledger.latest()
+    known = sum((Decimal(r["usd"]) for r in receipts if "usd" in r), Decimal(0))
+    pending = sum((Decimal(entries[r["id"]]["usd"]) for r in receipts if "usd" not in r), Decimal(0))
+    return known, pending
+
+
 async def run_paid():
     assert load(OUT / "engine-proof.json")["status"] == "PASS"
     assert load(OUT / "meta/free-prepare.json")["provider_calls"] == 0
     credentials()
     ledger = Ledger(OUT / "spend-ledger.jsonl", cap="2.00")
-    semaphore, halted = asyncio.Semaphore(4), asyncio.Event()
+    semaphore, halted = asyncio.Semaphore(2), asyncio.Event()
+
+    async def attempt(record, base):
+        result = base / "observation.json"
+        started = time.perf_counter()
+        session = JevSession(ledger, base / "http", "reach")
+        try:
+            if record["reuse"]:
+                reuse = record["reuse"]
+                wire = load(Path(reuse["wire"]))
+                assert ordered_key(wire) == record["ordered_sha256"]
+                assert all(wire[k] == record["request"][k] for k in ("state", "questions", "model"))
+                write(
+                    base / "http/exact" / (record["ordered_sha256"] + ".json"), load(Path(reuse["response"]))
+                )
+            rows = await judge_group(Judge(session, masker=None, max_calls=1), DESIGN, record["request"])
+            if record["reuse"]:
+                assert not session.receipts
+                receipt = load(Path(record["reuse"]["receipt"]))
+                known, pending = Decimal(receipt["usd"]), Decimal(0)
+            else:
+                assert len(session.receipts) == 1
+                receipt = session.receipts[0]
+                if receipt["status"] != 200 or "usd" not in receipt:
+                    raise RuntimeError("Uncertain provider usage or failed transport stops dispatch")
+                known, pending = group_invoice(base, ledger)
+        except Exception as error:
+            write(
+                result,
+                {
+                    "case": record["case"],
+                    "group": record["group"],
+                    "request_sha256": record["request_sha256"],
+                    "rows": [],
+                    "failure": f"{type(error).__name__}: {error}",
+                    "seconds": time.perf_counter() - started,
+                },
+            )
+            raise
+        write(
+            result,
+            {
+                "case": record["case"],
+                "group": record["group"],
+                "request_sha256": record["request_sha256"],
+                "rows": rows,
+                "seconds": time.perf_counter() - started,
+                "failure": None,
+                "reused": bool(record["reuse"]),
+                "receipt": receipt,
+                "known_spend_usd": str(known),
+                "pending_reserved_usd": str(pending),
+                "cash_usd": "0" if record["reuse"] else str(known + pending),
+                "configuration_usd": str(known + pending),
+            },
+        )
+
+    def preserve_failure(base, observation, receipt):
+        write(
+            base / "failures" / (receipt["id"].replace(":", "_") + ".json"),
+            {
+                **observation,
+                "receipt": receipt,
+                "retry_reason": (
+                    "Confirmed provider system_overloaded response; old reservation stays counted."
+                ),
+            },
+        )
 
     async def one(record):
         base = OUT / "answers" / folder(record["case"]) / str(record["group"])
@@ -253,9 +343,12 @@ async def run_paid():
         if result.exists():
             observation = load(result)
             assert observation["request_sha256"] == record["request_sha256"]
-            if observation["failure"]:
+            if not observation["failure"]:
+                return
+            receipt = retained_overload(base, observation)
+            if receipt is None:
                 raise RuntimeError("Previous failed attempt must be reconciled before resuming")
-            return
+            preserve_failure(base, observation, receipt)
         if not record["eligible"]:
             write(
                 result,
@@ -275,59 +368,28 @@ async def run_paid():
             )
             return
         async with semaphore:
-            if halted.is_set():
-                return
-            started = time.perf_counter()
-            session = JevSession(ledger, base / "http", "reach")
-            try:
-                if record["reuse"]:
-                    reuse = record["reuse"]
-                    wire = load(Path(reuse["wire"]))
-                    assert ordered_key(wire) == record["ordered_sha256"]
-                    assert all(wire[k] == record["request"][k] for k in ("state", "questions", "model"))
-                    write(
-                        base / "http/exact" / (record["ordered_sha256"] + ".json"),
-                        load(Path(reuse["response"])),
+            while not halted.is_set():
+                try:
+                    await attempt(record, base)
+                    return
+                except Exception:
+                    observation = load(result)
+                    receipt = retained_overload(base, observation)
+                    if receipt is None:
+                        halted.set()
+                        raise
+                    preserve_failure(base, observation, receipt)
+                    print(
+                        json.dumps(
+                            {
+                                "overload_retry": record["case"],
+                                "group": record["group"],
+                                "reserved": receipt["id"],
+                            }
+                        ),
+                        flush=True,
                     )
-                rows = await judge_group(Judge(session, masker=None, max_calls=1), DESIGN, record["request"])
-                if record["reuse"]:
-                    assert not session.receipts
-                    receipt = load(Path(record["reuse"]["receipt"]))
-                else:
-                    assert len(session.receipts) == 1
-                    receipt = session.receipts[0]
-                    if receipt["status"] != 200 or "usd" not in receipt:
-                        raise RuntimeError("Uncertain provider usage or failed transport stops dispatch")
-                failure = None
-            except Exception as error:
-                halted.set()
-                write(
-                    result,
-                    {
-                        "case": record["case"],
-                        "group": record["group"],
-                        "request_sha256": record["request_sha256"],
-                        "rows": [],
-                        "failure": f"{type(error).__name__}: {error}",
-                        "seconds": time.perf_counter() - started,
-                    },
-                )
-                raise
-            write(
-                result,
-                {
-                    "case": record["case"],
-                    "group": record["group"],
-                    "request_sha256": record["request_sha256"],
-                    "rows": rows,
-                    "seconds": time.perf_counter() - started,
-                    "failure": failure,
-                    "reused": bool(record["reuse"]),
-                    "receipt": receipt,
-                    "cash_usd": "0" if record["reuse"] else receipt["usd"],
-                    "configuration_usd": receipt["usd"],
-                },
-            )
+                    await asyncio.sleep(2)
 
     lower = 0
     started = time.perf_counter()

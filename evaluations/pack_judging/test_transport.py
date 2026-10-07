@@ -144,3 +144,97 @@ def test_exact_jev_group_cache_reuses_raw_but_changed_companion_requires_reserve
     with pytest.raises(CapStopError):
         asyncio.run(judge_group(Judge(session, masker=None, max_calls=1), DESIGN, changed))
     assert not session.receipts and not ledger.events
+
+
+def test_provider_overload_retries_exact_group_with_a_new_counted_reservation(tmp_path, monkeypatch):
+    import asyncio
+    from functools import partial
+
+    import paid_client
+    from typesafe_sdk import TypeSafeClient
+
+    from . import reach
+    from .designs import identity, jev_request
+    from .frozen import load
+    from .prepare import write
+
+    sent = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            wire = self.rfile.read(int(self.headers["Content-Length"]))
+            sent.append(wire)
+            request = json.loads(wire)
+            if len(sent) == 1:
+                status = 529
+                reply = {"detail": {"error_type": "system_overloaded", "message": "Try again later"}}
+            else:
+                status = 200
+                reply = {
+                    "model": "fixture",
+                    "usage": {"input_tokens": 100, "output_tokens": 1},
+                    "answers": {qid: {"type": "noul", "noul": 0.9} for qid in request["questions"]},
+                }
+            body = json.dumps(reply).encode()
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    request = jev_request(
+        reach.DESIGN,
+        {
+            "state": {
+                "targets": {"p0": "Reject negative quantities"},
+                "items": [{"file": "owner.py", "code": "return q"}] * 16,
+            }
+        },
+    )
+    record = {
+        "case": "fixture",
+        "group": 0,
+        "eligible": True,
+        "reuse": None,
+        "request": request,
+        "request_sha256": identity(request),
+    }
+    monkeypatch.setattr(reach, "OUT", tmp_path)
+    monkeypatch.setattr(reach, "PREFIXES", (8,))
+    monkeypatch.setattr(reach, "credentials", lambda: None)
+    monkeypatch.setattr(reach, "prepared_records", lambda: iter([record]))
+    monkeypatch.setattr(paid_client, "resources", lambda: None)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "fixture")
+    write(tmp_path / "engine-proof.json", {"status": "PASS"})
+    write(tmp_path / "meta/free-prepare.json", {"provider_calls": 0})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(
+        paid_client,
+        "TypeSafeClient",
+        partial(TypeSafeClient, base_url=f"http://127.0.0.1:{server.server_port}"),
+    )
+    try:
+        asyncio.run(reach.run_paid())
+        assert len(sent) == 2 and sent[0] == sent[1]
+        ledger = Ledger(tmp_path / "spend-ledger.jsonl", cap="2.00")
+        assert sorted(e["status"] for e in ledger.latest().values()) == ["reserved", "settled"]
+        base = tmp_path / "answers/fixture/0"
+        failure = load(next((base / "failures").glob("*.json")))
+        assert failure["receipt"]["status"] == 529
+        observation = load(base / "observation.json")
+        assert observation["failure"] is None and len(observation["rows"]) == 16
+        assert float(observation["pending_reserved_usd"]) > 0
+        assert (
+            load(base / "http" / failure["receipt"]["id"].replace(":", "_") / "response.json")[
+                "detail"
+            ]["error_type"]
+            == "system_overloaded"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
