@@ -81,7 +81,7 @@ def _source_variants(record, index, shown_files):
     variants = defaultdict(list)
     for unit in record["units"]:
         file = unit["path"]
-        if file not in shown_files:
+        if file not in shown_files or file not in index.files:
             continue
         ranges = [unit["ranges"], *[[[piece["start"], piece["end"]]] for piece in unit.get("pieces", ())]]
         for runs in ranges:
@@ -104,16 +104,19 @@ def _source_variants(record, index, shown_files):
 
 def _bind(item, variants, index):
     from find_eval.frozen_inputs import source_matches_masked
+    from find_eval.masked_labels import _same_file
 
     file, shown = item["file"], item["code"]
     matches = [
         unit
-        for unit in variants[file]
+        for canonical_file in variants
+        if _same_file(file, canonical_file)
+        for unit in variants[canonical_file]
         if unit["raw_code"] == shown
-        or ("[MASKED]" in shown and source_matches_masked(unit["raw_code"], shown, file))
+        or ("[MASKED]" in shown and source_matches_masked(unit["raw_code"], shown, canonical_file))
     ]
     # Limit-driven splitting can create a contiguous piece not frozen in the candidate file.
-    if not matches and "[MASKED]" not in shown:
+    if not matches and "[MASKED]" not in shown and file in index.files:
         source = "\n".join(index.lines(file))
         offset = source.find(shown)
         if offset >= 0 and (offset == 0 or source[offset - 1] == "\n"):
@@ -159,11 +162,15 @@ def _bind(item, variants, index):
 
 
 def _observations(record, relations, groups, request):
+    from find_eval.masked_labels import _same_file
     from jev_navigator.judgments.profiles import ROLES_V2
 
     from jev_navigator.index.code_index import CodeIndex
 
-    shown_files = {item["file"] for group in groups for item in group["state"]["items"]}
+    sent_files = {item["file"] for group in groups for item in group["state"]["items"]}
+    shown_files = {
+        unit["path"] for unit in record["units"] if any(_same_file(sent, unit["path"]) for sent in sent_files)
+    }
     index = CodeIndex(relations._repo, sorted(file for file in shown_files if relations.readable(file)))
     variants = _source_variants(record, index, shown_files)
     units, pairs, observations, bindings, unbound = {}, {}, {}, [], []

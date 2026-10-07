@@ -154,3 +154,31 @@ def test_historical_evaluation_budget_does_not_change_production_minimum():
     assert budget.floor_chars == 14_400
     assert budget.header_chars == budget.facts_chars == 1_440
     assert isinstance(budget, PacketBudget)
+
+
+@pytest.mark.parametrize("shown_file,expected_references", [("[MASKED].py", 3), ("missing/[MASKED].py", 0)])
+def test_masked_request_paths_bind_uniquely_or_remain_unknown(case, shown_file, expected_references):
+    for item in case[4][0]["state"]["items"]:
+        item["file"] = shown_file
+    result = measure_case(*case)
+    assert result["judged_reach"]["references"] == expected_references
+    assert len(result["judged_reach"]["unbound"]) == (0 if expected_references else 2)
+
+
+def test_masked_path_binding_does_not_read_excluded_candidates(case):
+    from pathlib import Path
+
+    from enginepy.workflows.document_analysis.code_relations import CodeRelations
+
+    record, pack, relations, request, groups, labels = case
+    root = Path(relations._repo)
+    (root / "vendor").mkdir()
+    (root / "vendor/app.py").write_text((root / "app.py").read_text())
+    run(["git", "-C", str(root), "add", "vendor/app.py"], check=True)
+    record["units"].append({**record["units"][0], "id": "excluded", "path": "vendor/app.py"})
+    relations = CodeRelations(str(root), ({}, {}), withheld=frozenset({"vendor/app.py"}))
+    for item in groups[0]["state"]["items"]:
+        item["file"] = "[MASKED].py"
+    result = measure_case(record, pack, relations, request, groups, labels)
+    assert result["judged_reach"]["references"] == 3
+    assert result["judged_reach"]["unbound"] == []

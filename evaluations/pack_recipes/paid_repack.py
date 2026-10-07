@@ -102,7 +102,10 @@ def repack(out, limit=None):
     result_path = out / "paid/results.json"
     results = load(result_path)
     by_case = {(result["dataset"], result["case"]): position for position, result in enumerate(results)}
-    protected = [{key: value for key, value in result.items() if key != "measurement"} for result in results]
+    protected = [
+        {key: value for key, value in result.items() if key not in {"measurement", "rooms_pending"}}
+        for result in results
+    ]
     scopes, measured, skipped, seen = {}, [], [], set()
     started = time.monotonic()
     for dataset in ("dev110", "hard27"):
@@ -150,6 +153,7 @@ def repack(out, limit=None):
             measurement = measure_case(record, pack, relations, request, groups, record["labels"])
             save(folder / "measurements.json", measurement)
             results[position]["measurement"] = measurement
+            results[position].pop("rooms_pending", None)
             measured.append(
                 {
                     "dataset": dataset,
@@ -174,7 +178,10 @@ def repack(out, limit=None):
         "seconds": time.monotonic() - started,
         "combined_results_updated": limit is None,
     }
-    unchanged = [{key: value for key, value in result.items() if key != "measurement"} for result in results]
+    unchanged = [
+        {key: value for key, value in result.items() if key not in {"measurement", "rooms_pending"}}
+        for result in results
+    ]
     if protected != unchanged:
         raise RuntimeError("Free repacking changed original paid metrics")
     if limit is None:

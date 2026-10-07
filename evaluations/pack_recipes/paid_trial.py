@@ -51,6 +51,8 @@ class PaidClient:
                     self.cached.setdefault(group["key"], group)
             self.calls += 1
 
+        self.cached_at_start = bool(self.cached)
+
     def ask(self, state, questions):
         import httpx2
         from typesafe_sdk import Noul, RetryPolicy, TypeSafeClient
@@ -216,19 +218,13 @@ async def trial(out, limit):
                     "failure": pack.failure,
                     "requests": len(client.groups),
                     "labels": record["labels"],
-                    "judgment_seconds": time.monotonic() - started,
+                    "judgment_seconds": None if client.cached_at_start else time.monotonic() - started,
+                    "resumed_from_paid_receipts": client.cached_at_start,
                     "http_sum_seconds": sum(g.get("seconds", 0) for g in client.groups),
                     "usd": sum(g["usd"] for g in client.groups),
                     "units_judged": sum(len(g["state"]["items"]) for g in client.groups),
                 }
-                try:
-                    from paid_rooms import measure_case
-
-                    result["measurement"] = measure_case(
-                        record, pack, relations, request, client.groups, record["labels"]
-                    )
-                except ImportError:
-                    result["rooms_pending"] = True
+                result["rooms_pending"] = True
             results = [r for r in results if (r["dataset"], r["case"]) != (dataset, cid)]
             results.append(result)
             save(path, results)

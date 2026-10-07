@@ -42,12 +42,14 @@ def summarize(out):
             "rooms": {},
         }
         for field in ("requests", "usd", "judgment_seconds", "http_sum_seconds", "units_judged"):
-            values = [row.get(field, 0) for row in selected]
+            reported = [row.get(field, None if field == "judgment_seconds" else 0) for row in selected]
+            values = [value for value in reported if value is not None]
             arm[field] = {
                 "total": sum(values),
-                "mean": statistics.mean(values),
-                "median": statistics.median(values),
-                "maximum": max(values),
+                "mean": statistics.mean(values) if values else None,
+                "median": statistics.median(values) if values else None,
+                "maximum": max(values) if values else None,
+                "not_reported": len(reported) - len(values),
             }
         for row in selected:
             reach = row.get("measurement", {}).get("judged_reach", {})
