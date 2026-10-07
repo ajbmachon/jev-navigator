@@ -170,7 +170,7 @@ def input_anchors(row):
         path = evidence.get("file")
         if not path:
             continue
-        explicit = evidence.get("first_line") or evidence.get("start")
+        explicit = evidence.get("first_line") or evidence.get("start") or evidence.get("line")
         lines = evidence.get("lines")
         if lines:
             explicit = lines[0]
@@ -193,6 +193,16 @@ def canonical_source_units(units):
     return canonical, identities
 
 
+def cached_features_current(path, row):
+    """Reuse features only when their receipt records the current citation seeds."""
+    receipt_path = path.with_suffix(".json")
+    if not path.exists() or not receipt_path.exists():
+        return False
+    recorded = load(receipt_path).get("anchors")
+    # Receipts use JSON lists; order and repeated citations do not change seeds.
+    return recorded is not None and {tuple(anchor) for anchor in recorded} == set(input_anchors(row))
+
+
 def build_features(db, cases, inputs, out, *, limit=None):
     import numpy as np
 
@@ -201,7 +211,12 @@ def build_features(db, cases, inputs, out, *, limit=None):
         grouped[inputs[case["case_id"]]["repository"]].append(case)
     timings = []
     for root, root_cases in grouped.items():
-        if all((out / (case["case_id"].replace(":", "_") + ".npz")).exists() for case in root_cases):
+        if all(
+            cached_features_current(
+                out / (case["case_id"].replace(":", "_") + ".npz"), inputs[case["case_id"]]
+            )
+            for case in root_cases
+        ):
             print(json.dumps({"resumed_complete_root": root}), flush=True)
             continue
         files = [row[0] for row in db.execute("select distinct path from documents where root=?", (root,))]
@@ -290,7 +305,7 @@ def build_features(db, cases, inputs, out, *, limit=None):
         for case in root_cases[:limit]:
             cid = case["case_id"]
             path = out / (cid.replace(":", "_") + ".npz")
-            if path.exists():
+            if cached_features_current(path, inputs[cid]):
                 continue
             started = time.monotonic()
             row = inputs[cid]
