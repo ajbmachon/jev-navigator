@@ -42,3 +42,12 @@ JSON-schema replies were blank. Their 99 uncertain reservations remain charged
 against the cap and all raw attempts remain in failed-schema-transport. Systemic
 missing-content/usage failures halt dispatch. summarize.py reconciles the saved
 packets and the append-only ledger without a provider call.
+
+Execution is complete: J4-1, J1-3 and L1-3 each attempted all 984 original groups.
+Two L1 replies contain unoffered ids and remain failed observations. The other
+2,950 group observations are usable. All 369 arm/finding rows have lab and real
+Engine replays at three rooms, without provider calls. Run summarize and audit
+as modules to reconcile costs, verify original companions and literal packet
+sizes, compare gained/lost lines against R0, and hash raw artifacts. The report
+is search-design/judging/REPORT.md in the planning repository. Production
+profiles remain unchanged, and this branch is not merged.

@@ -122,9 +122,13 @@ def main():
     write(OUT / "baseline-pilot.json", baseline_pilot)
     write(OUT / "per-finding-results.json", rows)
     summary = {
-        "status": "COMPLETE"
-        if all(r["expected_groups"] == r["present_groups"] and not r["failed_groups"] for r in coverage)
-        else "INCOMPLETE",
+        "status": (
+            "INCOMPLETE"
+            if any(r["expected_groups"] != r["present_groups"] for r in coverage)
+            else "COMPLETE_WITH_FAILURES"
+            if any(r["failed_groups"] for r in coverage)
+            else "COMPLETE"
+        ),
         "arms": aggregate(rows),
         "coverage": coverage,
         "money": {

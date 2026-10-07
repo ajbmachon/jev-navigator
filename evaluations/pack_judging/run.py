@@ -622,6 +622,7 @@ async def report(cases):
                 "lab": lab,
                 "native": native,
                 "packing_seconds": time.perf_counter() - started,
+                "no_anchor": pack is None,
                 "provider_calls": 0,
                 "failure": pack.failure if pack else None,
             }

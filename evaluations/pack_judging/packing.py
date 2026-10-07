@@ -145,5 +145,17 @@ def native_rooms(pack, relations, context, labels, destination):
             "delivered": [(label["file"], label["first_line"]) in shown for label in labels],
             "chars": len(text),
             "selected_units": len(pack.units) if pack else 0,
+            "within_room": len(text) <= room * 4,
+            "regions": [
+                {
+                    "role": region.role,
+                    "file": region.file,
+                    "first_line": region.start,
+                    "last_line": region.end,
+                }
+                for region in packet.regions
+            ]
+            if packet
+            else [],
         }
     return result
