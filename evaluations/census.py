@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import re
@@ -31,6 +32,89 @@ def load(path):
 
 def in_range(line, span):
     return span[0] <= line <= span[1]
+
+
+def resolve_unregistered_holder(reader, index, file, line):
+    """Resolve through JVN; never turn a citation into a source window."""
+    resolved, problem = reader.resolve(LineAnchor(file, line))
+    if resolved:
+        unit = min(resolved, key=lambda u: sum(b - a + 1 for a, b in u.ranges))
+        return [list(r) for r in unit.ranges], unit.symbol, str(unit.kind)
+    assert file.endswith("source-inventory-contract.mjs"), (file, line, problem)
+    return [[1, len(index.lines(file))]], "<unparsed file>", "unparsed"
+
+
+def write_tables(census, summaries):
+    with (OUT / "census.tsv").open("w") as file:
+        writer = csv.writer(file, delimiter="\t", lineterminator="\n")
+        writer.writerow(
+            [
+                "population",
+                "case",
+                "file",
+                "line",
+                "unit",
+                "ranges",
+                "candidate_bound",
+                "primary",
+                "all_categories",
+                "word_or_name_match",
+                "cited_name_match",
+                "kept_rules",
+                "callees",
+            ]
+        )
+        for row in census:
+            writer.writerow(
+                [
+                    row["population"],
+                    row["case"],
+                    row["file"],
+                    row["line"],
+                    row["unit"]["symbol"],
+                    json.dumps(row["unit"]["ranges"]),
+                    row["unit"]["registered_candidate"],
+                    row["primary"],
+                    "; ".join(row["categories"]),
+                    row["word_or_name_match"],
+                    row["cited_name_match"],
+                    ",".join(k for k, v in row["kept_by"].items() if v),
+                    json.dumps(row["callees"]),
+                ]
+            )
+    with (OUT / "rules.tsv").open("w") as file:
+        writer = csv.writer(file, delimiter="\t", lineterminator="\n")
+        writer.writerow(
+            [
+                "population",
+                "rule",
+                "kept",
+                "labels",
+                "holding_units",
+                "whole_lines",
+                "kept_lines",
+                "source_share",
+                "whole_tokens_estimate",
+                "kept_tokens_estimate",
+                "token_share",
+            ]
+        )
+        for row in summaries:
+            writer.writerow(
+                [
+                    row["population"],
+                    row["rule"],
+                    row["kept"],
+                    row["labels"],
+                    row["holding_units"],
+                    row["whole_lines"],
+                    row["kept_lines"],
+                    row["kept_lines"] / row["whole_lines"],
+                    row["whole_tokens_estimate"],
+                    row["kept_tokens_estimate"],
+                    row["kept_tokens_estimate"] / row["whole_tokens_estimate"],
+                ]
+            )
 
 
 def classify(line, source, facts, query):
@@ -196,15 +280,9 @@ def main():
             else:
                 # Resolve real holding units for floors and withheld tests.
                 # A target citation never supplies an excerpt window.
-                resolved, problem = readers[root].resolve(LineAnchor(file, line))
-                if resolved:
-                    unit = min(resolved, key=lambda u: sum(b - a + 1 for a, b in u.ranges))
-                    runs = [list(r) for r in unit.ranges]
-                    symbol, kind = unit.symbol, str(unit.kind)
-                else:
-                    assert file.endswith("source-inventory-contract.mjs"), (cid, file, problem)
-                    runs = [[1, len(structures[root].index.lines(file))]]
-                    symbol, kind = "<unparsed file>", "unparsed"
+                runs, symbol, kind = resolve_unregistered_holder(
+                    readers[root], structures[root].index, file, line
+                )
                 registered = False
             lines = structures[root].index.lines(file)
             source = {n: lines[n - 1] for a, b in runs for n in range(a, b + 1)}
@@ -264,6 +342,7 @@ def main():
     (OUT / "census.jsonl").write_text("".join(json.dumps(r) + "\n" for r in census))
     (OUT / "holding-units.json").write_text(json.dumps(unit_rows, indent=2) + "\n")
     (OUT / "rule-summary.json").write_text(json.dumps(summaries, indent=2) + "\n")
+    write_tables(census, summaries)
     counts = {
         pop: {
             "primary": dict(Counter(r["primary"] for r in census if r["population"] == pop)),

@@ -155,6 +155,12 @@ class Structure:
         groups = defaultdict(list)
         for file in files:
             language = parse_language(file, (self.root / file).read_bytes())
+            if language:
+                # CodeIndex owns grammar recovery, including JavaScript read
+                # again as Flow when that grammar parses more of the file.
+                indexed = self.index._facts_in(file)
+                language = indexed.language
+                self._facts[file]["refused"] = indexed.refusal or ""
             self._facts[file]["language"] = language
             if language:
                 groups[language].append(file)
@@ -170,7 +176,7 @@ class Structure:
                 record = {"range": [a, b], "text": m["text"], "kind": m["ruleId"].split("_", 1)[1]}
                 if role in {"signature", "condition"}:
                     c = part["range"]["start"]["line"] + 1 if part else a + 1
-                    record["header"] = [a, max(a, c - 1 if language == "python" else c)]
+                    record["header"] = [a, max(a, c - 1 if language == "python" else c)] if part else [a, a]
                     record["body_start"] = c
                 if role == "assignment":
                     record["target_text"] = part["text"]
