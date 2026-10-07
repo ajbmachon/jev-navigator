@@ -1051,12 +1051,13 @@ class CodeIndex:
             return None
         definitions = tuple(
             span
-            for exporter in exporters
-            for span in self._read_importable_definitions(exporter.path, name, role)
+            for exporter, exported in exporters
+            for span in self._read_importable_definitions(exporter.path, exported, role)
         )
-        hiding = {exporter.path for exporter in exporters if self._hides(exporter.path, name)}
+        hiding = {exporter.path for exporter, exported in exporters if self._hides(exporter.path, exported)}
         return binding_from_facts(
-            CallFacts(file, name, None, definitions, (), definitions, exporters, hiding)
+            CallFacts(file, name, None, definitions, (), definitions,
+                      tuple(exporter for exporter, _ in exporters), hiding)
         )
 
     def _hides(self, exporter: str, name: str) -> bool:
@@ -1128,7 +1129,7 @@ class CodeIndex:
         return own_names | {exported: frozenset(owns) for exported, owns in renamed.items()}
 
     @memoized
-    def _read_exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
+    def _read_exporters(self, file: str, specifier: str, name: str) -> tuple[tuple[ImportFact, str], ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
         ``name`` from that exports it or may hide it (see ``_hides``), with the evidence for each."""
         resolved = resolve_import(
@@ -1136,14 +1137,15 @@ class CodeIndex:
         )
         if resolved is None:
             return ()
-        found = {resolved.path: resolved}
-        pending = [resolved]
-        seen = {(resolved.path, resolved.proven)}
+        found = {(resolved.path, name): (resolved, name)}
+        pending = [(resolved, name)]
+        seen = {(resolved.path, name, resolved.proven)}
         while pending:
-            exporter = pending.pop()
+            exporter, exported = pending.pop()
             for names, target_specifier in self._read_reexports(exporter.path):
-                if names is not None and name not in names:
+                if names is not None and exported not in names:
                     continue
+                source_name = exported if names is None else names[exported]
                 target = resolve_import(
                     target_specifier,
                     exporter.path,
@@ -1158,19 +1160,19 @@ class CodeIndex:
                     exporter.proven and target.proven,
                     target.reason if exporter.proven else exporter.reason,
                 )
-                identity = (inherited.path, inherited.proven)
+                identity = (inherited.path, source_name, inherited.proven)
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if self._hides(inherited.path, name) or self._exports(inherited.path, name):
-                    prior = found.get(inherited.path)
+                if self._hides(inherited.path, source_name) or self._exports(inherited.path, source_name):
+                    prior = found.get((inherited.path, source_name))
                     if prior is None or inherited.proven:
-                        found[inherited.path] = inherited
-                pending.append(inherited)
+                        found[(inherited.path, source_name)] = (inherited, source_name)
+                pending.append((inherited, source_name))
         return tuple(found.values())
 
     @memoized
-    def _read_reexports(self, file: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
+    def _read_reexports(self, file: str) -> tuple[tuple[dict[str, str] | None, str], ...]:
         return reexported_names("\n".join(self._lines_of(file)), file)
 
     @memoized
