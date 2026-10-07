@@ -120,7 +120,7 @@ class PaidClient:
             raise
 
 
-async def trial(out, limit, repack_only):
+async def trial(out, limit):
     from enginepy.workflows.document_analysis import evidence_pack as ep
     from enginepy.workflows.document_analysis.code_relations import CodeRelations
     from enginepy.workflows.document_analysis.import_neighbors import repository_import_maps
@@ -142,7 +142,7 @@ async def trial(out, limit, repack_only):
     path = out / "paid/results.json"
     if path.exists():
         results = load(path)
-    done = {(r["dataset"], r["case"]) for r in results} if not repack_only else set()
+    done = {(r["dataset"], r["case"]) for r in results}
     original_search = ep.find_all_async
     scopes = {}
     total = 0
@@ -192,12 +192,6 @@ async def trial(out, limit, repack_only):
                     )
                     return await original_search(index, judge, targets, **options)
 
-                if repack_only:
-
-                    def refuse(*_args, **_kwargs):
-                        raise SpendStopError("Free repack cannot dispatch a new request")
-
-                    client.ledger.reserve = refuse
                 judge = Judge(client, scanner=None, max_calls=8, items_per_request=16)
                 ep.find_all_async = configured
                 try:
@@ -260,9 +254,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--repack-only", action="store_true")
     args = parser.parse_args()
-    asyncio.run(trial(args.out, args.limit, args.repack_only))
+    asyncio.run(trial(args.out, args.limit))
 
 
 if __name__ == "__main__":

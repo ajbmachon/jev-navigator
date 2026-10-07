@@ -53,6 +53,25 @@ def summarize(out):
             reach = row.get("measurement", {}).get("judged_reach", {})
             arm["judged_reach"] += reach.get("references", 0)
             arm["unbound_bodies"] += len(reach.get("unbound", []))
+        arm["native_selection_losses"] = (
+            sum(
+                judged["judged"] and not eligible["selected"]
+                for row in selected
+                for judged, eligible in zip(
+                    row.get("measurement", {}).get("judged_reach", {}).get("labels", []),
+                    row.get("measurement", {}).get("native_before_fitting", {}).get("labels", []),
+                    strict=True,
+                )
+            )
+            if all(
+                "native_before_fitting" in row.get("measurement", {}) or row["failure"] for row in selected
+            )
+            else None
+        )
+        arm["native_before_fitting"] = sum(
+            row.get("measurement", {}).get("native_before_fitting", {}).get("references", 0)
+            for row in selected
+        )
         for room in ("7200", "20000", "36000"):
             arm["rooms"][room] = {}
             for path in ("lab", "native"):
@@ -65,6 +84,14 @@ def summarize(out):
                     .get(path, {})
                     .get("labels", [])
                 )
+            arm["rooms"][room]["native_fitting_losses"] = sum(
+                row.get("measurement", {})
+                .get("rooms", {})
+                .get(room, {})
+                .get("native", {})
+                .get("fitting_lost_references", 0)
+                for row in selected
+            )
         summary["arms"][f"{dataset}/{recipe}"] = arm
     (out / "paid/summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
