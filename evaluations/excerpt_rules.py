@@ -310,7 +310,13 @@ def selected_lines(source, facts, query, rule):
 
 
 def render_excerpt(source, facts, query, rule):
-    selected = selected_lines(source, facts, query, rule)
+    return render_selection(source, selected_lines(source, facts, query, rule))
+
+
+def render_selection(source, selected):
+    """Price and expose every omission using the same renderer for both studies."""
+    selected = set(selected)
+    assert selected <= source.keys()
     body = []
     for a, b in ranges(source):
         cursor = a
