@@ -182,3 +182,32 @@ def test_masked_path_binding_does_not_read_excluded_candidates(case):
     result = measure_case(record, pack, relations, request, groups, labels)
     assert result["judged_reach"]["references"] == 3
     assert result["judged_reach"]["unbound"] == []
+
+
+def test_native_listed_holder_body_binds_beyond_frozen_nested_anchor(case):
+    from pathlib import Path
+
+    record, pack, relations, request, groups, _labels = case
+    body = (
+        "def outer():\n    class Runtime:\n        def run(self):\n            return 1\n    return Runtime()"
+    )
+    (Path(relations._repo) / "app.py").write_text(body + "\n")
+    record["units"] = [
+        {"id": "nested", "path": "app.py", "ranges": [[3, 4]], "symbol": "Runtime.run", "pieces": []}
+    ]
+    group = groups[0]
+    group["state"]["items"] = [{"file": "app.py", "code": body}]
+    group["questions"] = {key: value for key, value in group["questions"].items() if key.endswith("#0")}
+    group["response"]["answers"] = {
+        key: value for key, value in group["response"]["answers"].items() if key.endswith("#0")
+    }
+    labels = [{"file": "app.py", "first_line": n, "last_line": n} for n in (1, 5)]
+    result = measure_case(record, pack, relations, request, groups, labels)
+    assert result["judged_reach"]["unbound"] == []
+    assert result["judged_reach"]["references"] == 2
+    source = result["judged_reach"]["bindings"][0]["source"]
+    assert source["place"] == "app.py:1-5"
+    assert tuple(map(tuple, source["extent"])) == tuple(map(tuple, source["runs"])) == ((1, 5),)
+    assert source["name"] == "outer"
+    assert source["source_anchor"] == {"file": "app.py", "start": 3, "end": 4}
+    assert all(label["delivered"] for label in result["rooms"]["36000"]["lab"]["labels"])

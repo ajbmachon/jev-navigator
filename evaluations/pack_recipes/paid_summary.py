@@ -18,7 +18,8 @@ def summarize(out):
         "usage": {},
         "arms": {},
         "failures": Counter(row["failure"] for row in records if row["failure"]),
-        "rooms_pending": sum("measurement" not in row for row in records),
+        "rooms_pending": sum("measurement" not in row and not row["failure"] for row in records),
+        "no_anchor_findings": sum(row["failure"] == "no readable anchor" for row in records),
     }
     for category in ("planner", "agent", "guard", "jev"):
         observed = [row for row in usage if row["category"] == category]

@@ -75,14 +75,14 @@ def _labels(labels, windows, key="delivered"):
 
 
 def _source_variants(record, index, shown_files):
-    """Materialize only files sent in actual groups, from the frozen candidate identities."""
-    from jev_navigator.index.units import read_ranges
+    """Bind frozen anchors through the same listed-unit owner as the actual search."""
+    from jev_navigator.index.languages import language_read
+    from jev_navigator.index.units import RangeAnchor, Reading, read_ranges, resolve_each
 
     variants = defaultdict(list)
-    for unit in record["units"]:
+
+    def append(unit, order, source_anchor):
         file = unit["path"]
-        if file not in shown_files or file not in index.files:
-            continue
         ranges = [unit["ranges"], *[[[piece["start"], piece["end"]]] for piece in unit.get("pieces", ())]]
         for runs in ranges:
             raw = read_ranges(index, file, runs)
@@ -97,8 +97,34 @@ def _source_variants(record, index, shown_files):
                     "raw_code": raw,
                     "numbered": numbered,
                     "numbered_chars": len(numbered),
+                    "source_order": order,
+                    "source_anchor": source_anchor,
                 }
             )
+
+    by_file = defaultdict(list)
+    for order, unit in enumerate(record["units"]):
+        file = unit["path"]
+        if file in shown_files and file in index.files:
+            by_file[file].append((order, unit))
+    for file, candidates in by_file.items():
+        anchors, orders = [], []
+        for order, unit in candidates:
+            append(unit, (order, 0, 0), None)
+            for position, (start, end) in enumerate(unit["ranges"]):
+                anchors.append(RangeAnchor(file, start, end))
+                orders.append((order, position))
+        # #148 has CODE/TEXT readings. Choosing per file admits exactly the mixed
+        # source types while retaining that archived resolver's unit boundaries.
+        reading = Reading.CODE if language_read(file) else Reading.TEXT
+        resolved = resolve_each(index, anchors, box_chars=76_800, listed_only=True, reading=reading)
+        seen = set()
+        for (order, position), (anchor, units, _problem) in zip(orders, resolved, strict=True):
+            for emitted, unit in enumerate(units):
+                if unit.id in seen:
+                    continue
+                seen.add(unit.id)
+                append(asdict(unit), (order, position, emitted), asdict(anchor))
     return variants
 
 
@@ -175,7 +201,6 @@ def _observations(record, relations, groups, request):
     variants = _source_variants(record, index, shown_files)
     units, pairs, observations, bindings, unbound = {}, {}, {}, [], []
     asked = ROLES_V2.asked(request.points)
-    candidate_order = {unit["id"]: order for order, unit in enumerate(record["units"])}
     point_order = {point: order for order, point in enumerate(request.points)}
     for group_number, group in enumerate(groups):
         answers = group.get("response", {}).get("answers", {})
@@ -218,7 +243,7 @@ def _observations(record, relations, groups, request):
                 # HTTP completion order is incidental. Frozen candidate order and
                 # piece position reproduce the configured search's logical order.
                 order = (
-                    candidate_order[unit["place"]],
+                    unit["source_order"],
                     tuple(map(tuple, unit["runs"])),
                     point_order[point],
                     group["key"],
