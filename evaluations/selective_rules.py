@@ -144,6 +144,7 @@ def select_lines(source, facts, terms, citations, rule):
         for line in focus:
             excerpt_rules._add(selected, [line - 40, line + 48], visible)
     elif rule.startswith(("S", "C")):
+        around_focus = set(focus)
         for line in sorted(focus):
             exits = [
                 e
@@ -161,11 +162,12 @@ def select_lines(source, facts, terms, citations, rule):
                         e["range"][0],
                     ),
                 )
-                excerpt_rules._add(selected, nearest["range"], visible)
+                excerpt_rules._add(around_focus, nearest["range"], visible)
         for call in facts.get("calls", []):
             if focus.intersection(range(call["range"][0], call["range"][1] + 1)):
-                excerpt_rules._add(selected, call["range"], visible)
-        excerpt_rules._condition_closure(selected, facts, visible)
+                excerpt_rules._add(around_focus, call["range"], visible)
+        excerpt_rules._condition_closure(around_focus, facts, visible)
+        selected.update(around_focus)
     if rule.startswith("C"):
         cap = int(rule.split("_")[1])
         grouped = {}

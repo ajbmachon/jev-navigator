@@ -105,3 +105,20 @@ def test_agent_window_is_asymmetric_and_clipped_with_exact_markers():
     body = render_selection(source, chosen)["body"]
     assert "... ELIDED lines 2-39 (38 lines) ..." in body
     assert "... ELIDED lines 129-160 (32 lines) ..." in body
+
+
+def test_structure_without_focus_does_not_expand_unrelated_header_condition(repo):
+    path = repo / "sample.py"
+    path.write_text("""def outer(flag):
+    if flag:
+        def nested():
+            return 2
+    return 1
+""")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    facts = Structure(repo, ["sample.py"]).facts("sample.py")
+    source = source_of(path)
+    rare, _ = select_lines(source, facts, ("missing",), [], "R3")
+    structure, _ = select_lines(source, facts, ("missing",), [], "S3")
+    assert structure == rare
+    assert 2 not in structure
