@@ -90,7 +90,6 @@ def test_failed_physical_send_is_not_retried_and_keeps_unknown_spend_reserved(tr
     ledger = trial.SpendLedger(tmp_path / "ledger.jsonl", cap="3.00")
     record = {
         "ordinal": 1,
-        "request_sha256": "request-one",
         "request": {
             "model": "jev-latest",
             "state": "sample",
@@ -99,6 +98,12 @@ def test_failed_physical_send_is_not_retried_and_keeps_unknown_spend_reserved(tr
             },
         },
     }
+    record["request_sha256"] = trial.content_hash(
+        {
+            "state": record["request"]["state"],
+            "questions": record["request"]["questions"],
+        }
+    )
     with pytest.raises(TypeSafeInternalServerError):
         trial.send(ledger, tmp_path, record)
     assert len(seen) == 1

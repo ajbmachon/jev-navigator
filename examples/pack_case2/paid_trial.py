@@ -21,6 +21,7 @@ from spend import SpendLedger
 
 from jev_navigator.judgments.answers import reported_input_tokens, response_from_raw
 from jev_navigator.judgments.questions import content_hash
+from jev_navigator.judgments.secrets import SecretScanner, refuse_if_secret
 
 RATE = Decimal("0.000000042")
 ROOT = Path.home() / ".local/share/jvn-takeover/2026-10-03/search-design/case2"
@@ -199,6 +200,10 @@ def send(ledger, folder, record):
     from jev_navigator.adapters.typesafe import CapturingTransport
 
     request = record["request"]
+    digest = content_hash({"state": request["state"], "questions": request["questions"]})
+    if record["request_sha256"] != digest:
+        raise ValueError("Prepared request changed before dispatch")
+    refuse_if_secret(request["state"], request["questions"], SecretScanner())
     identifier = f"union:{folder.name}:{record['ordinal']}"
     ledger.reserve(identifier, "jev", str(reserve_price(request)))
     started = time.perf_counter()
