@@ -54,8 +54,11 @@ def test_budget_keeps_the_entire_reached_population_and_preserves_file_first_bat
     )
     assert result.stopped_by == "scope_examined"
     assert len(result.judged["p"]) == 37
-    assert [len(state["items"]) for state, _ in client.requests] == [16, 16, 5]
-    assert client.requests[-1][0]["items"][-1]["file"] == "a/unrelated.py"
+    # Sync sends run on worker threads, so transport arrival order is not the
+    # frontier's batch order. The one-call check above proves first priority.
+    assert sorted(len(state["items"]) for state, _ in client.requests) == [5, 16, 16]
+    final_batch = next(state for state, _ in client.requests if len(state["items"]) == 5)
+    assert final_batch["items"][-1]["file"] == "a/unrelated.py"
 
 
 def test_follow_imported_owner_callee_and_literal_even_after_a_no_answer(tmp_path: Path) -> None:
