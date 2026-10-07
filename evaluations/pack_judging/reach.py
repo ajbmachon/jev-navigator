@@ -26,7 +26,7 @@ from jev_navigator.judgments.secrets import SecretMasker, SecretScanner, mask_re
 from .consume import judge_group
 from .designs import identity, jev_request
 from .frozen import load, sha256
-from .prepare import PLANNING, price, write
+from .prepare import PLANNING, free_meta, meta_candidate, price, write
 from .refresh import ADMITTED
 from .run import BY_NAME, credentials, folder, records
 from .run import OUT as PREVIOUS
@@ -200,6 +200,35 @@ def prepare():
     )
 
 
+def prepare_meta():
+    manifest = load(OUT / "prepared.json")
+    destination = OUT / "meta/free-prepare.json"
+    if destination.exists():
+        result = load(destination)
+        assert result["provider_calls"] == 0
+        return
+    prototypes = []
+    for dataset in ("dev110", "hard27"):
+        entry = next(e for e in manifest["cases"] if e["dataset"] == dataset)
+        case = load(Path(entry["path"]))
+        group = next(g for g in case["groups"] if g["eligible"])
+        candidate = OUT / "meta" / f"{dataset}-candidate.json"
+        write(candidate, meta_candidate(DESIGN, group["request"], dataset, group["ordinal"]))
+        prepared = candidate.with_name(candidate.stem + "-prepared.json")
+        result = free_meta(candidate, prepared)
+        prototypes.append(
+            {
+                "case": entry["case"],
+                "group": group["ordinal"],
+                "request_sha256": identity(group["request"]),
+                "candidate_sha256": sha256(candidate),
+                "prepared_sha256": sha256(prepared),
+                **result,
+            }
+        )
+    write(destination, {"provider_calls": 0, "prototypes": prototypes})
+
+
 def prepared_records():
     manifest = load(OUT / "prepared.json")
     assert sha256(OUT / "requests.jsonl.gz") == manifest["requests_sha256"]
@@ -212,6 +241,8 @@ def prepared_records():
 
 
 async def run_paid():
+    assert load(OUT / "engine-proof.json")["status"] == "PASS"
+    assert load(OUT / "meta/free-prepare.json")["provider_calls"] == 0
     credentials()
     ledger = Ledger(OUT / "spend-ledger.jsonl", cap="2.00")
     semaphore, halted = asyncio.Semaphore(4), asyncio.Event()
@@ -328,10 +359,12 @@ async def run_paid():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=("prepare", "paid"))
+    parser.add_argument("stage", choices=("prepare", "meta", "paid"))
     args = parser.parse_args()
     if args.stage == "prepare":
         prepare()
+    elif args.stage == "meta":
+        prepare_meta()
     else:
         asyncio.run(run_paid())
 
