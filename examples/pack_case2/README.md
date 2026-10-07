@@ -1,7 +1,7 @@
 # Case 2 development recipe
 
-This recipe measures a planner contract and recorded approaches without a provider
-call. The reusable executor and outline belong to `jev_navigator`; finding inputs,
+This recipe measures a planner contract, recorded approaches and an explicitly
+authorized planner trial. The reusable executor and outline belong to `jev_navigator`; finding inputs,
 trace interpretation, labels, replay and packet policy belong here.
 
 Run the candidate study with development-only dependencies:
@@ -57,9 +57,30 @@ masker memoizes the existing pure masker and changes no rules.
 `planner.py` renders the prompt and the executor's typed schema for
 `sference/deepseek-v4-flash-0731`, then validates replies with the same contract.
 Its inputs are the finding, cited code, outline, attempted searches and coverage.
-There is no provider connector or paid launcher in this development recipe.
 The trial covers our own Analysis Engine code and open-source hard27 repositories.
 An approved production LLM route remains an open prerequisite.
+
+The authorized trial uses `paid_planner.py` with the frozen prompt manifest and
+Requesty's EU route. It preserves exact requests, responses and reported costs.
+`spend.py` reserves each attempt durably before dispatch; interrupted calls stay
+reserved until their receipts are reconciled. Completed planner receipts are
+skipped on restart. Malformed approaches are logged individually, without changing
+their proposed arguments or paying for a repair call.
+
+`paid_execute.py` runs retained plans without provider calls. It reads the pushed
+Case 1 scent implementation from a pinned source snapshot, ranks within each plan
+rank and scores reach only after execution. It needs the development dependency
+`ijson`. `paid_shape.py` runs on the same #148 profile owner as `judging.py`, preparing
+up to eight actual 16-item requests per finding, including size splits and tails.
+Its neutral answers serve shape rehearsal only. Source places are retained per
+physical request occurrence, including identical bodies at different places.
+
+The trial requires free Meta prepare and one paid guard for the exact candidate
+before any Jev candidate call. It stops after guard so the lead can show André the
+scores. These launchers construct no Jev candidate transport. The spend ledger
+includes guard charges separately from planner charges. The initial $1 cap and
+the lead's later $3 next-stage allowance are recorded in `TRIAL.md`; the resumed
+candidate stage must use its explicitly authorized cap and preserve the ledger.
 
 Results and the separately priced trial proposal belong in
 `~/.local/share/jvn-takeover/2026-10-03/search-design/case2/REPORT.md` and `TRIAL.md`.
