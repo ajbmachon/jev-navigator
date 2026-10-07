@@ -26,7 +26,6 @@ def offline(event, _args):
         raise RuntimeError("Recipes replay permits zero provider calls")
 
 
-sys.addaudithook(offline)
 
 
 def rows(path):
@@ -278,6 +277,7 @@ def save_native_results(out, results):
 
 
 def main():
+    sys.addaudithook(offline)
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--native", action="store_true")
