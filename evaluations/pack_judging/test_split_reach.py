@@ -10,12 +10,13 @@ from threading import Thread
 import paid_client
 import pytest
 from paid_support import CapStopError, Ledger, load
-from typesafe_sdk import TypeSafeClient
+from typesafe_sdk import TypeSafeAPIResponseValidationError, TypeSafeClient
 
 from . import split_reach
 
 
-def test_split_group_retries_keep_wire_reserves_and_original_slots(tmp_path, monkeypatch):
+@pytest.mark.parametrize("missing_usage", [False, True])
+def test_split_group_retries_keep_wire_reserves_and_original_slots(tmp_path, monkeypatch, missing_usage):
     record = next(r for r in split_reach.records() if not r["eligible"])
     sent = []
 
@@ -37,6 +38,8 @@ def test_split_group_retries_keep_wire_reserves_and_original_slots(tmp_path, mon
                     "usage": {"input_tokens": 100},
                     "answers": {qid: {"type": "noul", "noul": 0.9} for qid in request["questions"]},
                 }
+            if missing_usage and status == 200:
+                raw.pop("usage")
             body = json.dumps(raw).encode()
             self.send_response(status)
             self.send_header("Content-Length", str(len(body)))
@@ -59,6 +62,19 @@ def test_split_group_retries_keep_wire_reserves_and_original_slots(tmp_path, mon
     )
     ledger = Ledger(tmp_path / "ledger.jsonl", cap="0.40")
     try:
+        if missing_usage:
+            with pytest.raises(TypeSafeAPIResponseValidationError, match="usage"):
+                asyncio.run(split_reach.paid_group(record, ledger))
+            assert len(sent) == 3
+            assert all(event["status"] == "reserved" for event in ledger.latest().values())
+            base = split_reach.group_folder(record)
+            assert any(load(path)["status"] == 200 for path in (base / "http").glob("*/receipt.json"))
+            assert all(
+                path.with_name("response.json").exists()
+                for path in (base / "http").glob("*/receipt.json")
+                if load(path)["status"] == 200
+            )
+            return
         asyncio.run(split_reach.paid_group(record, ledger))
         assert len(sent) == 5 and sent[0] == sent[1] == sent[2]
         requests = [json.loads(wire) for wire in sent[2:]]
