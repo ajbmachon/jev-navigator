@@ -26,3 +26,24 @@ First-delivery call numbers are diagnostic label scoring, not a stopping conditi
 agent. `cl100k_base` token counts compare returned text, and are not the DeepSeek or Jev billing
 counter. Cold compression runs before warm conservative replay; wall time is local operation time,
 not agent reasoning time or HTTP time. No held-out data or paid model is used.
+
+Freeze a proposed trial sample and representative rank request without a provider:
+
+```sh
+uv run python measurements/pack_case3/prepare_trial.py --out /path/to/new/trial-folder
+system-one-meta-builder prepare /path/to/new/trial-folder/rank-candidate.json \
+  > /path/to/new/trial-folder/meta-prepared.json
+```
+
+The deterministic stratified sample contains six local searches, eight cross-boundary searches,
+four searches needing terms learned from earlier reads and two cases without recorded traces.
+SHA256 of `case3-agent-trial-20261007:<case id>` orders each pool. Existing discovery annotations
+select strata; labels and historical answers never enter agent inputs or candidate request state.
+The rank preparation is an illustrative first batch over cited-file symbols in source order,
+with long symbols split into 60-line ranges. Its stand-in probabilities are not saved or measured.
+Future adaptive batches are new exact requests and require their own review.
+
+The requested cheap-agent trial is priced and documented in the takeover Case 3 report. It uses
+`sference/deepseek-v4-flash-0731`, at most five batched tool calls per finding, a 24,000-character
+response cap and an optional total of eight Jev requests per finding. Calls and cumulative billed
+tokens are guards, never elapsed time. No guard or paid agent trial is part of these scripts.
