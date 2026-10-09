@@ -1338,7 +1338,8 @@ default). An unknown or malformed field is refused with its JSON path.
   shortlists. At 0.7 or more the point is established and stops; between 0.35 and 0.7 its shortlist's
   callers, callees and named files are pushed to it, and an unchanged shortlist after they are judged
   stops it; below 0.35 it keeps drawing its own queue and, once nothing is left for it, is not found in
-  this scope. The bands are provisional defaults (`Bands`).
+  this scope, meaning among the places the request's sources and hops reached (a term the agent did
+  not give reaches nothing). The bands are provisional defaults (`Bands`).
 - **The budget counts every request.** Ranking, existence and role labels all count; two requests are
   kept for labels while ranking runs (`label_requests`), and labels take whatever ranking leaves. Labels
   go to each point's shortlisted places at 0.5 or more, refuting points first.

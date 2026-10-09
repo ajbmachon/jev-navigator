@@ -22,7 +22,8 @@ Ranking says where to look; existence says whether the result answers the point:
 4. **Band.** High: the point is established and stops. Middle: its shortlist's callers, callees and
    named files (as the request's ``follow`` says) are listed and pushed to it; once they are judged, an
    unchanged shortlist stops the point (``stable_beam``). Low: it keeps drawing its own queue, and once
-   nothing is left to judge for it, it is not found in this scope.
+   nothing is left to judge for it, it is not found in this scope: not among the places the request's
+   sources and hops reached, which ``coverage.units_reached`` counts, not the whole of ``scope``.
 
 The search ends when every point has stopped, nothing is left to judge, or the budget is spent; the
 budget counts every request, ranking, existence and role labels alike. Role labels

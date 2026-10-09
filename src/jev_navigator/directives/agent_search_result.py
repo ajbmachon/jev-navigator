@@ -37,7 +37,8 @@ class Band(StrEnum):
 
 class Outcome(StrEnum):
     """``established``: the shortlist holds the point (high band). ``not_found_in_scope``: low band
-    once nothing was left to judge for the point; its shortlist is still where to look.
+    once nothing was left to judge for the point. The scope is the places the request's sources and
+    hops reached, not every file its ``scope`` admits; its shortlist is still where to look.
     ``undecided``: anything else, such as a middle band or a stop by budget."""
 
     ESTABLISHED = "established"
