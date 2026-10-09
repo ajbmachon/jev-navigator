@@ -237,7 +237,10 @@ def _resolved_ref(root: Path, ref: str | None) -> str | None:
         raise InvalidScopeError("/scope/changed_since", f"{ref!r} names no commit here: {error}") from error
 
 
-def _kept_by_path(scope: Scope, path: str) -> bool:
+def kept_by_path(scope: Scope, path: str) -> bool:
+    """Whether ``path`` passes the scope's path rules: a language JVN reads (or markup with
+    ``with_docs``), ``include`` and ``exclude``, ``languages``, ``with_tests`` and ``with_docs``. It
+    reads no file, so a caller holding an index can filter its files without listing them again."""
     if not _parsed_or_wanted_markup(scope, path):
         return False
     if scope.include and not any(_matches(entry, path) for entry in scope.include):
@@ -277,7 +280,7 @@ def _is_output_folder(folder: str) -> bool:
 
 
 def _listed(root: Path, scope: Scope, changed_since_commit: str | None) -> list[str]:
-    files = [path for path in listing.working_files(root).files if _kept_by_path(scope, path)]
+    files = [path for path in listing.working_files(root).files if kept_by_path(scope, path)]
     return files if changed_since_commit is None else _changed(root, changed_since_commit, files)
 
 
