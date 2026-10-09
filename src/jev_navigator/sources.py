@@ -379,6 +379,25 @@ class ClientCallSource:
         ]
 
 
+@dataclass(frozen=True)
+class ReachedSource:
+    """Places a source reached earlier, offered again under its name and label whatever the seeds. A
+    composition that reaches places itself, for example the callers of units it chose or a source's
+    places kept to a scope, hands them to a search through ``sources=`` this way, so the search still
+    resolves, ranks and counts them by their own provenance."""
+
+    name: str
+    label: str
+    reaches: tuple[Reach, ...]
+
+    @classmethod
+    def of(cls, source: Source, reaches: Iterable[Reach]) -> ReachedSource:
+        return cls(source.name, source.label, tuple(reaches))
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> tuple[Reach, ...]:
+        return self.reaches
+
+
 ANCHORS = AnchorSource()
 FILES = FileSource()
 NAMES = NameSource()
