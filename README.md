@@ -53,6 +53,7 @@ configuration: a recipe the caller passes as data names them, never an environme
 | `find` and `trace` as compositions of sources | not yet: they keep their own moves and call graph |
 | The spelling map | being built |
 | Static context configuration: one-hop proven calls, directly named files and structural excerpts (`selection.context`) | built |
+| Agent search: one request a calling agent writes, with hypotheses and the points that would show or refute them, run as sources, `find_all`, the frontier, an existence check and role labels (`directives.agent_search`); see [Agent search](#agent-search-one-composed-request-for-a-calling-agent) | built |
 | Typed configurations | being built |
 | `jvn search` | being built |
 
@@ -1310,3 +1311,67 @@ historical comparison and pinned revisions. The caller-specific reproduction har
 live outside JVN at `~/.local/share/jvn-takeover/2026-10-03/search-design/case1/selection-harness/`.
 That harness reproduces historical controls at their recorded pins; JVN retains only the report and
 summary, with no six-role ranking code or recipes.
+
+### Agent search: one composed request for a calling agent
+
+`agent_search(request, index, judge)` runs one search a calling agent writes, so the agent states what
+would show and what would refute its idea once, instead of searching in many small steps. The request
+is closed and typed (`directives/agent_search_request.py`; its JSON Schema, for a tool description, is
+[`schemas/agent-search-v1.json`](src/jev_navigator/schemas/agent-search-v1.json)): one to three
+hypotheses, each a mechanism in plain words with one to four evidence points and up to two refuting
+points, plus the terms, anchors, files, scope and relations to follow, and a budget of requests (8 by
+default). An unknown or malformed field is refused with its JSON path.
+
+- **Only points are judged.** Each point is one target, its text in state and bound into the admitted
+  J1-3 question; a mechanism is returned as written and never sent. Every request asks every point
+  about the same units, sixteen units per request.
+- **Ranking says where to look.** The start sources (anchors, files, files the points name, and the
+  hits of the terms and of the code names the points spell, plus any `extra_sources`) reach places,
+  kept to the scope except the caller's anchors, and `find_all` lists them by `VALUE` without a call
+  (`sources.ReachedSource`). Each round, `frontier.Frontier` draws one request's worth of units across
+  the open points, a point's pushed hops first, then its own queue ordered by value plus the relevance
+  its likely units (J1-3 at 0.5 or more) spread over the code graph (`selection.reranked`, the step
+  `active_search` re-ranks with).
+- **Existence says whether it is there.** Each open point whose shortlist (its four best units) changed
+  is asked once whether the shortlist holds it (`directives.existence`, worded in
+  `judgments/existence_question.json`), every such point in one request over the union of their
+  shortlists. At 0.7 or more the point is established and stops; between 0.35 and 0.7 its shortlist's
+  callers, callees and named files are pushed to it, and an unchanged shortlist after they are judged
+  stops it; below 0.35 it keeps drawing its own queue and, once nothing is left for it, is not found in
+  this scope. The bands are provisional defaults (`Bands`).
+- **The budget counts every request.** Ranking, existence and role labels all count; two requests are
+  kept for labels while ranking runs (`label_requests`), and labels take whatever ranking leaves. Labels
+  go to each point's shortlisted places at 0.5 or more, refuting points first.
+- **The result is facts, not a verdict.** Per point: its band and existence probability, its
+  shortlist and the next places, and the distinct files with a definite (at the yes bar) or possible
+  (0.5 or more) place; places matching a refuting point come first, as conflicts. Code travels for the
+  best places first, within `max_code_chars` (40,000 by default); every other place is a location.
+  Coverage names what was reached and not judged, files the scope left out, and unresolved anchors.
+
+<!-- example: agent search -->
+```python
+from jev_navigator.directives.agent_search import agent_search
+
+request = {
+    "hypotheses": [
+        {
+            "id": "h1",
+            "mechanism": "one helper owns the order item limit",
+            "evidence": [{"id": "e1", "point": "code that refuses an order over the item limit"}],
+            "refuted_by": [{"id": "r1", "point": "code that refunds an order"}],
+        }
+    ],
+    "terms": ["MAX_ITEMS"],
+    "anchors": [{"file": "orders/service.py", "line": 5}],
+    "files": ["orders/service.py"],
+    "scope": {"include": [], "exclude": [], "with_tests": False},
+    "follow": ["callers", "callees"],
+}
+result = agent_search(request, index, judge)
+for point in (result.point("h1.e1"), result.point("h1.r1")):
+    print(point.id, point.outcome, point.band)
+print(result.point("h1.e1").shortlist[0].symbol, result.point("h1.e1").definite_files)
+print(result.stopped_by, result.requests.used, "of", result.requests.budget)
+```
+
+`result.to_json()` is the same result as plain JSON for an agent's tool.
