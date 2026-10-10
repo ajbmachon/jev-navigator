@@ -256,6 +256,30 @@ def test_a_middle_point_expands_its_shortlist_and_is_established_once_the_shortl
     assert result.requests.used == len(client.requests) == 5
 
 
+def test_a_model_taking_fewer_items_per_request_is_sent_the_same_rounds_in_smaller_requests(
+    shop: CodeIndex,
+) -> None:
+    # Arrange: the same answers twice; the second client's model takes one item per request
+    def client() -> ScriptedJevClient:
+        return scripted(
+            {"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": limit_exists, "h1_r1": constant(0.1)}
+        )
+
+    whole, one_by_one = client(), client()
+    one_by_one.items_per_request = 1
+
+    # Act
+    usual = agent_search(request(), shop, Judge(whole, masker=None, scanner=None))
+    split = agent_search(request(), shop, Judge(one_by_one, masker=None, scanner=None))
+
+    # Assert: the same search, its budget counted in requests of the judge's sixteen items
+    assert {**split.to_json(), "requests": None} == {**usual.to_json(), "requests": None}
+    assert all(len(state["items"]) == 1 for state, _ in one_by_one.requests if "items" in state)
+    assert kinds(one_by_one).count("ranking") > kinds(whole).count("ranking")
+    assert (usual.requests.budget, split.requests.budget) == (8, 8 * 16)
+    assert split.requests.used == len(one_by_one.requests)
+
+
 def test_a_high_point_in_the_first_round_stops_without_expanding(shop: CodeIndex) -> None:
     client = scripted(
         {"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": constant(0.9), "h1_r1": constant(0.1)}

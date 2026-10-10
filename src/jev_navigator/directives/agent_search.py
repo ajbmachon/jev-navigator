@@ -3,7 +3,9 @@
 The agent writes hypotheses, each with evidence points and refuting points, and the composition to
 search with (``agent_search_request``). Each point becomes one target whose text sits in state, bound
 into the admitted J1-3 question (``find_all.match_check``); a hypothesis's mechanism is never sent.
-Every request asks every point about the same units, at most one request's worth (16) per round.
+Every request asks every point about the same units, at most one request's worth (16) per round. A
+model that takes fewer items per request (its route's ``ITEMS_PER_REQUEST``) is sent each round in
+smaller requests, and the budget counts requests of the judge's own size, so the rounds stay the same.
 
 Ranking says where to look; existence says whether the result answers the point:
 
@@ -331,8 +333,12 @@ class _Run:
         self.options = options
         self.points = _points(request)
         self.targets = {point.key: point.text for point in self.points}
-        self.total = _capped(judge, request.budget_requests)
-        self.searching = _capped(self.total, max(1, request.budget_requests - options.label_requests))
+        self.sent = -(-judge.items_per_request // judge.items_per_sent_request())
+        """The requests one round's items travel in: one, or more for a model that takes fewer items."""
+        self.total = _capped(judge, request.budget_requests * self.sent)
+        self.searching = _capped(
+            self.total, max(1, request.budget_requests - options.label_requests) * self.sent
+        )
         self.in_scope = _scope_rule(index, request.scope)
         self.anchors = (*anchors, *(_anchor(anchor) for anchor in request.anchors))
         self.files = tuple(dict.fromkeys((*files, *request.files)))
@@ -437,13 +443,14 @@ class _Run:
         return result
 
     def _judge(self, wave: Sequence[Unit]) -> Steps[None]:
-        """One request asking every point about ``wave``, pinned through their first lines."""
+        """One request's worth of items asking every point about ``wave``, pinned through their first
+        lines."""
         before = self.searching.calls
         result = yield _block(
             find_all,
             find_all_async,
             self.index,
-            _capped(self.searching, 1),
+            _capped(self.searching, self.sent),
             self.targets,
             anchors=[LineAnchor(unit.path, unit.ranges[0][0]) for unit in wave],
             sources=(ANCHORS,),
@@ -872,7 +879,7 @@ class _Run:
 
     def _requests(self) -> RequestUse:
         return RequestUse(
-            self.request.budget_requests,
+            self.total.max_calls,
             self.total.calls,
             self.calls["ranking"],
             self.calls["existence"],

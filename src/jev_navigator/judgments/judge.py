@@ -61,7 +61,7 @@ DEFAULT_ITEMS_PER_REQUEST = 16
 """How many items one batched request carries at most (André, 03.10.2026: measured on the code-index
 set, 16 per request kept accuracy and cost about half the tokens of one per request)."""
 BATCHING_RULE = "unit-place-order-count-and-box-v1"
-"""How batches form: units in file-and-lines order, closed at ``items_per_request`` items or at the
+"""How batches form: units in file-and-lines order, closed at ``items_per_sent_request()`` items or at the
 client's character box. Recorded on every stored answer; the batch membership hash in the item key already
 tells two batches apart."""
 DEFAULT_MAX_CONCURRENCY = 16
@@ -191,7 +191,8 @@ class Judge:
     the store gave instead. ``scope()`` gives one caller, such as a
     single search, its own counter on the same client, store and journal; every scope adds its calls
     to its parent, and ``max_calls`` caps a judge together with all of its scopes.
-    ``items_per_request`` caps the items of one batched request, and ``max_concurrency`` bounds how
+    ``items_per_request`` caps the items of one batched request, lowered to the ``items_per_request`` a
+    client declares for a model that takes fewer at once, and ``max_concurrency`` bounds how
     many requests this judge and all of its scopes have in flight, sync or async, whichever callers
     send them: a search's beam, its nested batches and history checks draw on the same slots. A slot
     is held only around the client's send, never around an opening or a whole batched call, so a
@@ -243,6 +244,13 @@ class Judge:
         child._reserved_share = False
         child._send_slots = self._send_slots
         return child
+
+    def items_per_sent_request(self) -> int:
+        """The items one request carries: ``items_per_request``, or the fewer the client declares its
+        model takes at once (a route's ``SYSTEM_ONE_<NAME>_ITEMS_PER_REQUEST``)."""
+        return min(
+            self.items_per_request, getattr(self.client, "items_per_request", None) or self.items_per_request
+        )
 
     @property
     def unanswered_requests(self) -> int:
@@ -360,7 +368,7 @@ class Judge:
             masked_shared,
             hidden,
             self.thresholds,
-            self.items_per_request,
+            self.items_per_sent_request(),
             self.input_limits,
             masker=self.masker,
             given=_GivenState((item,), shared),
@@ -1007,7 +1015,7 @@ class Judge:
             shared,
             hidden,
             thresholds or self.thresholds,
-            self.items_per_request,
+            self.items_per_sent_request(),
             self.input_limits,
             masker=self.masker,
             places=places,

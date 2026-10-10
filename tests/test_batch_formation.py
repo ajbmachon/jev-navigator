@@ -69,6 +69,22 @@ def test_the_items_per_request_are_configurable() -> None:
     assert sorted(len(members) for members in _sent_members(client)) == [2, 4, 4]
 
 
+def test_a_client_whose_model_takes_fewer_items_is_sent_smaller_batches() -> None:
+    # Arrange: the client declares four items per request, below the judge's sixteen
+    client = ScriptedJevClient()
+    client.items_per_request = 4
+    smaller = ScriptedJevClient()
+    smaller.items_per_request = 4
+
+    # Act
+    Judge(client).check_each(DESCRIBES, _items(10), SHARED)
+    Judge(smaller, items_per_request=3).check_each(DESCRIBES, _items(10), SHARED)
+
+    # Assert: the smaller count closes each batch
+    assert sorted(len(members) for members in _sent_members(client)) == [2, 4, 4]
+    assert sorted(len(members) for members in _sent_members(smaller)) == [1, 3, 3, 3]
+
+
 def test_the_same_population_forms_the_same_batches_in_any_input_order() -> None:
     # Arrange
     items = _items(40)
