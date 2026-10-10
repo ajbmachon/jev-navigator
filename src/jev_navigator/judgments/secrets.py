@@ -136,26 +136,39 @@ def masked_values(value: object, masker: Masker) -> frozenset[str]:
 
 
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str], questions: bool = False) -> object:
-    """Hides each of ``values`` wherever it appears, masks every string by the masker's rules, and hides
-    the values once more. Copies go first because a rule can end a value early (a URL password at its
-    first ``@``, a config value at ``#``) and the rest of a known value would no longer match its copy;
-    the longest values go first, so a token is hidden whole before a shorter value inside it. A string
-    the second hiding changed is masked once more, because a hidden copy can turn a kept value into one
-    the rules hide (``sessionToken: "[MASKED]-token"`` no longer repeats its key), and the request sent
-    must be one the rules leave as it is. Keys are left as they are. Wording, the request's point and
-    JVN's own question text, hides no copies: masking protects the code, and a point is masked only
-    where the rules find a secret in it."""
-    copies = [copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
+    """Masks every string by the masker's rules and hides each of ``values`` wherever it still appears.
+    The rules read the text first, so a secret only the masker recognizes is hidden whole before a known
+    value inside it could break its shape. A rule can also end a known value early (a URL password at its
+    first ``@``, a config value at ``#``); the rest of the value, from that character on, is hidden where
+    it follows the mask. A string the hiding changed is masked once more, because a hidden copy can turn
+    a kept value into one the rules hide (``sessionToken: "[MASKED]-token"`` no longer repeats its key),
+    and the request sent must be one the rules leave as it is. Keys are left as they are. Wording, the
+    request's point and JVN's own question text, hides no copies: masking protects the code, and a point
+    is masked only where the rules find a secret in it."""
+    known = sorted(values - {MASK}, key=len, reverse=True)
+    copies = [copy_pattern(secret) for secret in known] + _rest_patterns(known)
 
     @cache
     def hide(text: str, path: str | None, role: str) -> str:
+        masked = masker.mask(text, path)
         if role == "wording":
-            return masker.mask(text, path)
-        masked = masker.mask(_hide_copies(text, copies), path)
+            return masked
         copied = _hide_copies(masked, copies)
         return masked if copied == masked else masker.mask(copied, path)
 
     return _each_string(value, hide, questions=questions)
+
+
+def _rest_patterns(known: list[str]) -> list[re.Pattern[str]]:
+    """A mask followed by the rest of a known value from one of its non-alphanumeric characters on, the
+    shape a rule leaves when it ends the value early; longest rests first."""
+    rests = {
+        secret[cut:]
+        for secret in known
+        for cut in range(1, len(secret))
+        if not secret[cut].isalnum() and any(character.isalnum() for character in secret[cut:])
+    }
+    return [re.compile(re.escape(MASK + rest)) for rest in sorted(rests, key=len, reverse=True)]
 
 
 def _hide_copies(text: str, copies: list[re.Pattern[str]]) -> str:

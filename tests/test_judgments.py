@@ -1190,7 +1190,7 @@ def test_a_secret_in_check_wording_is_masked_once_per_plan_and_the_request_still
     sent = json.dumps(client.requests)
     assert len(client.requests) == 3
     assert token not in sent and "[MASKED]" in sent
-    wording_masks = sum(count for text, count in masker.masked.items() if "use the token" in text)
+    wording_masks = sum(count for text, count in masker.masked.items() if token in text)
     assert wording_masks == 1, "every request here asks at slot 0, so its wording is masked once"
 
 
