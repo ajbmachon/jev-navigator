@@ -17,6 +17,7 @@ from ..index.languages import language_of
 from ..index.spans import Span
 from ..judgments.answers import AnswerSource, answered_by
 from ..judgments.judge import Judge, PickResult
+from ..judgments.known_values import with_known_values
 from ..judgments.questions import Pick, serialized_chars
 from ..judgments.secrets import TARGET
 from .places import Place, function_place, range_place
@@ -123,6 +124,7 @@ class _SpanEntry:
 
 def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> EntrySelection:
     """Select one file and one span, retaining every closed-choice receipt and span alternative."""
+    judge = with_known_values(judge, index)
     files = tuple(file for file in index.available_files if language_of(file))
     if not files:
         raise ValueError("the repository scope contains no supported code files")

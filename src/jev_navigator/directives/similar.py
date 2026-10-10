@@ -8,6 +8,7 @@ from .. import operations
 from ..index.code_index import CodeIndex
 from ..index.spans import Span
 from ..judgments.judge import CheckResult, Judge
+from ..judgments.known_values import with_known_values
 from ..judgments.questions import Check, Criterion
 from ..judgments.thresholds import NoulVerdict
 
@@ -38,6 +39,7 @@ def find_similar_code(
     index: CodeIndex, judge: Judge, symbol: str, *, check: Check = SAME_BEHAVIOUR
 ) -> SimilarCode | None:
     """Code lists the candidates; Jev judges each one against the subject separately."""
+    judge = with_known_values(judge, index)
     definitions = index.find_definition(symbol)
     if not definitions:
         return None

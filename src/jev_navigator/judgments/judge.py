@@ -1363,13 +1363,16 @@ class _CheckPlan:
         return [self.source_of(position) for position in members]
 
     def question(self, check: Check, slot: int) -> dict:
-        """The check's question about the item at ``slot``, masked with the plan's hidden values;
-        built and masked once per plan, since packing measures many candidate requests."""
+        """The check's question about the item at ``slot``, masked with the plan's hidden values as a
+        question, so JVN's own wording keeps its words; built and masked once per plan, since packing
+        measures many candidate requests."""
         key = (check.question_id, slot)
         if key not in self._questions:
             question = check.to_question(item_path(self.list_name, slot))
             self._questions[key] = (
-                mask_everywhere(question, self.masker, self.hidden) if self.masker else question
+                mask_everywhere(question, self.masker, self.hidden, questions=True)
+                if self.masker
+                else question
             )
         return self._questions[key]
 

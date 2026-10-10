@@ -17,6 +17,7 @@ from ..index.bindings import BindingStatus
 from ..index.code_index import CodeIndex
 from ..index.spans import Span
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
+from ..judgments.known_values import with_known_values
 from ..judgments.questions import Check, Criterion
 from ..judgments.secrets import WORKFLOW
 from ..judgments.thresholds import NoulVerdict
@@ -167,6 +168,7 @@ def trace_workflow(
     """
     if not starts:
         raise ValueError("trace_workflow needs at least one concrete start span")
+    judge = with_known_values(judge, index)
     graph = operations.trace_graph(index, starts, depth=depth, cancelled=cancelled)
     stopped = graph.stop == "cancelled" or (cancelled is not None and cancelled())
     answers: dict[str, list[CheckResult]] = {check.name: [] for check in checks}

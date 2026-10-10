@@ -22,6 +22,7 @@ from ..index.file_shape import FileShape
 from ..index.scope import is_test_file
 from ..index.spans import TextHit
 from .judge import CheckResult, Judge
+from .known_values import with_known_values
 from .questions import Check, Criterion
 from .secrets import SecretInRequestError, mask_request, refuse_if_secret
 
@@ -60,6 +61,7 @@ class GeneratedJudgments:
 def judge_generated_files(
     judge: Judge, index: CodeIndex, awaiting: Mapping[str, FileShape]
 ) -> GeneratedJudgments:
+    judge = with_known_values(judge, index)
     naming = files_naming(index.root, sorted(awaiting))
     entries = {
         path: generated_file_entry(index, path, awaiting[path], naming[path]) for path in sorted(awaiting)
