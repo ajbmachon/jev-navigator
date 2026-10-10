@@ -985,7 +985,8 @@ its own BM25 index over every unit the index lists, one document per whole unit,
 `CodeIndex` and refusing more than `max_units` (25,000) units; it still reaches anchors, which the
 search turns into its units like any other source's. A search with a scope of its own passes it as
 `Seeds.in_scope`, and `ScentSource` ranks only units inside it before cutting its `limit`, so a unit
-the search would drop never takes a rank.
+the search would drop never takes a rank. `queries="per_text"` asks each seed text with the names
+and takes the texts' best units in turn; the default, `"combined"`, asks one query of them all.
 
 | Source | Reads | Reaches | Distance |
 | --- | --- | --- | --- |

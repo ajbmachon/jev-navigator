@@ -389,3 +389,29 @@ def test_the_scent_source_ranks_only_inside_the_seeds_scope_before_cutting_its_l
     assert everywhere[0].at.file == "tests/test_limits.py"
     kept = [reach.at for reach in everywhere if reach.at.file != "tests/test_limits.py"]
     assert [(reach.at, reach.distance) for reach in in_scope] == [(kept[0], 4), (kept[1], 5)]
+
+
+def test_the_per_text_scent_option_gives_every_seed_text_its_own_best_units_in_turn(tmp_path: Path) -> None:
+    # Arrange: the combined query's best units all match the limit point, none the html point
+    commit_files(tmp_path, SCENTED)
+    index = CodeIndex.from_git(tmp_path)
+    html = "code that returns html"
+    seeds = Seeds(texts=(LIMIT_POINT, html))
+    best_for = {text: ScentSource(limit=1).reach(index, Seeds(texts=(text,)))[0].at for text in seeds.texts}
+
+    # Act
+    combined = ScentSource(limit=3).reach(index, seeds)
+    per_text = ScentSource(limit=2, queries="per_text").reach(index, seeds)
+
+    # Assert
+    assert {reach.at.file for reach in combined} == {"shop/limits.py"}
+    assert best_for[html] == LineAnchor("shop/render.py", 1)
+    assert [(reach.at, reach.distance) for reach in per_text] == [
+        (best_for[LIMIT_POINT], 4),
+        (best_for[html], 5),
+    ]
+    twice = ScentSource(limit=3, queries="per_text").reach(index, Seeds(texts=(LIMIT_POINT, LIMIT_POINT)))
+    assert [reach.at for reach in twice] == [
+        reach.at for reach in ScentSource(limit=3).reach(index, Seeds(texts=(LIMIT_POINT,)))
+    ], "a unit two texts rank is reached once"
+    assert ScentSource().queries == "combined"

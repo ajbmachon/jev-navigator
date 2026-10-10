@@ -20,8 +20,9 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from itertools import zip_longest
 from pathlib import PurePosixPath
-from typing import ClassVar, Protocol
+from typing import ClassVar, Literal, Protocol
 
 from . import operations
 from .index.code_index import CodeIndex
@@ -392,26 +393,46 @@ DEFAULT_SCENT_LIMIT = 20
 
 @dataclass(frozen=True)
 class ScentSource:
-    """The ``limit`` units whose words best match the seed texts and names together by BM25
-    (``selection.scent``), best first, at ``SCENT_DISTANCE`` plus their rank: after anchors, files and
-    name hits, and in BM25 order among themselves, since each rank costs what one step of distance does
-    in the frontier's value. Only units in ``seeds.in_scope`` are ranked, and a unit sharing no word
-    with the seeds is never reached. The index covers every unit the CodeIndex lists, is built on first
-    use and kept while the CodeIndex lives, and refuses more than ``max_units`` units. No search starts
-    from it by default: a caller opts in, for example through ``agent_search``'s ``extra_sources``."""
+    """The ``limit`` units whose words best match the seeds by BM25 (``selection.scent``), best first,
+    at ``SCENT_DISTANCE`` plus their rank: after anchors, files and name hits, and in BM25 order among
+    themselves, since each rank costs what one step of distance does in the frontier's value. Only units
+    in ``seeds.in_scope`` are ranked, and a unit sharing no word with its query is never reached.
+
+    ``queries`` "combined" asks one query of every seed text and name together; "per_text" asks each
+    text with the names and takes the texts' best units in turn, each unit once, so every text gets its
+    own. The index covers every unit the CodeIndex lists, is built on first use and kept while the
+    CodeIndex lives, and refuses more than ``max_units`` units. No search starts from it by default: a
+    caller opts in, for example through ``agent_search``'s ``extra_sources``."""
 
     limit: int = DEFAULT_SCENT_LIMIT
     max_units: int = DEFAULT_MAX_UNITS
+    queries: Literal["combined", "per_text"] = "combined"
     name: ClassVar[str] = "scent"
     label: ClassVar[str] = "from scent"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
-        query = " ".join((*seeds.texts, *seeds.names))
-        ranked = unit_scent(index, max_units=self.max_units).ranked(query, self.limit, seeds.in_scope)
+        scent = unit_scent(index, max_units=self.max_units)
+        if self.queries == "per_text":
+            queries = [" ".join((text, *seeds.names)) for text in seeds.texts] or [" ".join(seeds.names)]
+            rankings = [scent.ranked(query, self.limit, seeds.in_scope) for query in queries]
+            ranked = _in_turn(rankings, self.limit)
+        else:
+            ranked = scent.ranked(" ".join((*seeds.texts, *seeds.names)), self.limit, seeds.in_scope)
         return [
             Reach(start, self.name, f"bm25 {score:.3f}", SCENT_DISTANCE + rank)
             for rank, (start, score) in enumerate(ranked)
         ]
+
+
+def _in_turn(rankings: Sequence[Sequence[tuple[Anchor, float]]], limit: int) -> list[tuple[Anchor, float]]:
+    """The rankings' first places, then their second places, and so on, each place once with the score
+    of the ranking it came from first, until ``limit``."""
+    taken: dict[Anchor, float] = {}
+    for rank in zip_longest(*rankings):
+        for entry in rank:
+            if entry is not None:
+                taken.setdefault(*entry)
+    return list(taken.items())[:limit]
 
 
 @dataclass(frozen=True)
