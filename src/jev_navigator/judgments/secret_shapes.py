@@ -368,11 +368,15 @@ def _private_key_spans(text: str) -> list[Span]:
     keeps its code. One pass over the markers, so the work grows with the text."""
     open_begins: list[int] = []
     spans: list[Span] = []
+    floor = 0
     for marker in _KEY_MARKER.finditer(text):
         if marker["begin"]:
             open_begins.append(marker.start())
         elif open_begins:
             spans.append((open_begins.pop(), marker.end()))
+        else:
+            spans.append((_unopened_key_start(text, marker.start(), floor), marker.end()))
+        floor = marker.end()
     covered = 0
     for begin in open_begins:
         if begin >= covered:
@@ -398,6 +402,21 @@ def _unterminated_key_end(text: str, begin: int) -> int:
             return end
         end = line_end
     return end
+
+
+def _unopened_key_start(text: str, end_marker: int, floor: int) -> int:
+    """Where a key whose BEGIN marker lies outside the text starts (a window that opens inside it): the
+    lines before its END line that hold key material, the one right above it possibly a shorter last
+    line, back to ``floor`` at most."""
+    start = max(text.rfind("\n", floor, end_marker) + 1, floor)
+    last_line = True
+    while start > floor:
+        line_start = max(text.rfind("\n", floor, start - 1) + 1, floor)
+        line = text[line_start : start - 1]
+        if not (_KEY_BODY_RUN.search(line) or (last_line and _KEY_TAIL_RUN.search(line))):
+            break
+        start, last_line = line_start, False
+    return start
 
 
 def _line_end(text: str, position: int) -> int:

@@ -1215,6 +1215,17 @@ def test_an_unterminated_key_hides_its_body_in_any_layout_and_keeps_the_code_aft
     assert "print(len(lines))" in masked
 
 
+def test_a_key_cut_before_its_begin_marker_hides_its_body_and_keeps_the_code_before_it():
+    body = [*_pem_body(3), "QUJDRA=="]
+    text = "\n".join(["load(path)", *(f'    "{line}\\n"' for line in body), f'    "{KEY_END}"', "run()"])
+
+    masked = SecretMasker().mask(text, "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+    assert masked.startswith("load(path)\n")
+    assert masked.endswith("\nrun()")
+
+
 def test_an_armored_key_cut_before_its_end_marker_hides_its_body_after_its_headers():
     body = _pem_body(3)
     text = "\n".join([PGP_KEY_BEGIN, "Version: GnuPG v2", "Comment: laptop", "", *body])
