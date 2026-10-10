@@ -146,9 +146,17 @@ def is_config_shaped(path: str | None) -> bool:
 
 
 def _masked_spans(text: str, spans: list[Span]) -> str:
-    for start, end in sorted(spans, reverse=True):
-        text = text[:start] + MASK + text[end:]
-    return text
+    """The text with each span replaced by ``MASK``, in one pass when the spans do not overlap."""
+    ordered = sorted(spans)
+    if any(start < previous_end for (_, previous_end), (start, _) in zip(ordered, ordered[1:], strict=False)):
+        for start, end in reversed(ordered):
+            text = text[:start] + MASK + text[end:]
+        return text
+    pieces, last = [], 0
+    for start, end in ordered:
+        pieces += [text[last:start], MASK]
+        last = end
+    return "".join([*pieces, text[last:]])
 
 
 def _matches(pattern: re.Pattern[str], hides: Callable[[re.Match[str]], bool] = bool):

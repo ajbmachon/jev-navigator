@@ -355,16 +355,21 @@ def test_masking_a_long_line_takes_time_linear_in_its_length(text: str) -> None:
     assert time.perf_counter() - started < 1.0
 
 
-REPEATED_PAIRS = {"assignment pairs": "a=b ", "SVG attributes": 'x="1" '}
+REPEATED_UNITS = {
+    "assignment pairs": ("a=b ", 64_000),
+    "SVG attributes": ('x="1" ', 64_000),
+    "key BEGIN lines": (KEY_BEGIN + "\n", 896_000),
+    "key END lines": (KEY_END + "\n", 896_000),
+}
 
 
-@pytest.mark.parametrize("pair", REPEATED_PAIRS.values(), ids=REPEATED_PAIRS.keys())
-def test_masking_time_grows_linearly_as_a_line_of_pairs_doubles(pair: str) -> None:
+@pytest.mark.parametrize(("unit", "longest"), REPEATED_UNITS.values(), ids=REPEATED_UNITS.keys())
+def test_masking_time_grows_linearly_as_a_text_of_repeated_units_doubles(unit: str, longest: int) -> None:
     # Arrange
-    lengths = [8_000, 16_000, 32_000, 64_000]
+    lengths = [longest // 8, longest // 4, longest // 2, longest]
 
     # Act
-    seconds = [_fastest_mask_seconds(pair * (length // len(pair))) for length in lengths]
+    seconds = [_fastest_mask_seconds(unit * (length // len(unit))) for length in lengths]
 
     # Assert
     assert seconds[-1] < 24 * max(seconds[0], 0.001), seconds
