@@ -29,14 +29,19 @@ The search ends when every point has stopped, nothing is left to judge, or the b
 budget counts every request, ranking, existence and role labels alike. Role labels
 (``judgments.role_labels``) go last, to each point's shortlisted places at 0.5 or more, refuting points
 first, while the budget lasts.
+
+The search is written once, as steps (``Steps``) that yield each block call and each piece of
+repository work. ``agent_search`` makes every call in place; ``agent_search_async`` awaits each
+block's async form and runs the repository work in a worker thread. Both send the same requests.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, TypeVar
 
 from ..index.code_index import CodeIndex
 from ..index.scope import Scope, kept_by_path
@@ -52,7 +57,7 @@ from ..index.units import (
     read_ranges,
 )
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge
-from ..judgments.role_labels import LabelPiece, label_roles
+from ..judgments.role_labels import LabelPiece, label_roles, label_roles_async
 from ..mentions import code_names_in, names_from_text
 from ..selection.active import normalized_scores, reranked
 from ..selection.graph import CodeGraph, GraphEdge, graph_from_index
@@ -81,8 +86,8 @@ from .agent_search_result import (
     SearchCoverage,
     code_within,
 )
-from .existence import ExistenceAnswer, ask_existence, existence_fits
-from .find_all import NOT_REACHED, FindAllResult, find_all
+from .existence import ExistenceAnswer, ask_existence, ask_existence_async, existence_fits
+from .find_all import NOT_REACHED, FindAllResult, find_all, find_all_async
 from .frontier import VALUE, Features, Frontier
 from .search_coverage import PointResult, Round, point_results
 
@@ -147,14 +152,110 @@ def agent_search(
     beside the built-in sources, kept to the scope like them. ``label_requests`` of the request's budget
     are kept for role labels while ranking runs; whatever ranking leaves goes to labels too. The
     judge's own call cap, store, masker and journal apply to every request."""
-    parsed = parse_agent_search_request(request)
-    if beam_width < 1 or label_requests < 0 or max_code_chars < 0:
-        raise ValueError("beam_width must be at least 1 and label_requests and max_code_chars nonnegative")
-    options = _Options(beam_width, bands, label_requests, max_code_chars, tuple(extra_sources), cancelled)
-    run = _Run(parsed, index, judge, options, tuple(anchors), tuple(files))
-    run.search()
-    run.label()
-    return run.result()
+    options = _Options.of(beam_width, bands, label_requests, max_code_chars, extra_sources, cancelled)
+    return _driven(_run(request, index, judge, options, anchors, files).steps())
+
+
+async def agent_search_async(
+    request: AgentSearchRequest | Mapping[str, Any] | str | bytes,
+    index: CodeIndex,
+    judge: Judge,
+    *,
+    anchors: Sequence[Anchor] = (),
+    files: Sequence[str] = (),
+    extra_sources: Sequence[Source] = (),
+    beam_width: int = DEFAULT_BEAM_WIDTH,
+    bands: Bands = Bands(),  # noqa: B008 - a frozen value, never mutated
+    label_requests: int = DEFAULT_LABEL_REQUESTS,
+    max_code_chars: int = DEFAULT_MAX_CODE_CHARS,
+    cancelled: Callable[[], bool] | None = None,
+) -> AgentSearchResult:
+    """``agent_search`` through the Judge's async form, for an async client: the same steps send the
+    same requests, each block through its async form (``find_all_async``, ``ask_existence_async``,
+    ``label_roles_async``), and reaching into the repository runs in a worker thread, so the event loop
+    stays free. ``cancelled`` is read between rounds as in ``agent_search``; a cancelled task's
+    ``CancelledError`` is never caught."""
+    options = _Options.of(beam_width, bands, label_requests, max_code_chars, extra_sources, cancelled)
+    return await _driven_async(_run(request, index, judge, options, anchors, files).steps())
+
+
+def _run(
+    request: AgentSearchRequest | Mapping[str, Any] | str | bytes,
+    index: CodeIndex,
+    judge: Judge,
+    options: _Options,
+    anchors: Sequence[Anchor],
+    files: Sequence[str],
+) -> _Run:
+    return _Run(parse_agent_search_request(request), index, judge, options, tuple(anchors), tuple(files))
+
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class _Call:
+    """A step the search hands to the form running it: a block that may send requests, or work that
+    reaches into the repository. ``agent_search`` runs ``sync`` in place; ``agent_search_async`` awaits
+    ``in_loop``, or runs ``sync`` in a worker thread when there is none."""
+
+    sync: Callable[..., Any]
+    in_loop: Callable[..., Awaitable[Any]] | None
+    args: tuple[Any, ...]
+    kwargs: Mapping[str, Any]
+
+    def run(self) -> Any:
+        return self.sync(*self.args, **self.kwargs)
+
+    async def run_async(self) -> Any:
+        if self.in_loop is None:
+            return await asyncio.to_thread(self.sync, *self.args, **self.kwargs)
+        return await self.in_loop(*self.args, **self.kwargs)
+
+
+Steps = Generator[_Call, Any, T]
+"""The search as one sequence of steps: each yields a ``_Call`` and is sent back what it returned, or
+has the error it raised thrown in, so both forms run the same search."""
+
+
+def _block(sync: Callable[..., T], in_loop: Callable[..., Awaitable[T]], *args: Any, **kwargs: Any) -> _Call:
+    return _Call(sync, in_loop, args, kwargs)
+
+
+def _work(sync: Callable[..., Any], *args: Any, **kwargs: Any) -> _Call:
+    return _Call(sync, None, args, kwargs)
+
+
+def _driven(steps: Steps[T]) -> T:
+    """Run ``steps`` with every call made in place."""
+    outcome: tuple[Any, BaseException | None] = (None, None)
+    while True:
+        try:
+            call = _resumed(steps, *outcome)
+        except StopIteration as done:
+            return done.value
+        try:
+            outcome = (call.run(), None)
+        except (KeyboardInterrupt, Exception) as error:  # noqa: BLE001 - thrown back into the step that made the call
+            outcome = (None, error)
+
+
+async def _driven_async(steps: Steps[T]) -> T:
+    """Run ``steps`` with every call awaited; a ``CancelledError`` is never thrown back in."""
+    outcome: tuple[Any, BaseException | None] = (None, None)
+    while True:
+        try:
+            call = _resumed(steps, *outcome)
+        except StopIteration as done:
+            return done.value
+        try:
+            outcome = (await call.run_async(), None)
+        except (KeyboardInterrupt, Exception) as error:  # noqa: BLE001 - thrown back into the step that made the call
+            outcome = (None, error)
+
+
+def _resumed(steps: Steps[Any], sent: Any, raised: BaseException | None) -> _Call:
+    return steps.send(sent) if raised is None else steps.throw(raised)
 
 
 @dataclass(frozen=True)
@@ -165,6 +266,22 @@ class _Options:
     max_code_chars: int
     extra_sources: tuple[Source, ...]
     cancelled: Callable[[], bool] | None
+
+    @classmethod
+    def of(
+        cls,
+        beam_width: int,
+        bands: Bands,
+        label_requests: int,
+        max_code_chars: int,
+        extra_sources: Sequence[Source],
+        cancelled: Callable[[], bool] | None,
+    ) -> _Options:
+        if beam_width < 1 or label_requests < 0 or max_code_chars < 0:
+            raise ValueError(
+                "beam_width must be at least 1 and label_requests and max_code_chars nonnegative"
+            )
+        return cls(beam_width, bands, label_requests, max_code_chars, tuple(extra_sources), cancelled)
 
 
 @dataclass
@@ -235,12 +352,18 @@ class _Run:
         self.stopped_by = ""
         self.failure: Exception | None = None
 
+    def steps(self) -> Steps[AgentSearchResult]:
+        """The whole search, then its role labels, then its result."""
+        yield from self.search()
+        yield from self.label()
+        return self.result()
+
     # The search -------------------------------------------------------------------------------
 
-    def search(self) -> None:
+    def search(self) -> Steps[None]:
         try:
-            self._start()
-            self.stopped_by = self._rounds()
+            yield from self._start()
+            self.stopped_by = yield from self._rounds()
         except _Stopped as stop:
             self.stopped_by, self.failure = stop.reason, stop.failure
         except CallCapReachedError:
@@ -251,14 +374,19 @@ class _Run:
             self.stopped_by, self.failure = FAILED, error
         self._close_exhausted(at_end=self.stopped_by == FRONTIER_EXHAUSTED)
 
-    def _start(self) -> None:
+    def _start(self) -> Steps[None]:
         seeds = Seeds(self.names, tuple(self.targets.values()), self.files, self.anchors)
         sources = (*START_SOURCES, *self.options.extra_sources)
-        listing = self._list([ReachedSource.of(source, self._kept(source, seeds)) for source in sources])
+        reached: list[ReachedSource] = yield _work(self._reached, sources, seeds)
+        listing = yield from self._list(reached)
         self.queue = [unit.id for unit in listing.units if unit.id not in self.copy_of]
-        self.graph = graph_from_index(self.index, listing.units, cochange_limit=0)
+        self.graph = yield _work(graph_from_index, self.index, listing.units, cochange_limit=0)
 
-    def _rounds(self) -> str:
+    def _reached(self, sources: Sequence[Source], seeds: Seeds) -> list[ReachedSource]:
+        """Each source as the places it reaches from ``seeds``, kept to the scope."""
+        return [ReachedSource.of(source, self._kept(source, seeds)) for source in sources]
+
+    def _rounds(self) -> Steps[str]:
         while True:
             if self.options.cancelled is not None and self.options.cancelled():
                 return CANCELLED
@@ -269,11 +397,11 @@ class _Run:
             wave = self._wave()
             if not wave:
                 return FRONTIER_EXHAUSTED
-            self._judge(wave)
+            yield from self._judge(wave)
             self._settle_expansions()
-            self._ask_existence()
+            yield from self._ask_existence()
             self._apply_bands()
-            self._expand()
+            yield from self._expand()
             self._close_exhausted(at_end=False)
 
     def _kept(self, source: Source, seeds: Seeds) -> list[Reach]:
@@ -281,10 +409,12 @@ class _Run:
         reaches = source.reach(self.index, seeds)
         return list(reaches) if source is ANCHORS else [r for r in reaches if self.in_scope(_file_of(r))]
 
-    def _list(self, sources: Sequence[Source]) -> FindAllResult:
+    def _list(self, sources: Sequence[Source]) -> Steps[FindAllResult]:
         """The units ``sources`` reach, listed and ranked by ``find_all`` under VALUE with no call
         allowed; any answer the store already holds for them is kept."""
-        result = find_all(
+        result = yield _block(
+            find_all,
+            find_all_async,
             self.index,
             _capped(self.searching, 0),
             self.targets,
@@ -298,10 +428,12 @@ class _Run:
         self._absorb(result)
         return result
 
-    def _judge(self, wave: Sequence[Unit]) -> None:
+    def _judge(self, wave: Sequence[Unit]) -> Steps[None]:
         """One request asking every point about ``wave``, pinned through their first lines."""
         before = self.searching.calls
-        result = find_all(
+        result = yield _block(
+            find_all,
+            find_all_async,
             self.index,
             _capped(self.searching, 1),
             self.targets,
@@ -436,7 +568,7 @@ class _Run:
 
     # Existence and bands ----------------------------------------------------------------------
 
-    def _ask_existence(self) -> None:
+    def _ask_existence(self) -> Steps[None]:
         """Ask each open point whose shortlist changed, in as few requests as the union allows."""
         asking = [
             point
@@ -447,7 +579,8 @@ class _Run:
             if self.searching.calls_left() == 0:
                 return
             before = self.searching.calls
-            answers = ask_existence(self.searching, {point.key: point.text for point in points}, pieces)
+            targets = {point.key: point.text for point in points}
+            answers = yield _block(ask_existence, ask_existence_async, self.searching, targets, pieces)
             self.calls["existence"] += self.searching.calls - before
             for point in points:
                 point.existence = answers[point.key]
@@ -492,13 +625,13 @@ class _Run:
 
     # Expansion --------------------------------------------------------------------------------
 
-    def _expand(self) -> None:
+    def _expand(self) -> Steps[None]:
         """Push the hops of each middle-band point's shortlist to it, listing hops not reached yet."""
         expanding = [p for p in self._open_points() if p.band is Band.MIDDLE and p.expanded_from is None]
         if not expanding or not self.follow:
             return
         seeds = list(dict.fromkeys(u for point in expanding for u in sorted(self._beam_ids(point))))
-        self._reach_hops([unit_id for unit_id in seeds if unit_id not in self.hops_of])
+        yield from self._reach_hops([unit_id for unit_id in seeds if unit_id not in self.hops_of])
         for point in expanding:
             beam = self._beam_ids(point)
             hops = list(dict.fromkeys(h for u in sorted(beam) for h in self.hops_of[u] if self._pending(h)))
@@ -507,15 +640,11 @@ class _Run:
             point.hops.extend(hop for hop in hops if hop not in point.hops)
             point.expanded_from, point.awaiting = beam, frozenset(hops)
 
-    def _reach_hops(self, unit_ids: Sequence[str]) -> None:
+    def _reach_hops(self, unit_ids: Sequence[str]) -> Steps[None]:
         """List what the ``follow`` sources reach from each unit, kept to the scope, and remember each
         unit's hops and their links in the graph."""
-        reached: list[tuple[str, Source, Reach]] = []
-        for unit_id in unit_ids:
-            seeds = self._hop_seeds(self.units[unit_id])
-            for source in self.follow:
-                reached += [(unit_id, source, reach) for reach in self._kept(source, seeds)]
-        listing = self._list(
+        reached: list[tuple[str, Source, Reach]] = yield _work(self._hop_reaches, unit_ids)
+        listing = yield from self._list(
             [ReachedSource.of(s, [r for _, of, r in reached if of is s]) for s in self.follow]
         )
         by_file: dict[str, list[Unit]] = defaultdict(list)
@@ -528,6 +657,15 @@ class _Run:
                     hops[unit_id].append(self.copy_of.get(hop.id, hop.id))
                     self.graph.add(GraphEdge(unit_id, hop.id, source.name))
         self.hops_of.update({unit_id: tuple(dict.fromkeys(found)) for unit_id, found in hops.items()})
+
+    def _hop_reaches(self, unit_ids: Sequence[str]) -> list[tuple[str, Source, Reach]]:
+        """Each unit's places reached by each ``follow`` source, kept to the scope."""
+        reached: list[tuple[str, Source, Reach]] = []
+        for unit_id in unit_ids:
+            seeds = self._hop_seeds(self.units[unit_id])
+            for source in self.follow:
+                reached += [(unit_id, source, reach) for reach in self._kept(source, seeds)]
+        return reached
 
     def _hop_seeds(self, unit: Unit) -> Seeds:
         """A unit as find_all's own hops seed it: its code's names, its code, its file and itself."""
@@ -557,7 +695,7 @@ class _Run:
 
     # Role labels ------------------------------------------------------------------------------
 
-    def label(self) -> None:
+    def label(self) -> Steps[None]:
         """Label each point's shortlisted places at 0.5 or more for that point, refuting points first,
         while the budget lasts; every point not labelled says why."""
         for point in sorted(self.points, key=lambda point: point.kind != REFUTING):
@@ -571,12 +709,14 @@ class _Run:
             elif self.total.calls_left() == 0:
                 point.labels = "not labelled: budget"
             else:
-                self._label(point, pieces)
+                yield from self._label(point, pieces)
 
-    def _label(self, point: _Point, pieces: Sequence[LabelPiece]) -> None:
+    def _label(self, point: _Point, pieces: Sequence[LabelPiece]) -> Steps[None]:
         before = self.total.calls
         try:
-            labelled = label_roles(self.total, pieces, {point.key: point.text})
+            labelled = yield _block(
+                label_roles, label_roles_async, self.total, pieces, {point.key: point.text}
+            )
         except CallCapReachedError:
             point.labels = "incomplete: the budget ran out inside this point's labelling request"
             return

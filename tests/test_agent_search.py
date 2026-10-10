@@ -3,6 +3,7 @@ stop, and what it returns."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -10,10 +11,11 @@ from pathlib import Path
 import pytest
 from git_repos import commit_all, write_files
 
-from jev_navigator.directives.agent_search import Bands, agent_search
+from jev_navigator.directives.agent_search import Bands, agent_search, agent_search_async
+from jev_navigator.directives.agent_search_result import AgentSearchResult
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
-from jev_navigator.testing import ScriptedJevClient
+from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 ADMITTED_J1 = json.loads((Path(__file__).parent / "fixtures/j1_admitted_contract.json").read_text())
 EXISTENCE_WORDING = json.loads(
@@ -118,6 +120,17 @@ def kinds(client: ScriptedJevClient) -> list[str]:
 
 def sent_code(client: ScriptedJevClient) -> str:
     return json.dumps([state for state, _ in client.requests])
+
+
+def searched(
+    client: ScriptedJevClient, asked: dict, index: CodeIndex, *, asynchronous: bool, **options
+) -> AgentSearchResult:
+    """``agent_search``, or ``agent_search_async`` run to the end behind the async form of ``client``,
+    which the Judge's sync methods refuse."""
+    if not asynchronous:
+        return agent_search(asked, index, Judge(client, masker=None, scanner=None), **options)
+    judge = Judge(AsyncScriptedJevClient(client), masker=None, scanner=None)
+    return asyncio.run(agent_search_async(asked, index, judge, **options))
 
 
 def test_every_ranking_request_asks_every_point_with_the_admitted_j1_wording(shop: CodeIndex) -> None:
@@ -414,3 +427,58 @@ def test_likely_units_pull_their_graph_neighbours_ahead_in_the_queue(tmp_path: P
 def test_bands_refuse_an_inverted_range() -> None:
     with pytest.raises(ValueError, match="low < high"):
         Bands(high=0.3, low=0.6)
+
+
+@pytest.mark.parametrize("budget", [8, 3])
+def test_the_async_form_sends_the_same_requests_and_returns_the_same_result(
+    shop: CodeIndex, budget: int
+) -> None:
+    # Arrange: the same answers behind a sync client and an async one
+    def client() -> ScriptedJevClient:
+        return scripted(
+            {"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": limit_exists, "h1_r1": constant(0.1)}
+        )
+
+    sync_client, async_client = client(), client()
+
+    # Act
+    expected = searched(sync_client, request(budget_requests=budget), shop, asynchronous=False)
+    actual = searched(async_client, request(budget_requests=budget), shop, asynchronous=True)
+
+    # Assert
+    assert len(sync_client.requests) == {8: 5, 3: 2}[budget], "budget 3 keeps 2 for labels and uses 1"
+    assert async_client.requests == sync_client.requests
+    assert actual.to_json() == expected.to_json()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_a_failed_request_ends_the_search_failed_and_keeps_the_answers_before_it(
+    shop: CodeIndex, asynchronous: bool
+) -> None:
+    def down(code: str) -> float:
+        raise ConnectionError("Jev is down")
+
+    client = scripted({"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": down, "h1_r1": down})
+
+    result = searched(client, request(), shop, asynchronous=asynchronous)
+
+    assert (result.stopped_by, repr(result.failure)) == ("failed", "ConnectionError('Jev is down')")
+    assert result.point("h1.e1").shortlist[0].symbol == "place_order"
+    assert result.point("h1.e1").labels == "labelled"
+
+
+def test_cancelling_the_async_search_raises_instead_of_returning(shop: CodeIndex) -> None:
+    class Hanging(AsyncScriptedJevClient):
+        async def send(self, state: Mapping, questions: Mapping):
+            sending.set()
+            await asyncio.Event().wait()
+
+    async def cancelled_while_judging() -> None:
+        task = asyncio.create_task(agent_search_async(request(), shop, Judge(Hanging())))
+        await sending.wait()
+        task.cancel()
+        await task
+
+    sending = asyncio.Event()
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(cancelled_while_judging())

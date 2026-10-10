@@ -4,8 +4,8 @@ A ranking (J1-3 per unit) says where to look; this says whether what was found a
 caller supplies the pieces, such as the best few units of each point, and the points. Every point's
 question goes into one request whose state is the points (``targets``) and the pieces (``fetched``,
 each entry only its file and code), through ``history.judge_sections``, which owns the request's
-size, masking, store and call accounting. The wording is ``judgments/existence_question.json``; a
-point's text sits in state, never in the wording.
+size, masking, store and call accounting; ``ask_existence_async`` asks through its async form. The
+wording is ``judgments/existence_question.json``; a point's text sits in state, never in the wording.
 
 When the pieces do not fit the client's box, the history evicts the earliest entries' code and every
 eviction is named in the answer; ``existence_fits`` tells a caller beforehand, so it can split the
@@ -17,7 +17,17 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from ..history import FETCHED, FetchedSpan, History, HistoryCheck, HistoryStep, SectionLimit, judge_sections
+from ..history import (
+    FETCHED,
+    FetchedSpan,
+    History,
+    HistoryCheck,
+    HistoryJudgment,
+    HistoryStep,
+    SectionLimit,
+    judge_sections,
+    judge_sections_async,
+)
 from ..judgments.answers import AnswerSource
 from ..judgments.judge import Judge
 from ..judgments.profiles import EXISTS
@@ -58,11 +68,30 @@ def ask_existence(
     judge: Judge, targets: Mapping[str, str], pieces: Sequence[LabelPiece]
 ) -> dict[str, ExistenceAnswer]:
     """Each point's existence answer over the same ``pieces``, all in one request."""
+    history, checks = _request(targets, pieces)
+    return _answers(history, pieces, judge_sections(judge, history, checks, _shared(targets)))
+
+
+async def ask_existence_async(
+    judge: Judge, targets: Mapping[str, str], pieces: Sequence[LabelPiece]
+) -> dict[str, ExistenceAnswer]:
+    """``ask_existence`` through the Judge's async form, for an async client."""
+    history, checks = _request(targets, pieces)
+    return _answers(history, pieces, await judge_sections_async(judge, history, checks, _shared(targets)))
+
+
+def _request(
+    targets: Mapping[str, str], pieces: Sequence[LabelPiece]
+) -> tuple[History, dict[str, HistoryCheck]]:
     if not targets or not pieces:
         raise ValueError("an existence question needs at least one point and one piece")
-    history = _history(pieces)
     checks = {target: HistoryCheck(existence_check(target), (FETCHED,)) for target in targets}
-    judged = judge_sections(judge, history, checks, _shared(targets))
+    return _history(pieces), checks
+
+
+def _answers(
+    history: History, pieces: Sequence[LabelPiece], judged: Mapping[str, HistoryJudgment]
+) -> dict[str, ExistenceAnswer]:
     shown = tuple(piece.place.id for piece in pieces)
     evicted = tuple(pieces[eviction["span"]].place.id for eviction in history.evictions)
     return {

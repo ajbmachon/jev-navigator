@@ -1375,4 +1375,7 @@ print(result.point("h1.e1").shortlist[0].symbol, result.point("h1.e1").definite_
 print(result.stopped_by, result.requests.used, "of", result.requests.budget)
 ```
 
-`result.to_json()` is the same result as plain JSON for an agent's tool.
+`result.to_json()` is the same result as plain JSON for an agent's tool. For an async client,
+`await agent_search_async(request, index, judge)` runs the same steps and sends the same requests
+through each block's async form (`find_all_async`, `ask_existence_async`, `label_roles_async`),
+with the repository work in a worker thread; a cancelled task's `CancelledError` is never caught.
