@@ -15,7 +15,9 @@ requests at once, so a slow route never throttles the routes after it.
 
 Every route runs the same generic `SystemOneClient` over the official TypeSafe SDK: the SDK
 builds, sends and retries the request with exact-byte capture, and the response is decoded
-by jev-navigator's parser. `TypeSafeJevClient` stays the Jev-specific client (its defaults,
+by jev-navigator's parser. A known route whose server is stricter than Jev names its wire dialect:
+Drex's (`drex_wire`) sends criteria as text and breaks base64 data URLs; every other route sends
+the request exactly as the judge built it. `TypeSafeJevClient` stays the Jev-specific client (its defaults,
 cancellation and Jev model semantics); routes never use it for non-Jev models. The chain
 from `environment.py` fills every file-provided variable before routes resolve, so `.env`
 configures routes exactly like the real environment does.
@@ -28,20 +30,22 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from ..environment import ROUTES_ENV, route_names
 from ..judgments.answers import JevResponse, response_from_raw
 from ..judgments.client import (
     JEV_INPUT_LIMITS,
     LATEST_JEV,
     InputBudgetExceededError,
     InputLimits,
+    Wire,
     input_budget_error,
 )
 from ..judgments.journal import AttemptJournalCallbackError, RawResponse
+from .drex_wire import drex_wire
 
 if TYPE_CHECKING:
     from .typesafe import TypeSafeJevClient
 
-ROUTES_ENV = "SYSTEM_ONE_ROUTES"
 JEV_ROUTE = "jev"
 TYPESAFE_KEY_SETTING = "TYPESAFE_API_KEY"
 
@@ -62,12 +66,14 @@ is a latency choice, not a refusal bound. Historical measurement provenance is r
 
 @dataclass(frozen=True)
 class KnownRoute:
-    """A hosted route's endpoint, model, measured input limits and concurrency."""
+    """A hosted route's endpoint, model, measured input limits and concurrency, and the wire dialect
+    its server needs when it is stricter than Jev's (None sends the request as built)."""
 
     endpoint: str
     model: str
     input_limits: InputLimits
     max_concurrency: int
+    wire: Wire | None = None
 
 
 # Known hosted shorthand routes: `SYSTEM_ONE_<NAME>=1` selects endpoint+model without
@@ -75,7 +81,7 @@ class KnownRoute:
 # `TYPESAFE_API_KEY`.
 KNOWN_ROUTES: dict[str, KnownRoute] = {
     "jev": KnownRoute("https://api.typesafe.ai", LATEST_JEV, JEV_INPUT_LIMITS, JEV_CONCURRENCY),
-    "drex": KnownRoute("https://drex.nace.ai", "drex-latest", DREX_INPUT_LIMITS, DREX_CONCURRENCY),
+    "drex": KnownRoute("https://drex.nace.ai", "drex-latest", DREX_INPUT_LIMITS, DREX_CONCURRENCY, drex_wire),
 }
 
 
@@ -102,15 +108,13 @@ def routes_from_env(environment: Mapping[str, str], transport=None) -> tuple[Rou
     """Resolve the route table from the environment (after `.env` chain loading).
 
     `SYSTEM_ONE_ROUTES=drex,jev` builds one client per name. A known name with
-    `SYSTEM_ONE_<NAME>=1` and no explicit settings uses the hosted shorthand. Unknown names
+    `SYSTEM_ONE_<NAME>=1` and no explicit settings uses the hosted shorthand; a known name always
+    sends in its server's wire dialect, whichever endpoint it is given. Unknown names
     require endpoint and model; every route resolves its key eagerly (per-route
     `SYSTEM_ONE_<NAME>_API_KEY`, and for jev alone `TYPESAFE_API_KEY`), so a misconfigured route
     fails at resolution instead of mid-run.
     """
-    names = tuple(name.strip().lower() for name in environment.get(ROUTES_ENV, "").split(",") if name.strip())
-    if not names:
-        return ()
-    return tuple(_route(environment, name, transport) for name in names)
+    return tuple(_route(environment, name, transport) for name in route_names(environment))
 
 
 def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
@@ -142,6 +146,7 @@ def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
         transport=transport,
         input_limits=input_limits,
         max_concurrency=max_concurrency,
+        wire=known.wire if known is not None else None,
     )
     return Route(name=name, client=client)
 
@@ -191,11 +196,14 @@ class SystemOneClient:
     speaking the `/v1/systemone` wire (Jev, Drex, a finetuned decider).
 
     The SDK client owns configuration and auth; its own request builder prepares the request
-    and its transport sends it with exact-byte capture. Criteria are flattened to strings on
-    the wire (the strictest dialect — Drex's — requires it) and the response is decoded by
+    and its transport sends it with exact-byte capture. A ``wire`` dialect, when the route has
+    one, rewrites the request just before it is sent (Drex's sends criteria as text), so the
+    request the judge hashed and stored is unchanged and the captured sent body is what the
+    server got. The client's ``input_limits`` measure the request in that same form, so the
+    judge splits a request that would only overflow once rewritten. The response is decoded by
     jev-navigator's parser from the exact bytes instead of the SDK's strict response schemas
-    (whose score `legend` model rejects Drex's echo shape). Every SDK-internal access lives
-    in `_send_raw`, so an SDK version bump is a one-function fix.
+    (whose score `legend` model rejects Drex's echo shape). Every SDK-internal access lives in
+    `_send_raw`, so an SDK version bump is a one-function fix.
     """
 
     def __init__(
@@ -207,6 +215,7 @@ class SystemOneClient:
         transport=None,
         input_limits: InputLimits,
         max_concurrency: int,
+        wire: Wire | None = None,
     ) -> None:
         import httpx2
         from typesafe_sdk import TypeSafeClient
@@ -221,8 +230,9 @@ class SystemOneClient:
             transport=self._capture,
         )
         self.model = self._sdk._config.default_model  # noqa: SLF001 - the config is the env contract
-        self.input_limits = input_limits
+        self.input_limits = input_limits if wire is None else replace(input_limits, wire=wire)
         self._slots = threading.BoundedSemaphore(max_concurrency)
+        self._wire = wire
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
         return self.parse(self.send(state, questions))
@@ -246,6 +256,8 @@ class SystemOneClient:
             def _decode(cls, response):
                 return cls.model_validate_json(response.content)
 
+        if self._wire is not None:
+            state, questions = self._wire(state, questions)
         request = prepare_system_one(
             self._sdk._config, dict(state), dict(questions), None, None, None, None, LenientResponse
         )  # noqa: SLF001

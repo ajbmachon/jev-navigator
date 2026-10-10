@@ -6,8 +6,8 @@ when a request is too large."""
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from .answers import JevResponse
@@ -37,15 +37,27 @@ JEV_REQUEST_TOKEN_LIMIT = 64_000
 """The input Jev accepts for a whole request; a request of 48,951 tokens was accepted."""
 
 
+Wire = Callable[[Mapping, Mapping], tuple[Mapping, Mapping]]
+"""A route's wire dialect: the state and questions its server accepts, built from the judge's request.
+A wire only ever lengthens a request (text for structure, an added character), never shortens it."""
+
+
 @dataclass(frozen=True)
 class InputLimits:
     """A model's input limits in serialized characters: ``box_chars`` bounds the state plus the
     longest single question, and ``request_chars`` the whole body when the provider documents a
     bound for it (``None`` when it does not). Packing sends within them; a provider's typed refusal
-    stays authoritative."""
+    stays authoritative.
+
+    ``wire`` is the dialect the route sends, when it is stricter than the request as built (Drex's).
+    The limits hold for what the server receives, so ``exceeded_by`` measures the request in that
+    form, and a request that fits as built but not as sent is refused before it is sent, which the
+    judge splits like any size refusal. It is not part of the limits' identity: equal boxes are equal
+    limits."""
 
     box_chars: int
     request_chars: int | None = None
+    wire: Wire | None = field(default=None, compare=False)
 
     @classmethod
     def from_tokens(cls, box_tokens: int, request_tokens: int | None = None) -> InputLimits:
@@ -53,8 +65,10 @@ class InputLimits:
         return cls(chars_for_tokens(box_tokens), request_chars)
 
     def exceeded_by(self, state: Mapping, questions: Mapping) -> bool:
-        """Whether this request is outside the limits, measured in ASCII-escaped JSON
-        (``serialized_chars``), the one measure of every size box."""
+        """Whether this request, as the route sends it, is outside the limits, measured in
+        ASCII-escaped JSON (``serialized_chars``), the one measure of every size box."""
+        if self.wire is not None:
+            state, questions = self.wire(state, questions)
         longest_question = max((serialized_chars(question) for question in questions.values()), default=0)
         if serialized_chars(state) + longest_question > self.box_chars:
             return True
@@ -62,9 +76,17 @@ class InputLimits:
         return self.request_chars is not None and body > self.request_chars
 
     def tightest(self, other: InputLimits) -> InputLimits:
-        """The limits a request must keep to fit both."""
+        """The limits a request must keep to fit both. Since a wire only lengthens a request,
+        measuring it in every route's wire form at the smallest box is a fit for each route."""
         bounds = [limit for limit in (self.request_chars, other.request_chars) if limit is not None]
-        return InputLimits(min(self.box_chars, other.box_chars), min(bounds) if bounds else None)
+        box_chars = min(self.box_chars, other.box_chars)
+        return InputLimits(box_chars, min(bounds) if bounds else None, _both(self.wire, other.wire))
+
+
+def _both(first: Wire | None, second: Wire | None) -> Wire | None:
+    if first is None or second is None or first is second:
+        return first or second
+    return lambda state, questions: second(*first(state, questions))
 
 
 JEV_INPUT_LIMITS = InputLimits.from_tokens(JEV_STATE_TOKEN_LIMIT, JEV_REQUEST_TOKEN_LIMIT)

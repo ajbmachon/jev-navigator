@@ -188,8 +188,16 @@ to the judge, which splits the request, because the next route would get the sam
 reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_MODEL` and `SYSTEM_ONE_<NAME>_API_KEY`; `drex`
 and `jev` also take `SYSTEM_ONE_<NAME>=1` for their hosted endpoint and model. Only the `jev` route
 falls back to `TYPESAFE_API_KEY`: every other route needs its own key, so your TypeSafe key never goes
-to Drex or to a server you configured. A route missing its endpoint, model or key stops the command
-before any request, naming the route and the setting. Without `SYSTEM_ONE_ROUTES`, `jvn` uses the default Jev client described above.
+to Drex or to a server you configured, and a table without a `jev` route, such as
+`SYSTEM_ONE_ROUTES=drex`, runs with no `TYPESAFE_API_KEY` at all. A route missing its endpoint, model
+or key stops the command before any request, naming the route and the setting. Without
+`SYSTEM_ONE_ROUTES`, `jvn` uses the default Jev client described above.
+
+Drex accepts a stricter request than Jev, so the `drex` route sends what the judge built in Drex's
+form: each structured criterion goes as its JSON text, its fields still labelled, and a zero-width
+space goes after the `data` of any base64 data URL (`data:image/png;base64,…`), which Drex would
+otherwise refuse as media. The judge hashes and stores the request it built; the journal's sent body
+records what Drex received. Every other route gets the request exactly as built.
 
 Each route has an input limit for the state plus the longest question: Drex accepts 8,192 tokens and
 Jev 32,000, as Analysis Engine measured them; `jvn` turns tokens into characters at the one rate

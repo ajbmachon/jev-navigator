@@ -21,7 +21,7 @@ from jev_navigator.adapters.routes import (
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import Judge
-from jev_navigator.judgments.questions import Check, Criterion
+from jev_navigator.judgments.questions import Check, Criterion, request_sha256
 from jev_navigator.judgments.thresholds import Thresholds
 
 
@@ -77,6 +77,14 @@ def test_a_route_other_than_jev_without_its_own_key_is_refused_naming_the_settin
         routes_from_env(environment)
 
 
+def test_a_jev_route_without_any_key_is_refused_naming_both_settings():
+    # The loader no longer requires TYPESAFE_API_KEY once a route table is named, so the jev route
+    # itself must stop the command before any request.
+    refusal = "route 'jev' has no key: set SYSTEM_ONE_JEV_API_KEY or TYPESAFE_API_KEY"
+    with pytest.raises(ValueError, match=refusal):
+        routes_from_env({"SYSTEM_ONE_ROUTES": "jev", "SYSTEM_ONE_JEV": "1"})
+
+
 def test_a_drex_route_without_its_own_key_sends_drex_nothing_on_the_wire(monkeypatch):
     # Arrange: the TypeSafe key is in the settings and in the process environment the SDK reads
     _requires_typesafe()
@@ -124,6 +132,112 @@ def test_the_typesafe_key_reaches_only_the_jev_route_on_the_wire(monkeypatch):
     # Assert
     assert drex.authorizations and set(drex.authorizations) == {"Bearer nace-FAKE-drex-key"}
     assert set(jev.authorizations) == {f"Bearer {TYPESAFE_KEY}"}
+
+
+CONTAINS_TARGET = Check(
+    name="contains_target",
+    instructions="Does `slice.code` contain the code described in `target.description`?",
+    yes=Criterion("The slice holds the code itself.", examples=("`if len(items) > limit: raise`",)),
+    no=Criterion("The slice holds other code.", not_for="Code that merely has a similar name."),
+)
+EMBEDDED_IMAGE = 'logo = "data:image/png;base64,iVBORw0KGgo="  # and DATA:text/plain;BASE64,QQ=='
+ROWS = "return { data: rows }"
+
+
+def _one_route(name: str, url: str) -> RoutedJevClient:
+    upper = name.upper()
+    return RoutedJevClient(
+        routes_from_env(
+            {
+                "SYSTEM_ONE_ROUTES": name,
+                f"SYSTEM_ONE_{upper}_ENDPOINT": url,
+                f"SYSTEM_ONE_{upper}_MODEL": f"{name}-test",
+                f"SYSTEM_ONE_{upper}_API_KEY": f"{name}-FAKE-key",
+            }
+        )
+    )
+
+
+def _sent(name: str, state: dict, questions: dict) -> dict:
+    """The body a stand-in for route ``name`` received for one request."""
+    with stand_in(f"{name}-test") as server:
+        routed = _one_route(name, server.url)
+        try:
+            routed.ask(state, questions)
+        finally:
+            routed.close()
+    (body,) = server.received
+    return body
+
+
+def test_the_drex_route_sends_each_structured_criterion_as_its_json_text():
+    # Arrange: a check whose yes and no criteria are objects, which Drex refuses with HTTP 422
+    _requires_typesafe()
+    question = CONTAINS_TARGET.to_question()
+
+    # Act
+    body = _sent("drex", {"case": "x"}, {"found": question})
+
+    # Assert: each criterion arrives as text that still holds its labelled fields
+    criteria = body["questions"]["found"]["criteria"]
+    assert all(isinstance(text, str) for text in criteria.values())
+    assert {label: json.loads(text) for label, text in criteria.items()} == question["criteria"]
+    assert question == CONTAINS_TARGET.to_question()
+
+
+def test_the_jev_route_sends_criteria_exactly_as_the_judge_built_them():
+    _requires_typesafe()
+    question = CONTAINS_TARGET.to_question()
+
+    body = _sent("jev", {"case": "x"}, {"found": question})
+
+    assert body["questions"]["found"] == question
+
+
+def test_the_drex_route_breaks_base64_data_urls_and_leaves_other_text_alone():
+    # Arrange: source code that embeds an image, in the state and in a choice option
+    _requires_typesafe()
+    state = {"slice": {"code": f"{EMBEDDED_IMAGE}\n{ROWS}"}}
+    options = {"0": EMBEDDED_IMAGE, "1": ROWS}
+    questions = {"pick": {"type": "choice", "instructions": "Which one?", "criteria": options}}
+
+    # Act
+    to_drex = _sent("drex", state, questions)
+    to_jev = _sent("jev", state, questions)
+
+    # Assert: Drex gets no base64 data URL, every other character unchanged; Jev gets the code as is
+    broken = 'logo = "data\u200b:image/png;base64,iVBORw0KGgo="  # and DATA\u200b:text/plain;BASE64,QQ=='
+    assert to_drex["state"] == {"slice": {"code": f"{broken}\n{ROWS}"}}
+    assert to_drex["questions"]["pick"]["criteria"] == {"0": broken, "1": ROWS}
+    assert to_jev["state"] == state
+    assert to_jev["questions"] == questions
+
+
+def test_the_journal_keeps_the_judges_request_and_the_body_drex_was_sent(tmp_path):
+    # Arrange
+    _requires_typesafe()
+    journal_path = tmp_path / "drex.jsonl"
+    state = {"case": "x"}
+    questions = {"found": CONTAINS_TARGET.to_question()}
+
+    # Act
+    with stand_in("drex-test") as drex:
+        routed = _one_route("drex", drex.url)
+        try:
+            Judge(routed, journal=JsonlJournal(journal_path, keep_request_text=True)).ask(
+                state, questions, thresholds=Thresholds()
+            )
+        finally:
+            routed.close()
+
+    # Assert: the request, and so its hash and stored answer, is the judge's; the attempt is Drex's text
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    request = next(record for record in records if record["kind"] == "request")
+    (attempt,) = [record for record in records if record["kind"] == "http_attempt"]
+    assert request["request_sha256"] == request_sha256(state, questions)
+    assert request["questions"]["found"]["criteria"] == questions["found"]["criteria"]
+    sent = json.loads(base64.b64decode(attempt["sent_body_base64"]))
+    assert all(isinstance(text, str) for text in sent["questions"]["found"]["criteria"].values())
 
 
 def test_the_first_route_answers_and_the_second_never_runs():
