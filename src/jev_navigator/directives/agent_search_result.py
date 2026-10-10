@@ -60,14 +60,12 @@ class RankedPlace:
     roles: Mapping[str, float] | None = None
 
     def to_json(self) -> dict[str, Any]:
-        entry = {
+        """The place for the agent: its id, symbol and probability. Its file and lines travel with its
+        code (``AgentSearchResult.to_json``); the request that judged it stays in the journal."""
+        entry: dict[str, Any] = {
             "place": self.place.id,
-            "file": self.place.file,
-            "lines": [list(lines) for lines in self.place.ranges],
             "symbol": self.symbol,
             "probability": round(self.probability, 4),
-            "request_sha256": self.request_sha256,
-            "from_store": self.from_store,
         }
         if self.roles is not None:
             entry["roles"] = {role: round(value, 4) for role, value in self.roles.items()}
@@ -108,9 +106,6 @@ class PointOutcome:
             "band": None if self.band is None else self.band.value,
             "exists": None if existence is None else round(existence.probability, 4),
             "exists_over": [] if existence is None else list(existence.shown),
-            "exists_answered_by": None
-            if existence is None or existence.answered_by is None
-            else existence.answered_by.to_json(),
             "definite_files": list(self.definite_files),
             "possible_files": list(self.possible_files),
             "shortlist": [place.to_json() for place in self.shortlist],
@@ -203,7 +198,21 @@ class AgentSearchResult:
             point for hypothesis in self.hypotheses for point in hypothesis.points if point.id == point_id
         )
 
+    def _places(self) -> dict[str, Item]:
+        """Every place the result names by id; ``code`` names only conflicts' and shortlists' places."""
+        ranked = [
+            *(conflict.place for conflict in self.conflicts),
+            *(
+                place
+                for hypothesis in self.hypotheses
+                for point in hypothesis.points
+                for place in point.shortlist
+            ),
+        ]
+        return {place.place.id: place.place for place in ranked}
+
     def to_json(self) -> dict[str, Any]:
+        places = self._places()
         return {
             "stopped_by": self.stopped_by,
             "failure": None if self.failure is None else f"{type(self.failure).__name__}: {self.failure}",
@@ -219,7 +228,7 @@ class AgentSearchResult:
                 }
                 for hypothesis in self.hypotheses
             ],
-            "code": {place_id: _code_entry(code) for place_id, code in self.code.items()},
+            "code": {place_id: _code_entry(places[place_id], code) for place_id, code in self.code.items()},
             "coverage": self.coverage.to_json(),
         }
 
@@ -251,5 +260,8 @@ def _reading_order(conflicts: Sequence[Conflict], points: Sequence[PointOutcome]
     return [*(conflict.place.place for conflict in conflicts), *shortlisted]
 
 
-def _code_entry(code: str | None) -> dict[str, Any]:
-    return {"code": code} if code is not None else {"code": None, "omitted": CODE_OMITTED}
+def _code_entry(place: Item, code: str | None) -> dict[str, Any]:
+    located = {"file": place.file, "lines": [list(lines) for lines in place.ranges]}
+    return (
+        {**located, "code": code} if code is not None else {**located, "code": None, "omitted": CODE_OMITTED}
+    )

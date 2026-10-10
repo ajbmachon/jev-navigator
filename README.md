@@ -1368,6 +1368,8 @@ default). An unknown or malformed field is refused with its JSON path.
   shortlist and the next places, and the distinct files with a definite (at the yes bar) or possible
   (0.5 or more) place; places matching a refuting point come first, as conflicts. Code travels for the
   best places first, within `max_code_chars` (40,000 by default); every other place is a location.
+  A place in the answer is its id, symbol and probability; its file and lines travel with its code,
+  and the request that judged it stays on the Python result and in the journal.
   Coverage names what was reached and not judged, files the scope left out, and unresolved anchors.
 
 <!-- example: agent search -->
