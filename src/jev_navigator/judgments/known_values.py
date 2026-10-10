@@ -130,21 +130,39 @@ def _scan_of(index: CodeIndex) -> _Scan:
 
 
 def _values_in(index: CodeIndex) -> frozenset[str]:
-    """Read in two passes, so no more than one file's text is held at a time: the values the rules hide
-    that are long enough, then how many files hold each, counted no further than one past the limit."""
-    found = dict.fromkeys(
-        value
-        for file, text in _texts(index)
-        for value in DEFAULT_MASKER.masked_values(text, file)
-        if len(value) >= BY_CONTENT_MIN_CHARS
-    )
-    holders = dict.fromkeys(found, 0)
-    for _file, text in _texts(index):
-        for value in [value for value in found if value in text]:
-            holders[value] += 1
-            if holders[value] > KNOWN_VALUE_MAX_FILES:
-                del found[value]
-    return frozenset(found)
+    """The values the rules hide that are long enough, read file by file so no more than one file's
+    text is held at a time, kept when ``_holders`` counts them in few enough files."""
+    found: dict[str, None] = {}
+    text_files: set[str] = set()
+    for file, text in _texts(index):
+        text_files.add(file)
+        found.update(
+            dict.fromkeys(
+                value
+                for value in DEFAULT_MASKER.masked_values(text, file)
+                if len(value) >= BY_CONTENT_MIN_CHARS
+            )
+        )
+    holders = _holders(index, list(found), text_files)
+    return frozenset(value for value in found if holders[value] <= KNOWN_VALUE_MAX_FILES)
+
+
+def _holders(index: CodeIndex, values: list[str], text_files: set[str]) -> dict[str, int]:
+    """How many of ``text_files`` hold each value, found by the index's text search
+    (``CodeIndex.search_texts``), whose ripgrep reads its patterns on standard input, never from its
+    command line, which process listings and error messages show. It searches binary files too,
+    which ``text_files`` leaves out. A value on one line is counted from its hits; one spanning lines
+    is searched by its longest line, then confirmed in each file holding that line. The index keeps
+    those searches' lines, values among them, while it lives, as it keeps the files."""
+    keys = {value: max(value.split("\n"), key=len) for value in values}
+    hits = index.search_texts(dict.fromkeys(keys.values())) if keys else {}
+    counts = {}
+    for value, key in keys.items():
+        files = {hit.file for hit in hits[key]} & text_files
+        counts[value] = (
+            len(files) if key == value else sum(value in "\n".join(index.lines(file)) for file in files)
+        )
+    return counts
 
 
 def _texts(index: CodeIndex) -> Iterator[tuple[str, str]]:

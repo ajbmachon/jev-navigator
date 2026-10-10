@@ -20,7 +20,7 @@ from jev_navigator.directives.places import function_place
 from jev_navigator.directives.trace import trace_workflow
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
-from jev_navigator.judgments.known_values import KNOWN_VALUE_MAX_FILES, KnownValuesMasker
+from jev_navigator.judgments.known_values import KNOWN_VALUE_MAX_FILES, KnownValuesMasker, repository_values
 from jev_navigator.judgments.secrets import SecretMasker
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
@@ -189,3 +189,56 @@ def test_the_known_values_masker_keeps_the_token_pattern_of_the_masker_it_wraps(
 
     # Assert
     assert wrapped.token_pattern is OwnTokens.token_pattern
+
+
+def test_copies_in_binary_files_never_count_toward_the_limit(tmp_path: Path) -> None:
+    # Arrange: the value stands in as many text files as a known value may, and in binary files too
+    uses = {
+        f"shop/use_{n}.py": f'def use_{n}(order):\n    return dial(order, "{VALUE}")\n'
+        for n in range(KNOWN_VALUE_MAX_FILES - 1)
+    }
+    blobs = {f"assets/blob_{n}.bin": f"\0{VALUE}\0" for n in range(2)}
+    index = repository(tmp_path, {**uses, **blobs, **CONFIG})
+
+    # Act
+    known = repository_values(index)
+
+    # Assert
+    assert VALUE in known
+
+
+KEY_LINES = "\n".join(
+    "".join(chr(ord("A") + (row * 7 + column) % 26) for column in range(64)) for row in range(8)
+)
+KEY = "-----BEGIN RSA " + "PRIVATE KEY-----\n" + KEY_LINES + "\n-----END RSA " + "PRIVATE KEY-----"
+
+
+@pytest.mark.parametrize(
+    ("files", "known"), [(KNOWN_VALUE_MAX_FILES, True), (KNOWN_VALUE_MAX_FILES + 1, False)]
+)
+def test_a_value_spanning_lines_is_counted_in_every_file_holding_it(
+    tmp_path: Path, files: int, known: bool
+) -> None:
+    # Arrange
+    keys = {f"keys/key_{n}.py": f'KEY = """\n{KEY}\n"""\n' for n in range(files)}
+    index = repository(tmp_path, keys)
+
+    # Act
+    values = repository_values(index)
+
+    # Assert
+    spanning = [value for value in values if "\n" in value]
+    assert bool(spanning) is known
+
+
+def test_a_file_holding_only_one_line_of_a_value_spanning_lines_does_not_hold_it(tmp_path: Path) -> None:
+    # Arrange: the key stands whole in as many files as a known value may, and its lines stand alone in more
+    keys = {f"keys/key_{n}.py": f'KEY = """\n{KEY}\n"""\n' for n in range(KNOWN_VALUE_MAX_FILES)}
+    parts = {f"docs/part_{n}.txt": f"{line}\n" for n, line in enumerate(KEY_LINES.split("\n"))}
+    index = repository(tmp_path, {**keys, **parts})
+
+    # Act
+    values = repository_values(index)
+
+    # Assert
+    assert [value for value in values if "\n" in value]

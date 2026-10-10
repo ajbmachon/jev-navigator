@@ -829,8 +829,8 @@ on its own scope, so searches sharing one judge never use up each other's budget
   value hides it too, even when it came from an env file no request shows. A value in more files is a
   placeholder (`password: password`), hidden only in the requests that show it where a rule finds it.
   Code holding no copy is sent byte for byte as before. Reading every file costs a one-time scan per
-  index (about 11 s for the 1,500 files of analysis-engine and 32 s for the 5,200 of heedvane); reuse
-  one index across searches.
+  index, almost all of it JVN's rules; the index's text search then counts each value's files, its
+  patterns on ripgrep's standard input, never its command line. Reuse one index across searches.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
   left in a key is refused too. Both are on by default; a host passes its own (a masker offers
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
