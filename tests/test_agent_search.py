@@ -606,3 +606,98 @@ def test_agent_search_hands_its_scope_to_the_scent_source_so_left_out_units_use_
     assert "refuse_oversized_order" in sent_code(client)
     assert "test_refuses_an_order" not in sent_code(client)
     assert "shop/quota.py" in result.point("h1.e1").definite_files
+
+
+def refunds_on_raise(code: str) -> float:
+    return 0.92 if "raise ValueError" in code else 0.05
+
+
+@pytest.mark.parametrize(("budget", "labels"), [(3, 0), (8, 2), (8, 5), (64, 0)])
+def test_a_point_never_reads_not_found_while_a_place_judged_after_its_answer_matches_it(
+    shop: CodeIndex, budget: int, labels: int
+):
+    # The refuting point is low over its first shortlist and closes; the evidence point's expansion
+    # then reaches check_limit, which matches the refuting point too.
+    client = scripted(
+        {"h1_e1": limit_match, "h1_r1": refunds_on_raise},
+        {"h1_e1": constant(0.5), "h1_r1": lambda code: 0.9 if "raise ValueError" in code else 0.1},
+    )
+
+    result = agent_search(
+        request(budget_requests=budget), shop, Judge(client, masker=None, scanner=None), label_requests=labels
+    )
+
+    refuting = result.point("h1.r1")
+    matched = [conflict.place.symbol for conflict in result.conflicts if conflict.point == "h1.r1"]
+    assert matched == ["check_limit"]
+    assert refuting.outcome != "not_found_in_scope"
+
+
+def test_a_point_closed_as_not_found_is_asked_again_over_a_place_that_now_matches_it(shop: CodeIndex):
+    client = scripted(
+        {"h1_e1": limit_match, "h1_r1": refunds_on_raise},
+        {"h1_e1": constant(0.5), "h1_r1": lambda code: 0.9 if "raise ValueError" in code else 0.1},
+    )
+
+    result = agent_search(request(budget_requests=64), shop, Judge(client, masker=None, scanner=None))
+
+    assert result.point("h1.r1").outcome == "established"
+
+
+def test_a_cancelled_search_sends_no_label_request(shop: CodeIndex):
+    client = scripted(
+        {"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": constant(0.5), "h1_r1": constant(0.1)}
+    )
+    sent_before_cancel = 2
+
+    result = agent_search(
+        request(),
+        shop,
+        Judge(client, masker=None, scanner=None),
+        cancelled=lambda: len(client.requests) >= sent_before_cancel,
+    )
+
+    assert result.stopped_by == "cancelled"
+    assert len(client.requests) == sent_before_cancel
+    assert {point.labels for point in result.hypotheses[0].points} <= {
+        "not labelled: the search was cancelled",
+        "not labelled: no shortlisted place at 0.5 or more",
+    }
+
+
+def test_an_interrupted_search_sends_no_label_request(shop: CodeIndex):
+    inner = scripted(
+        {"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": constant(0.5), "h1_r1": constant(0.1)}
+    )
+
+    def answer(question_id, question, state):
+        if question_id.startswith("exists_"):
+            raise KeyboardInterrupt
+        return inner.nouls(question_id, question, state)
+
+    client = ScriptedJevClient(nouls=answer)
+    result = agent_search(request(), shop, Judge(client, masker=None, scanner=None))
+
+    assert result.stopped_by == "cancelled"
+    assert kinds(client)[-1] == "existence"
+
+
+def test_the_code_returned_to_the_agent_is_the_masked_code_jev_judged(tmp_path: Path):
+    password = "Tr0ub4dor-horse-staple"
+    files = dict(SHOP)
+    files["shop/limits.py"] = files["shop/limits.py"].replace(
+        "def check_limit(order):\n", f'def check_limit(order):\n    password = "{password}"\n'
+    )
+    write_files(tmp_path, files)
+    commit_all(tmp_path)
+    client = scripted(
+        {"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": limit_exists, "h1_r1": constant(0.1)}
+    )
+
+    result = agent_search(
+        request(anchors=[{"file": "shop/limits.py", "line": 5}]), CodeIndex.from_git(tmp_path), Judge(client)
+    )
+
+    returned = json.dumps(result.to_json()["code"])
+    assert "check_limit" in returned
+    assert password not in returned

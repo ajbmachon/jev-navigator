@@ -400,6 +400,7 @@ class _Run:
             if not wave:
                 return FRONTIER_EXHAUSTED
             yield from self._judge(wave)
+            self._reopen_unasked_matches()
             self._settle_expansions()
             yield from self._ask_existence()
             self._apply_bands()
@@ -689,6 +690,20 @@ class _Run:
                 point.closed_by = STABLE_BEAM
             point.expanded_from, point.awaiting = None, frozenset()
 
+    def _reopen_unasked_matches(self) -> None:
+        """A point closed as not found opens again once a place judged after its existence answer joins
+        its shortlist at 0.5 or more, so the next existence request covers that place."""
+        for point in self.points:
+            if point.closed_by == FRONTIER_EXHAUSTED and self._unasked_match(point):
+                point.closed_by = None
+
+    def _unasked_match(self, point: _Point) -> bool:
+        """Whether the point's shortlist holds a place at 0.5 or more its existence answer did not cover."""
+        return any(
+            answer.probability >= POSSIBLE_AT and unit_id not in point.asked_over
+            for unit_id, answer in self._beam(point)
+        )
+
     def _close_exhausted(self, *, at_end: bool) -> None:
         """A low-band point with nothing left to judge is not found in this scope; at the end of a
         search that ran out of units, every open point stops for that reason."""
@@ -715,6 +730,10 @@ class _Run:
             ]
             if not pieces:
                 point.labels = "not labelled: no shortlisted place at 0.5 or more"
+            elif self.stopped_by == CANCELLED or (
+                self.options.cancelled is not None and self.options.cancelled()
+            ):
+                point.labels = "not labelled: the search was cancelled"
             elif self.total.calls_left() == 0:
                 point.labels = "not labelled: budget"
             else:
@@ -766,7 +785,11 @@ class _Run:
         )
 
     def _code(self, place: Item) -> str:
-        return read_ranges(self.index, place.file, place.ranges)
+        """The code Jev judged at ``place``, masked as it was sent: raw source never leaves the search."""
+        for answers in self.answers.values():
+            if place.id in answers:
+                return answers[place.id].item["code"]
+        raise KeyError(f"{place.id} was never judged, so there is no masked code to show for it")
 
     def _outcome(self, point: _Point, coverage: PointResult) -> PointOutcome:
         ranked = [self._ranked_place(point, unit_id, answer) for unit_id, answer in self._ranked(point.key)]
@@ -777,7 +800,7 @@ class _Run:
             point.hypothesis,
             point.kind,
             point.text,
-            _outcome_of(point),
+            _outcome_of(point, self._unasked_match(point)),
             point.closed_by or self.stopped_by,
             point.band,
             point.existence,
@@ -927,9 +950,10 @@ def _in_place_order(pieces: Mapping[str, LabelPiece]) -> list[LabelPiece]:
     return sorted(pieces.values(), key=lambda piece: (piece.place.file, piece.place.ranges, piece.place.id))
 
 
-def _outcome_of(point: _Point) -> Outcome:
+def _outcome_of(point: _Point, unasked_match: bool) -> Outcome:
+    """Not found only while the low existence answer still covers every likely place of the shortlist."""
     if point.closed_by == ESTABLISHED:
         return Outcome.ESTABLISHED
-    if point.closed_by == FRONTIER_EXHAUSTED and point.band is Band.LOW:
+    if point.closed_by == FRONTIER_EXHAUSTED and point.band is Band.LOW and not unasked_match:
         return Outcome.NOT_FOUND_IN_SCOPE
     return Outcome.UNDECIDED
