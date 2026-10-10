@@ -5,7 +5,8 @@ search with (``agent_search_request``). Each point becomes one target whose text
 into the admitted J1-3 question (``find_all.match_check``); a hypothesis's mechanism is never sent.
 Every request asks every point about the same units, at most one request's worth (16) per round. A
 model that takes fewer items per request (its route's ``ITEMS_PER_REQUEST``) is sent each round in
-smaller requests, and the budget counts requests of the judge's own size, so the rounds stay the same.
+smaller requests. The budget counts requests of the judge's own size: a round, an existence request or a
+label request costs one however many smaller requests carry it, so a capped model gets the same rounds.
 
 Ranking says where to look; existence says whether the result answers the point:
 
@@ -335,6 +336,8 @@ class _Run:
         self.targets = {point.key: point.text for point in self.points}
         self.sent = -(-judge.items_per_request // judge.items_per_sent_request())
         """The requests one round's items travel in: one, or more for a model that takes fewer items."""
+        self.charged = 0
+        """Sent requests added to round each step up to whole requests of the judge's size."""
         self.total = _capped(judge, request.budget_requests * self.sent)
         self.searching = _capped(
             self.total, max(1, request.budget_requests - options.label_requests) * self.sent
@@ -460,6 +463,7 @@ class _Run:
             cancelled=self.options.cancelled,
         )
         self.calls["ranking"] += self.searching.calls - before
+        self._count_whole(self.searching.calls - before)
         progress = self._absorb(result)
         for unit in wave:
             if unit.id not in {judged.id for judged in result.units}:
@@ -597,6 +601,7 @@ class _Run:
             targets = {point.key: point.text for point in points}
             answers = yield _block(ask_existence, ask_existence_async, self.searching, targets, pieces)
             self.calls["existence"] += self.searching.calls - before
+            self._count_whole(self.searching.calls - before)
             for point in points:
                 point.existence = answers[point.key]
                 point.asked_over = self._beam_ids(point)
@@ -785,6 +790,7 @@ class _Run:
             return
         finally:
             self.calls["labels"] += self.total.calls - before
+            self._count_whole(self.total.calls - before)
         point.roles = {piece.piece.place.id: piece.probabilities[point.key] for piece in labelled.pieces}
         refused = len(labelled.refusals)
         point.labels = "labelled" if not refused else f"labelled; {refused} place(s) refused, roles unknown"
@@ -877,10 +883,18 @@ class _Run:
         ]
         return tuple(sorted(conflicts, key=lambda conflict: -conflict.place.probability))
 
+    def _count_whole(self, requests: int) -> None:
+        """Counts a step's ``requests`` as whole requests of the judge's size, rounded up: the caps count sent
+        requests, ``self.sent`` to each whole one, so they drop by what the step left of its last one."""
+        rest = -(-requests // self.sent) * self.sent - requests
+        self.charged += rest
+        for scope in (self.searching, self.total):
+            scope.max_calls = max(scope.calls, scope.max_calls - rest)
+
     def _requests(self) -> RequestUse:
         return RequestUse(
-            self.total.max_calls,
-            self.total.calls,
+            self.request.budget_requests,
+            (self.total.calls + self.charged) // self.sent,
             self.calls["ranking"],
             self.calls["existence"],
             self.calls["labels"],
