@@ -1240,6 +1240,8 @@ class CodeIndex:
 
         Ripgrep returns only line identities. The literal matcher retains every overlapping term
         on those lines and gives each its own bounded context, so batching never drops provenance.
+        It matches each line as the index first read the file: a line ripgrep found in a file that
+        has grown since holds nothing the index read.
         """
         texts = tuple(dict.fromkeys(texts))
         cache = self.__dict__.setdefault("_memoized__search_text", {})
@@ -1256,7 +1258,10 @@ class CodeIndex:
             matcher = TextMatcher(ordinary)
             hits: dict[str, list[TextHit]] = {text: [] for text in ordinary}
             for line in sorted(matches):
-                source = self.lines(line.file)[line.line - 1]
+                lines = self.lines(line.file)
+                if line.line > len(lines):
+                    continue
+                source = lines[line.line - 1]
                 seen = set()
                 for term, position in matcher.matches(source):
                     if term not in seen:
