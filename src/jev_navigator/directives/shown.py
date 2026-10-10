@@ -4,6 +4,7 @@ stays visible."""
 
 from __future__ import annotations
 
+import re
 from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import replace
@@ -12,6 +13,10 @@ from ..index.spans import CodeSlice
 
 MAX_LINE_CHARS = 240
 LINE_CUT_MARK = " [line cut]"
+CHARACTERS_CUT_MARK = "[... {count} characters cut]"
+CUT_MARKS = re.compile(rf"{re.escape(LINE_CUT_MARK)}|\[\.\.\. \d+ characters cut\]")
+"""Where a request's text was cut inside a line or a value: what stands right before a mark can be the
+start of a secret value the cut split, which request masking hides (``secrets.split_starts``)."""
 
 
 def cut_long_line(line: str, max_chars: int = MAX_LINE_CHARS) -> str:
