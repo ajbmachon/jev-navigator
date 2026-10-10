@@ -39,9 +39,21 @@ TOKEN_CHARACTER_CLASS = r"[A-Za-z0-9+/=_\-]"
 
 Span = tuple[int, int]
 
-_PRIVATE_KEY_BLOCK = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|\Z)", re.S
+_KEY_BEGIN = r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----"
+_KEY_END = r"-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----"
+# One whole line of key body as it stands in a file or in source: a base64 run, bare or wrapped in
+# quotes, commas, concatenation or an escaped newline; a PEM header; or a blank line. A run shorter
+# than a PEM line counts only when padded or last in the text, so a word such as `return` after a
+# marker that code merely mentions is never taken for key material.
+_PEM_WRAP = r"""[ \t\r"'`,;+()]*"""
+_PEM_LINE_END = rf"{_PEM_WRAP}(?:\\n)?{_PEM_WRAP}"
+_PEM_RUN = rf"(?:[A-Za-z0-9+/]{{16,}}={{0,2}}|[A-Za-z0-9+/]+={{1,2}}|[A-Za-z0-9+/]+(?={_PEM_LINE_END}\Z))"
+_PEM_BODY_LINE = (
+    rf"(?:[ \t]*(?:Proc-Type|DEK-Info):[^\n]*|{_PEM_WRAP}{_PEM_RUN}{_PEM_LINE_END}|[ \t\r]*)(?=\n|\Z)"
 )
+# A key block runs to its END marker. Without one it is the BEGIN line and the key body lines that
+# follow it, never the rest of the text: a file that only mentions the marker keeps its code.
+_PRIVATE_KEY_BLOCK = re.compile(rf"{_KEY_BEGIN}(?:.*?{_KEY_END}|[^\n]*(?:\n{_PEM_BODY_LINE})*)", re.S)
 _KEY_MARKER_LINE = re.compile(r"^.*-----(?:BEGIN|END) [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*$", re.M)
 _TOKEN_SHAPES = (
     re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),

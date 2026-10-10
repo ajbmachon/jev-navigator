@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 import time
@@ -1039,3 +1040,65 @@ def test_a_code_item_under_a_nested_target_key_still_hides_copies() -> None:
 
     # Assert
     assert masked_state["slice"]["binding"]["target"] == "[MASKED]"
+
+
+KEY_BEGIN = "-----BEGIN " + "PRIVATE KEY-----"
+KEY_END = "-----END " + "PRIVATE KEY-----"
+
+
+def _pem_body(lines: int) -> list[str]:
+    """Lines shaped like a PEM body (64 base64 characters each) that hold no key."""
+    return [
+        base64.b64encode(bytes((index * 48 + offset) % 256 for offset in range(48))).decode()
+        for index in range(lines)
+    ]
+
+
+def _quoted_lines(lines: list[str]) -> str:
+    return "lines = [\n" + "".join(f'    "{line}",\n' for line in lines) + "]\nprint(len(lines))\n"
+
+
+@pytest.mark.parametrize("path", ["app/keys.py", ".github/workflows/deploy.yml"])
+def test_a_mentioned_key_marker_hides_only_its_own_line(path):
+    code = (
+        f'def is_key(value):\n    if value.startswith("{KEY_BEGIN}"):\n'
+        '        return "key"\n    return "plain"\n'
+    )
+
+    lines = SecretMasker().mask(code, path).splitlines()
+
+    assert KEY_BEGIN not in lines[1]
+    assert (lines[0], *lines[2:]) == ("def is_key(value):", '        return "key"', '    return "plain"')
+
+
+@pytest.mark.parametrize("layout", ["pem", "crlf", "quoted lines"])
+def test_an_unterminated_key_hides_its_body_and_keeps_the_code_after_it(layout):
+    body = _pem_body(3)
+    newline = "\r\n" if layout == "crlf" else "\n"
+    text = (
+        _quoted_lines([KEY_BEGIN, *body])
+        if layout == "quoted lines"
+        else newline.join([KEY_BEGIN, *body, "print(len(lines))", ""])
+    )
+
+    masked = SecretMasker().mask(text, "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+    assert "print(len(lines))" in masked
+
+
+def test_an_unterminated_key_at_the_end_of_text_hides_its_whole_body():
+    body = [*_pem_body(2), "QUJDRA"]
+
+    masked = SecretMasker().mask("key = '''" + "\n".join([KEY_BEGIN, *body]), "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+
+
+def test_a_terminated_key_is_hidden_whole_whatever_its_lines_look_like():
+    body = _pem_body(2)
+
+    masked = SecretMasker().mask(_quoted_lines([KEY_BEGIN, *body, KEY_END]), "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+    assert "print(len(lines))" in masked
