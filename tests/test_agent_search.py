@@ -753,6 +753,19 @@ def test_a_possible_match_evicted_from_the_existence_request_never_supports_not_
     assert point.outcome == "undecided"
 
 
+def test_a_place_judged_a_definite_match_keeps_its_point_from_reading_not_found(shop: CodeIndex) -> None:
+    client = scripted(
+        {"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": constant(0.1), "h1_r1": constant(0.1)}
+    )
+
+    asked = request(anchors=[{"file": "shop/limits.py", "line": 5}], budget_requests=64)
+
+    point = agent_search(asked, shop, Judge(client, masker=None, scanner=None)).point("h1.e1")
+
+    assert point.definite_files == ("shop/limits.py",)
+    assert point.outcome == "undecided"
+
+
 def test_existence_and_label_requests_hide_a_bare_copy_of_a_value_another_place_reveals(
     tmp_path: Path,
 ) -> None:

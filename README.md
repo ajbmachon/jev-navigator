@@ -1343,11 +1343,14 @@ default). An unknown or malformed field is refused with its JSON path.
 - **Existence says whether it is there.** Each open point whose shortlist (its four best units) changed
   is asked once whether the shortlist holds it (`directives.existence`, worded in
   `judgments/existence_question.json`), every such point in one request over the union of their
-  shortlists. At 0.7 or more the point is established and stops; between 0.35 and 0.7 its shortlist's
-  callers, callees and named files are pushed to it, and an unchanged shortlist after they are judged
-  stops it; below 0.35 it keeps drawing its own queue and, once nothing is left for it, is not found in
-  this scope, meaning among the places the request's sources and hops reached (a term the agent did
-  not give reaches nothing). The bands are provisional defaults (`Bands`).
+  shortlists. A request too large for Jev's input evicts the code of the weakest places first. At 0.7
+  or more the point is established and stops; between 0.35 and 0.7 its shortlist's callers, callees
+  and named files are pushed to it, and an unchanged shortlist after they are judged stops it; below
+  0.35 it keeps drawing its own queue and, once nothing is left for it, is not found in this scope,
+  meaning among the places the request's sources and hops reached (a term the agent did not give
+  reaches nothing). It stays undecided instead while its shortlist holds a place at 0.5 or more whose
+  code its existence answer did not read, or any place at the yes bar: the two judgments disagree,
+  and the agent reads both. The bands are provisional defaults (`Bands`).
 - **The budget counts every request.** Ranking, existence and role labels all count; two requests are
   kept for labels while ranking runs (`label_requests`), and labels take whatever ranking leaves. Labels
   go to each point's shortlisted places at 0.5 or more, refuting points first.

@@ -821,7 +821,7 @@ class _Run:
             point.hypothesis,
             point.kind,
             point.text,
-            _outcome_of(point, self._unasked_match(point)),
+            _outcome_of(point, self._unasked_match(point) or bool(definite)),
             point.closed_by or self.stopped_by,
             point.band,
             point.existence,
@@ -971,10 +971,12 @@ def _in_place_order(pieces: Mapping[str, LabelPiece]) -> list[LabelPiece]:
     return sorted(pieces.values(), key=lambda piece: (piece.place.file, piece.place.ranges, piece.place.id))
 
 
-def _outcome_of(point: _Point, unasked_match: bool) -> Outcome:
-    """Not found only while the low existence answer still covers every likely place of the shortlist."""
+def _outcome_of(point: _Point, open_match: bool) -> Outcome:
+    """Not found only while the low existence answer covers every likely place of the shortlist and no
+    place was judged a definite match: such a place contradicts "not found", so the point stays
+    undecided and the agent reads both answers."""
     if point.closed_by == ESTABLISHED:
         return Outcome.ESTABLISHED
-    if point.closed_by == FRONTIER_EXHAUSTED and point.band is Band.LOW and not unasked_match:
+    if point.closed_by == FRONTIER_EXHAUSTED and point.band is Band.LOW and not open_match:
         return Outcome.NOT_FOUND_IN_SCOPE
     return Outcome.UNDECIDED
