@@ -9,6 +9,7 @@ passes its own objects; turning either off must be explicit (``masker=None`` or 
 from __future__ import annotations
 
 import re
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -31,8 +32,10 @@ _SHORT_NUMBER = re.compile(r"[\d.,:_+-]{1,4}")
 COPY_MIN_CHARS = 4
 EDGE_MAX_CHARS = 512
 """A known value up to this length also has the edges a mask cut it at hidden (see ``_KnownEdges``); a
-longer one, in practice code an unclosed quote swallowed, is hidden by its copies only."""
+longer one, in practice code an unclosed quote swallowed, is hidden by its copies only. A cut mark finds
+the start of a value of any length (``split_starts``)."""
 MASK_TOKEN = re.compile(re.escape(MASK))
+_PLAIN_WORD = re.compile(r"[A-Z]?[a-z]+(?:_[a-z]+)*|[A-Z]+(?:_[A-Z]+)*")
 # The role of a request string: a value, a key of the request's structure, the request's point, or
 # JVN's own question wording.
 VALUE, KEY, POINT, WORDING = "value", "key", "point", "wording"
@@ -69,6 +72,7 @@ __all__ = [
     "safe_options",
     "split_starts",
     "value_starts",
+    "ValueStarts",
 ]
 
 
@@ -160,12 +164,14 @@ def mask_everywhere(value: object, masker: Masker, values: frozenset[str], quest
     once more, because a hidden copy can turn a kept value into one the rules hide (``sessionToken:
     "[MASKED]-token"`` no longer repeats its key), and the request sent must be one the rules leave as
     it is. Keys are left as they are. JVN's own question wording hides no copies. The request's point
-    hides copies of a value of ``BY_CONTENT_MIN_CHARS`` or more characters only: its ordinary words stay
-    (a short secret value such as ``"shared"`` can equal one), while a long secret its writer copied from
-    the code is hidden."""
+    hides copies of a value of ``BY_CONTENT_MIN_CHARS`` or more characters only, and never of a plain word
+    (``_is_plain_word``): its ordinary words stay (a secret value such as ``"shared"`` or ``"described"``
+    can equal one), while a long secret its writer copied from the code is hidden."""
     token = getattr(masker, "token_pattern", MASK_TOKEN)
     known = sorted(values - {MASK}, key=len, reverse=True)
-    long_known = [secret for secret in known if len(secret) >= BY_CONTENT_MIN_CHARS]
+    long_known = [
+        secret for secret in known if len(secret) >= BY_CONTENT_MIN_CHARS and not _is_plain_word(secret)
+    ]
     hiders = {
         VALUE: (_known_edges(frozenset(known), token), [copy_pattern(secret) for secret in known]),
         POINT: (_known_edges(frozenset(long_known), token), [copy_pattern(secret) for secret in long_known]),
@@ -213,9 +219,9 @@ class _KnownEdges:
         self._split = value_starts(frozenset(known))
 
     def hide(self, text: str) -> str:
-        if not self._rests and not self._starts and not self._split:
+        if not self._rests and not self._starts and not self._split.heads:
             return text
-        spans: list[tuple[int, int]] = split_starts(text, self._split)
+        spans = [(begin, end) for begin, end, _ in split_starts(text, self._split)]
         for token in self._token.finditer(text):
             begin, end = token.span()
             before = begin and next(
@@ -235,32 +241,60 @@ def _has_alnum(text: str) -> bool:
     return any(character.isalnum() for character in text)
 
 
-@lru_cache(maxsize=16)
-def value_starts(values: frozenset[str]) -> dict[str, tuple[str, ...]]:
-    """Every proper start of ``COPY_MIN_CHARS`` or more characters of each value up to ``EDGE_MAX_CHARS``
-    long, with the values it starts: what a cut that split one of them keeps (see ``split_starts``)."""
-    starts: defaultdict[str, list[str]] = defaultdict(list)
-    for value in sorted(values):
-        if len(value) <= EDGE_MAX_CHARS:
-            for cut in range(COPY_MIN_CHARS, len(value)):
-                starts[value[:cut]].append(value)
-    return {start: tuple(owners) for start, owners in starts.items()}
+@dataclass(frozen=True)
+class ValueStarts:
+    """Values longer than ``COPY_MIN_CHARS`` characters, sorted, the first ``COPY_MIN_CHARS`` characters of
+    each, and the longest one's length: where a cut that split one of them can begin (see
+    ``split_starts``)."""
 
+    ordered: tuple[str, ...]
+    heads: frozenset[str]
+    longest: int
 
-def split_starts(text: str, starts: Mapping[str, object]) -> list[tuple[int, int]]:
-    """Where ``text`` holds one of ``starts`` (``value_starts``) right before a cut mark, the longest
-    there. A cut that keeps a text's start (a long line, a history section) can split a value, and the
-    start it keeps matches no copy of the whole value, so request masking hides it here."""
-    if not starts or "cut]" not in text:
-        return []
-    spans = []
-    for mark in CUT_MARKS.finditer(text):
-        end = mark.start()
-        for length in range(min(end, EDGE_MAX_CHARS - 1), COPY_MIN_CHARS - 1, -1):
-            if text[end - length : end] in starts:
-                spans.append((end - length, end))
+    def owners(self, kept: str) -> tuple[str, ...]:
+        """The values ``kept`` is a proper start of: a run of the sorted values, found by bisection."""
+        owners = []
+        for index in range(bisect_left(self.ordered, kept), len(self.ordered)):
+            if not self.ordered[index].startswith(kept):
                 break
-    return spans
+            if len(self.ordered[index]) > len(kept):
+                owners.append(self.ordered[index])
+        return tuple(owners)
+
+
+@lru_cache(maxsize=16)
+def value_starts(values: frozenset[str]) -> ValueStarts:
+    ordered = tuple(sorted(value for value in values if len(value) > COPY_MIN_CHARS))
+    return ValueStarts(
+        ordered, frozenset(value[:COPY_MIN_CHARS] for value in ordered), max(map(len, ordered), default=0)
+    )
+
+
+def split_starts(text: str, starts: ValueStarts) -> list[tuple[int, int, tuple[str, ...]]]:
+    """Where ``text`` holds a proper start of ``COPY_MIN_CHARS`` or more characters of a value right before
+    a cut mark: the longest such start there, and the values it starts. A cut that keeps a text's start (a
+    long line, a history section, a slice's first lines) can split a value, and the start it keeps matches
+    no copy of the whole value, so request masking hides it here. Each character before a mark is read
+    once for a value's first characters, however long the values are."""
+    if not starts.heads or "cut" not in text:
+        return []
+    marks = [mark.start() for mark in CUT_MARKS.finditer(text)]
+    heads: list[int] = []
+    scanned = 0
+    for end in marks:
+        for begin in range(max(scanned, end - starts.longest + 1), end - COPY_MIN_CHARS + 1):
+            if text[begin : begin + COPY_MIN_CHARS] in starts.heads:
+                heads.append(begin)
+        scanned = max(scanned, end - COPY_MIN_CHARS + 1)
+    found = []
+    for end in marks:
+        for begin in heads[
+            bisect_left(heads, end - starts.longest + 1) : bisect_right(heads, end - COPY_MIN_CHARS)
+        ]:
+            if owners := starts.owners(text[begin:end]):
+                found.append((begin, end, owners))
+                break
+    return found
 
 
 def _hide_copies(text: str, copies: list[re.Pattern[str]]) -> str:
@@ -333,9 +367,20 @@ class _RequestText:
 
 
 def _holds_copy(text: _RequestText, value: str, copy: re.Pattern[str]) -> bool:
-    if text.role == WORDING or (text.role in (KEY, POINT) and len(value) < BY_CONTENT_MIN_CHARS):
+    if text.role == WORDING or (
+        text.role in (KEY, POINT) and (len(value) < BY_CONTENT_MIN_CHARS or _is_plain_word(value))
+    ):
         return False
     return bool(copy.search(text.text))
+
+
+def _is_plain_word(value: str) -> bool:
+    """A value of plain words (``description``, ``read_only``, ``Described``, ``READ_ONLY``): as a key of
+    the request's structure or in its point it is a word, not a copied secret (``instructions``), so
+    hiding it there would rewrite the point or refuse every request whose structure names it. Its copies
+    in code are hidden like any value's. Mixed case, as in a generated token, or a digit is not plain
+    words."""
+    return bool(_PLAIN_WORD.fullmatch(value))
 
 
 def _copied_forms(value: str) -> list[str]:
