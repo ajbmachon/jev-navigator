@@ -18,6 +18,10 @@ LATEST_JEV = "jev-latest"
 MAX_TOKENS_MARKER = "max_tokens_exceeded"
 """The provider's error_type when a request's input exceeds the model's input budget."""
 
+CONTEXT_LIMIT_MARKER = "context limit"
+"""Microsoft-Decision-1's refusal of an input over its budget: HTTP 422 whose ``detail`` is a sentence
+naming the exceeded context limit, with no error_type."""
+
 REQUEST_CHARS_PER_TOKEN = 2.4
 """ASCII-escaped characters (``serialized_chars``) per input token. Token limits become character
 boxes with ``chars_for_tokens``; route boxes use the same ratio. The conservative measured fit
@@ -118,13 +122,15 @@ def input_budget_error(error: BaseException) -> InputBudgetExceededError | None:
     """The typed input-budget error for a provider rejection that names an exceeded input budget,
     or None when the error is anything else.
 
-    The official SDK reports the breach as a bad request (400) whose body carries
-    ``{"detail": {"error_type": "max_tokens_exceeded"}}``. The classifier reads the status and
-    body off the error without importing the optional SDK, so any client that surfaces them
-    (the TypeSafe adapter, a routed System-One client, a host's own runtime) translates the
+    TypeSafe's models report the breach as a bad request (400) whose body carries
+    ``{"detail": {"error_type": "max_tokens_exceeded"}}``; Microsoft-Decision-1 as HTTP 422 whose
+    ``detail`` sentence names the context limit (``CONTEXT_LIMIT_MARKER``). The classifier reads the
+    status and body off the error without importing the optional SDK, so any client that surfaces
+    them (the TypeSafe adapter, a routed System-One client, a host's own runtime) translates the
     same way, and a gateway between the library and the provider does not hide the contract.
     """
-    if getattr(error, "status", None) != 400:
+    status = getattr(error, "status", None)
+    if status not in (400, 422):
         return None
     body = getattr(error, "body", None)
     if isinstance(body, (str, bytes, bytearray)):
@@ -135,9 +141,9 @@ def input_budget_error(error: BaseException) -> InputBudgetExceededError | None:
     if not isinstance(body, Mapping):
         return None
     detail = body.get("detail")
-    if not isinstance(detail, Mapping) or detail.get("error_type") != MAX_TOKENS_MARKER:
-        return None
-    return InputBudgetExceededError(str(error))
+    typed = status == 400 and isinstance(detail, Mapping) and detail.get("error_type") == MAX_TOKENS_MARKER
+    sentence = status == 422 and isinstance(detail, str) and CONTEXT_LIMIT_MARKER in detail
+    return InputBudgetExceededError(str(error)) if typed or sentence else None
 
 
 class ReplayOnlyClient:

@@ -1124,18 +1124,20 @@ def test_a_normal_small_batch_is_unchanged_by_the_input_budget_boundary() -> Non
 def test_input_budget_error_is_typed_from_the_provider_report_without_the_sdk() -> None:
     from jev_navigator.judgments.client import input_budget_error
 
-    class ProviderError(Exception):
-        def __init__(self) -> None:
-            super().__init__("POST https://gateway/v1/systemone: 400")
-            self.status = 400
-            self.body = {"detail": {"error_type": "max_tokens_exceeded"}}
+    def refusal(status: int, detail: object) -> Exception:
+        error = Exception(f"POST https://gateway/v1/systemone: {status}")
+        error.status, error.body = status, {"detail": detail}
+        return error
 
-    class OtherProviderError(Exception):
-        status = 400
-        body = {"detail": {"error_type": "question_malformed"}}
-
-    assert isinstance(input_budget_error(ProviderError()), InputBudgetExceededError)
-    assert input_budget_error(OtherProviderError()) is None
+    # Microsoft-Decision-1's refusal, as its EU endpoint sent it on 2026-10-10.
+    decision_1 = (
+        "invalid model request: Question prompt exceeds the 32768-token context limit"
+        " including the decision token"
+    )
+    for refused in (refusal(400, {"error_type": "max_tokens_exceeded"}), refusal(422, decision_1)):
+        assert isinstance(input_budget_error(refused), InputBudgetExceededError)
+    assert input_budget_error(refusal(400, {"error_type": "question_malformed"})) is None
+    assert input_budget_error(refusal(422, "invalid model request: score requires 2-10 levels")) is None
     assert input_budget_error(TypeError("no status at all")) is None
 
 
