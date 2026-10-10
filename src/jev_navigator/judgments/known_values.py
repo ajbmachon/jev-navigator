@@ -23,8 +23,15 @@ files of the scope is known this way. A shorter value is hidden within its own r
 word. A value in more files is a placeholder rather than a secret (``password: password``, a model name
 a test passes as a key), and hiding it across the repository would blank ordinary code; it too is
 hidden only in the requests that carry code a rule finds it in. A secret copied bare into more files
-than that is therefore not hidden across requests. A host masker that hides more than JVN's rules
-(``Masker.masked_values`` listing values the rules miss) hides those within each request only.
+than that is therefore not hidden across requests. A known value of plain words (``description``,
+``read_only``) is hidden in code like any other, but never in a point or a key of a request's
+structure, where it is a word (``secrets._is_plain_word``). A host masker that hides more than JVN's
+rules (``Masker.masked_values`` listing values the rules miss) hides those within each request only.
+
+A cut that keeps a text's start (a long line, a history section, a slice's first lines) can split a
+known value; the masker
+also lists a value whose start stands right before the cut's mark, and request masking hides that start
+(``secrets.split_starts``).
 """
 
 from __future__ import annotations
@@ -34,12 +41,20 @@ import re
 import threading
 import weakref
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..index.code_index import CodeIndex
 from ..index.scope import BINARY_SNIFF_BYTES
 from .judge import Judge
-from .secrets import BY_CONTENT_MIN_CHARS, DEFAULT_MASKER, MASK_TOKEN, Masker
+from .secrets import (
+    BY_CONTENT_MIN_CHARS,
+    DEFAULT_MASKER,
+    MASK_TOKEN,
+    Masker,
+    ValueStarts,
+    split_starts,
+    value_starts,
+)
 
 KNOWN_VALUE_MAX_FILES = 5
 """A value standing in more files than this is a placeholder, not a secret (see the module docstring)."""
@@ -63,12 +78,21 @@ class KnownValuesMasker:
 
     inner: Masker
     known: frozenset[str]
+    _starts: ValueStarts = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_starts", value_starts(self.known))
 
     def mask(self, text: str, path: str | None = None) -> str:
         return self.inner.mask(text, path)
 
     def masked_values(self, text: str, path: str | None = None) -> list[str]:
-        return [*self.inner.masked_values(text, path), *(value for value in self.known if value in text)]
+        """The inner masker's values, each known value the text holds, and for each cut that kept a known
+        value's start one value it starts (``secrets.split_starts``), which is enough for request masking
+        to hide that start: a start that 10,000 lockfile hashes share needs one copy pattern, not 10,000."""
+        whole = [value for value in self.known if value in text]
+        split = [owners[0] for _, _, owners in split_starts(text, self._starts)]
+        return [*self.inner.masked_values(text, path), *whole, *split]
 
     @property
     def token_pattern(self) -> re.Pattern[str]:

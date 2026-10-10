@@ -17,11 +17,12 @@ from jev_navigator.directives.entry import choose_initial_candidates
 from jev_navigator.directives.find_all import find_all, find_all_async
 from jev_navigator.directives.find_code import find_code
 from jev_navigator.directives.places import function_place
+from jev_navigator.directives.shown import LINES_CUT_MARK
 from jev_navigator.directives.trace import trace_workflow
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.known_values import KNOWN_VALUE_MAX_FILES, KnownValuesMasker, repository_values
-from jev_navigator.judgments.secrets import SecretMasker
+from jev_navigator.judgments.secrets import DEFAULT_MASKER, SecretMasker, mask_request
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 VALUE = "Qm4vT8xLr2Zp9wKc"
@@ -242,3 +243,141 @@ def test_a_file_holding_only_one_line_of_a_value_spanning_lines_does_not_hold_it
 
     # Assert
     assert [value for value in values if "\n" in value]
+
+
+def pieces_of(value: str, text: str, at_least: int = 4) -> list[str]:
+    """The parts of ``value``, ``at_least`` characters or longer, that ``text`` holds."""
+    return [
+        value[start:end]
+        for start in range(len(value))
+        for end in range(start + at_least, len(value) + 1)
+        if value[start:end] in text
+    ]
+
+
+def dial_line(cut_at: int, value_before_cut: int) -> str:
+    """A ``dial`` line whose quoted VALUE starts ``value_before_cut`` characters before column ``cut_at``."""
+    head, glue = '    return dial(order, "', '", "'
+    line = f'{head}{"x" * (cut_at - value_before_cut - len(head) - len(glue))}{glue}{VALUE}")'
+    assert line.index(VALUE) == cut_at - value_before_cut
+    return line
+
+
+def entry_file(cut_at: int, value_before_cut: int) -> str:
+    """Two functions; the first one's three-line preview, its stripped lines joined by spaces, holds
+    VALUE starting ``value_before_cut`` characters before preview character ``cut_at``."""
+    head, glue = 'return dial(order, "', '", "'
+    joined = len("def connect(order): x = 1 ")
+    third = f'{head}{"y" * (cut_at - value_before_cut - joined - len(head) - len(glue))}{glue}{VALUE}")'
+    return f"def connect(order):\n    x = 1\n    {third}\n\n\ndef other(order):\n    return order\n"
+
+
+CUT_SEARCHES: dict[str, Search] = {
+    "find_code_line_cut": lambda tmp_path: _cut_find_code(tmp_path),
+    "entry_preview_cut": lambda tmp_path: _cut_entry(tmp_path),
+}
+
+
+def _cut_find_code(tmp_path: Path) -> ScriptedJevClient:
+    index = repository(
+        tmp_path, {"shop/a_session.py": f"def connect(order):\n{dial_line(240, 10)}\n", **CONFIG}
+    )
+    client = ScriptedJevClient(default_noul=0.1)
+    find_code(index, judge(client), TARGET, [function_place(index, connect(index))])
+    return client
+
+
+def _cut_entry(tmp_path: Path) -> ScriptedJevClient:
+    files = {"shop/a_session.py": entry_file(360, 10), "deploy/app.env": f"DB_PASSWORD={VALUE}\n"}
+    index = repository(tmp_path, files)
+    client = ScriptedJevClient(default_noul=0.6)
+    choose_initial_candidates(index, Judge(client), TARGET)
+    return client
+
+
+@pytest.mark.parametrize("search", CUT_SEARCHES.values(), ids=CUT_SEARCHES)
+def test_a_cut_never_keeps_the_start_of_a_known_value(tmp_path: Path, search) -> None:
+    # Arrange and act: a long line or preview is cut ten characters into VALUE
+    client = search(tmp_path)
+
+    # Assert
+    assert client.requests
+    assert pieces_of(VALUE, sent(client)) == []
+
+
+LONG_VALUE = "".join(f"{n:03x}" for n in range(200))
+TWO_LINES = f"{VALUE}\n{VALUE[::-1]}"
+
+
+@pytest.mark.parametrize(
+    ("value", "kept", "mark"),
+    [
+        (VALUE, 10, " [line cut]"),
+        (VALUE, 10, "[... 99 characters cut]"),
+        (LONG_VALUE, 214, " [line cut]"),
+        (TWO_LINES, len(VALUE) + 1, LINES_CUT_MARK.format(kept=1, total=2)),
+    ],
+    ids=["line", "history", "long value", "slice"],
+)
+def test_a_known_value_split_before_a_cut_mark_is_hidden_in_the_request(
+    value: str, kept: int, mark: str
+) -> None:
+    # Arrange: a cut that keeps the value's start, as a long line, a history section or a slice's first
+    # lines are cut
+    masker = KnownValuesMasker(DEFAULT_MASKER, frozenset({value}))
+    state = {"items": [{"file": "shop/a.py", "code": f'return dial(order, """{value[:kept]}{mark}'}]}
+
+    # Act
+    masked, _, _ = mask_request(state, {}, masker)
+
+    # Assert
+    assert pieces_of(value, json.dumps(masked)) == []
+    assert mark in masked["items"][0]["code"]
+
+
+@pytest.mark.parametrize("placeholder", ["instructions", "examples", "described"])
+def test_a_fixture_word_under_a_secret_key_never_changes_or_refuses_another_request(
+    tmp_path: Path, placeholder: str
+) -> None:
+    # Arrange: a word JVN's own requests use as a key or a point uses, as a fixture's password
+    plain = {f"shop/m{n}.py": f"def connect{n}(order):\n    return dial(order, {n})\n" for n in range(3)}
+    fixture = {"tests/fixture_users.py": f'USER = {{"password": "{placeholder}"}}\n'}
+    point = "the session code described in the README"
+    clients = {"without": ScriptedJevClient(default_noul=0.1), "with": ScriptedJevClient(default_noul=0.1)}
+
+    # Act
+    for name, files in (("without", plain), ("with", {**plain, **fixture})):
+        index = repository(tmp_path / name, files)
+        find_all(index, judge(clients[name]), {"session": point}, files=list(plain), batches_per_wave=1)
+
+    # Assert
+    assert clients["with"].requests
+    assert clients["with"].requests == clients["without"].requests
+
+
+def test_two_known_values_sharing_characters_are_both_hidden_whole() -> None:
+    # Arrange: equal lengths, so no order between them; they overlap in one copy
+    first, second = "Zx81Qw7Lm3Pk", "Lm3Pk5Tr9Ny2"
+    masker = KnownValuesMasker(DEFAULT_MASKER, frozenset({first, second}))
+    state = {"items": [{"file": "shop/a.py", "code": "dial(order, 'Zx81Qw7Lm3Pk5Tr9Ny2')"}]}
+
+    # Act
+    masked, _, _ = mask_request(state, {}, masker)
+
+    # Assert
+    assert masked["items"][0]["code"] == "dial(order, '[MASKED]')"
+
+
+@pytest.mark.parametrize("letters", ["QmvTxLrZpwKcHdNy", "qmvtxlrzpwkchdny"], ids=["mixed case", "lowercase"])
+def test_a_letters_only_secret_is_hidden_across_requests(tmp_path: Path, letters: str) -> None:
+    # Arrange: no digit, as a generated token or an app password may have
+    files = {name: text.replace(VALUE, letters) for name, text in {**USE, **CONFIG}.items()}
+    index = repository(tmp_path, files)
+    client = ScriptedJevClient(default_noul=0.1)
+
+    # Act
+    find_all(index, judge(client), {"session": TARGET}, files=index.files, batches_per_wave=1)
+
+    # Assert
+    assert "dial(order" in sent(client)
+    assert letters not in sent(client)

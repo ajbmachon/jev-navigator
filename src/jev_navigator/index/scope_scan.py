@@ -60,7 +60,7 @@ from .languages import (
     reference_rules,
     sgconfig_of,
 )
-from .spans import Span
+from .spans import Span, merged_ranges
 
 # The language whose files the JavaScript grammar only partly reads are read once more as flow.
 READ_AGAIN_AS_FLOW = "javascript"
@@ -480,7 +480,7 @@ class _FileFound:
                 self.comment_ranges = b""
 
     def unread_line_count(self) -> int:
-        return sum(end - start + 1 for start, end in _merged_stretches(self.error_lines))
+        return sum(end - start + 1 for start, end in merged_ranges(self.error_lines))
 
     def finished(self, incomplete: bool) -> FileFacts:
         self.compact_comments()
@@ -490,7 +490,7 @@ class _FileFound:
             self._references(),
             incomplete,
             tuple(sorted(self.export_names)),
-            _merged_stretches(self.error_lines),
+            tuple(merged_ranges(self.error_lines)),
             tuple(alias for _, alias in sorted([*self.module_aliases, *self._from_import_aliases()])),
             tuple(sorted(self.exported_values)),
             tuple(sorted(self.renamed_exports)),
@@ -909,17 +909,6 @@ def _same_lines_as_a_named_symbol(symbols: set[Span]) -> set[Span]:
     be a second place on the same lines."""
     named = {(span.start, span.end) for span in symbols if span.is_named}
     return {span for span in symbols if not span.is_named and (span.start, span.end) in named}
-
-
-def _merged_stretches(ranges: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
-    """ERROR node lines with nested and overlapping nodes merged into one stretch."""
-    stretches: list[tuple[int, int]] = []
-    for start, end in sorted(ranges):
-        if stretches and start <= stretches[-1][1]:
-            stretches[-1] = (stretches[-1][0], max(end, stretches[-1][1]))
-        else:
-            stretches.append((start, end))
-    return tuple(stretches)
 
 
 def _outer_first(match: dict) -> tuple[str, int, int]:
