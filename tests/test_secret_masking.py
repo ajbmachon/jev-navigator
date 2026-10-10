@@ -817,6 +817,32 @@ class _OwnTokenMasker(SecretMasker):
         return super().mask(re.sub(r"\btok_[A-Za-z0-9]{20,}", MASK, text), path)
 
 
+class _OwnEmailMasker(SecretMasker):
+    """A masker with an email rule of its own that writes its own token and names it."""
+
+    token_pattern = re.compile(r"\[MASKED\]|\[EMAIL\]")
+
+    def mask(self, text: str, path: str | None = None) -> str:
+        return super().mask(re.sub(r"[A-Za-z0-9.]+@[a-z]+\.[a-z]+", "[EMAIL]", text), path)
+
+
+def test_the_start_of_a_known_value_a_rule_begins_late_is_hidden_beside_the_maskers_own_token() -> None:
+    """The email rule starts after the ``#`` inside a known password, so the password's start stands
+    before the masker's own token; it is hidden there."""
+    # Arrange
+    state = {
+        "keyed": {"file": "app/fixtures.py", "code": 'password = "Zq7w#Px9@corp.example"\n'},
+        "notes": {"file": "docs/login.md", "code": "log in with Zq7w#Px9@corp.example today\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, _OwnEmailMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["notes"]["code"] == "log in with [MASKED] today\n"
+
+
 def test_a_known_value_inside_a_secret_only_the_masker_finds_leaves_that_secret_whole() -> None:
     """A known value can stand inside a longer secret that only the caller's masker recognizes. Hiding
     the known value first would break that secret's shape and send the rest of it."""
