@@ -14,6 +14,7 @@ from git_repos import commit_all, write_files
 from jev_navigator.directives.agent_search import Bands, agent_search, agent_search_async
 from jev_navigator.directives.agent_search_result import AgentSearchResult
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.judgments.client import InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.sources import ScentSource
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
@@ -615,7 +616,7 @@ def refunds_on_raise(code: str) -> float:
 @pytest.mark.parametrize(("budget", "labels"), [(3, 0), (8, 2), (8, 5), (64, 0)])
 def test_a_point_never_reads_not_found_while_a_place_judged_after_its_answer_matches_it(
     shop: CodeIndex, budget: int, labels: int
-):
+) -> None:
     # The refuting point is low over its first shortlist and closes; the evidence point's expansion
     # then reaches check_limit, which matches the refuting point too.
     client = scripted(
@@ -633,7 +634,7 @@ def test_a_point_never_reads_not_found_while_a_place_judged_after_its_answer_mat
     assert refuting.outcome != "not_found_in_scope"
 
 
-def test_a_point_closed_as_not_found_is_asked_again_over_a_place_that_now_matches_it(shop: CodeIndex):
+def test_a_point_closed_as_not_found_is_asked_again_over_a_place_that_now_matches_it(shop: CodeIndex) -> None:
     client = scripted(
         {"h1_e1": limit_match, "h1_r1": refunds_on_raise},
         {"h1_e1": constant(0.5), "h1_r1": lambda code: 0.9 if "raise ValueError" in code else 0.1},
@@ -644,7 +645,7 @@ def test_a_point_closed_as_not_found_is_asked_again_over_a_place_that_now_matche
     assert result.point("h1.r1").outcome == "established"
 
 
-def test_a_cancelled_search_sends_no_label_request(shop: CodeIndex):
+def test_a_cancelled_search_sends_no_label_request(shop: CodeIndex) -> None:
     client = scripted(
         {"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": constant(0.5), "h1_r1": constant(0.1)}
     )
@@ -665,7 +666,7 @@ def test_a_cancelled_search_sends_no_label_request(shop: CodeIndex):
     }
 
 
-def test_an_interrupted_search_sends_no_label_request(shop: CodeIndex):
+def test_an_interrupted_search_sends_no_label_request(shop: CodeIndex) -> None:
     inner = scripted(
         {"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": constant(0.5), "h1_r1": constant(0.1)}
     )
@@ -682,7 +683,7 @@ def test_an_interrupted_search_sends_no_label_request(shop: CodeIndex):
     assert kinds(client)[-1] == "existence"
 
 
-def test_the_code_returned_to_the_agent_is_the_masked_code_jev_judged(tmp_path: Path):
+def test_the_code_returned_to_the_agent_is_the_masked_code_jev_judged(tmp_path: Path) -> None:
     password = "Tr0ub4dor-horse-staple"
     files = dict(SHOP)
     files["shop/limits.py"] = files["shop/limits.py"].replace(
@@ -701,3 +702,52 @@ def test_the_code_returned_to_the_agent_is_the_masked_code_jev_judged(tmp_path: 
     returned = json.dumps(result.to_json()["code"])
     assert "check_limit" in returned
     assert password not in returned
+
+
+FILLER = "".join(f"    step_{n} = order.value_{n}\n" for n in range(40))
+REFUSE_LARGE = "    if order.size > 4:\n        raise ValueError('too large')\n"
+
+
+def boxed_search(
+    tmp_path: Path, refusing: Mapping[str, bool], match: float, exists: Callable[[str], float], box_chars: int
+) -> AgentSearchResult:
+    """One evidence point over one large function per file, ending in a refusal of a large order where
+    ``refusing`` says so. The other places are anchored, so they are judged first, at 0.3; refusing
+    places are judged ``match``. Existence requests are cut to ``box_chars`` of code."""
+    files = {
+        f"{name}_rules.py": f"def rule_{name}(order):\n{FILLER}"
+        + (REFUSE_LARGE if refuses else "    return order\n")
+        for name, refuses in refusing.items()
+    }
+    write_files(tmp_path, files)
+    commit_all(tmp_path)
+    client = scripted({"h1_e1": lambda code: match if "raise ValueError" in code else 0.3}, {"h1_e1": exists})
+    client.input_limits = InputLimits(box_chars=box_chars)
+    hypotheses = [
+        {"id": "h1", "mechanism": MECHANISM, "evidence": [{"id": "e1", "point": LIMIT}], "refuted_by": []}
+    ]
+    anchors = [{"file": f"{name}_rules.py", "line": 1} for name, refuses in refusing.items() if not refuses]
+    found = sorted(f"{name}_rules.py" for name, refuses in refusing.items() if refuses)
+    asked = request(hypotheses=hypotheses, anchors=anchors, files=found, follow=[], budget_requests=16)
+    judge = Judge(client, masker=None, scanner=None, items_per_request=1)
+    return agent_search(asked, CodeIndex.from_git(tmp_path), judge)
+
+
+def test_an_existence_request_too_large_for_its_box_evicts_the_weakest_places_first(tmp_path: Path) -> None:
+    refusing = {"a": True, "b": False, "c": False, "d": False, "e": False}
+
+    point = boxed_search(tmp_path, refusing, 0.92, limit_exists, 4_000).point("h1.e1")
+
+    assert point.existence is not None and point.existence.evicted
+    assert not any(place.startswith("a_rules.py") for place in point.existence.evicted)
+    assert point.outcome == "established"
+
+
+def test_a_possible_match_evicted_from_the_existence_request_never_supports_not_found(tmp_path: Path) -> None:
+    point = boxed_search(tmp_path, {"a": True, "b": True, "c": False}, 0.6, constant(0.1), 2_000).point(
+        "h1.e1"
+    )
+
+    assert point.existence is not None
+    assert any(place.startswith(("a_rules.py", "b_rules.py")) for place in point.existence.evicted)
+    assert point.outcome == "undecided"

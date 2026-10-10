@@ -296,6 +296,7 @@ class _Point:
     band: Band | None = None
     existence: ExistenceAnswer | None = None
     asked_over: frozenset[str] = frozenset()
+    unseen: frozenset[str] = frozenset()
     expanded_from: frozenset[str] | None = None
     awaiting: frozenset[str] = frozenset()
     hops: list[str] = field(default_factory=list)
@@ -588,6 +589,8 @@ class _Run:
             for point in points:
                 point.existence = answers[point.key]
                 point.asked_over = self._beam_ids(point)
+                evicted = set(point.existence.evicted)
+                point.unseen = frozenset(u for u, answer in self._beam(point) if answer.place.id in evicted)
 
     def _existence_groups(self, points: Sequence[_Point]) -> list[tuple[list[_Point], list[LabelPiece]]]:
         """Points packed in order into groups whose union of shortlisted pieces fits one request."""
@@ -598,13 +601,29 @@ class _Run:
             own = self._beam_pieces(point)
             merged = {**pieces, **own}
             if members and not self._fits(members + [point], merged):
-                groups.append((members, _in_place_order(pieces)))
+                groups.append((members, self._weakest_first(members, pieces)))
                 members, merged = [], own
             members.append(point)
             pieces = merged
         if members:
-            groups.append((members, _in_place_order(pieces)))
+            groups.append((members, self._weakest_first(members, pieces)))
         return groups
+
+    def _weakest_first(self, points: Sequence[_Point], pieces: Mapping[str, LabelPiece]) -> list[LabelPiece]:
+        """The pieces with the lowest best answer first, so a box that must evict code evicts the
+        places least likely to hold any of the points; ties keep place order."""
+
+        def best(piece: LabelPiece) -> float:
+            return max(
+                (
+                    self.answers[point.key][piece.place.id].probability
+                    for point in points
+                    if piece.place.id in self.answers[point.key]
+                ),
+                default=0.0,
+            )
+
+        return sorted(_in_place_order(pieces), key=best)
 
     def _fits(self, points: Sequence[_Point], pieces: Mapping[str, LabelPiece]) -> bool:
         if len(pieces) > self.searching.items_per_request:
@@ -700,7 +719,7 @@ class _Run:
     def _unasked_match(self, point: _Point) -> bool:
         """Whether the point's shortlist holds a place at 0.5 or more its existence answer did not cover."""
         return any(
-            answer.probability >= POSSIBLE_AT and unit_id not in point.asked_over
+            answer.probability >= POSSIBLE_AT and (unit_id not in point.asked_over or unit_id in point.unseen)
             for unit_id, answer in self._beam(point)
         )
 
