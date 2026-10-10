@@ -17,6 +17,7 @@ from jev_navigator.directives.entry import choose_initial_candidates
 from jev_navigator.directives.find_all import find_all, find_all_async
 from jev_navigator.directives.find_code import find_code
 from jev_navigator.directives.places import function_place
+from jev_navigator.directives.shown import LINES_CUT_MARK
 from jev_navigator.directives.trace import trace_workflow
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
@@ -304,17 +305,33 @@ def test_a_cut_never_keeps_the_start_of_a_known_value(tmp_path: Path, search) ->
     assert pieces_of(VALUE, sent(client)) == []
 
 
-@pytest.mark.parametrize("mark", [" [line cut]", "[... 99 characters cut]"])
-def test_a_known_value_split_before_a_cut_mark_is_hidden_in_the_request(mark: str) -> None:
-    # Arrange: a slice cut ten characters into VALUE, as a history section or a long line is cut
-    masker = KnownValuesMasker(DEFAULT_MASKER, frozenset({VALUE}))
-    state = {"items": [{"file": "shop/a.py", "code": f'return dial(order, "{VALUE[:10]}{mark}'}]}
+LONG_VALUE = "".join(f"{n:03x}" for n in range(200))
+TWO_LINES = f"{VALUE}\n{VALUE[::-1]}"
+
+
+@pytest.mark.parametrize(
+    ("value", "kept", "mark"),
+    [
+        (VALUE, 10, " [line cut]"),
+        (VALUE, 10, "[... 99 characters cut]"),
+        (LONG_VALUE, 214, " [line cut]"),
+        (TWO_LINES, len(VALUE) + 1, LINES_CUT_MARK.format(kept=1, total=2)),
+    ],
+    ids=["line", "history", "long value", "slice"],
+)
+def test_a_known_value_split_before_a_cut_mark_is_hidden_in_the_request(
+    value: str, kept: int, mark: str
+) -> None:
+    # Arrange: a cut that keeps the value's start, as a long line, a history section or a slice's first
+    # lines are cut
+    masker = KnownValuesMasker(DEFAULT_MASKER, frozenset({value}))
+    state = {"items": [{"file": "shop/a.py", "code": f'return dial(order, """{value[:kept]}{mark}'}]}
 
     # Act
     masked, _, _ = mask_request(state, {}, masker)
 
     # Assert
-    assert pieces_of(VALUE, json.dumps(masked)) == []
+    assert pieces_of(value, json.dumps(masked)) == []
     assert mark in masked["items"][0]["code"]
 
 
@@ -351,9 +368,9 @@ def test_two_known_values_sharing_characters_are_both_hidden_whole() -> None:
     assert masked["items"][0]["code"] == "dial(order, '[MASKED]')"
 
 
-def test_a_letters_only_token_in_mixed_case_is_still_hidden_across_requests(tmp_path: Path) -> None:
-    # Arrange: no digit, but mixed case as a generated token has
-    letters = "QmvTxLrZpwKcHdNy"
+@pytest.mark.parametrize("letters", ["QmvTxLrZpwKcHdNy", "qmvtxlrzpwkchdny"], ids=["mixed case", "lowercase"])
+def test_a_letters_only_secret_is_hidden_across_requests(tmp_path: Path, letters: str) -> None:
+    # Arrange: no digit, as a generated token or an app password may have
     files = {name: text.replace(VALUE, letters) for name, text in {**USE, **CONFIG}.items()}
     index = repository(tmp_path, files)
     client = ScriptedJevClient(default_noul=0.1)

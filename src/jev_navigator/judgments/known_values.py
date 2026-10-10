@@ -23,12 +23,13 @@ files of the scope is known this way. A shorter value is hidden within its own r
 word. A value in more files is a placeholder rather than a secret (``password: password``, a model name
 a test passes as a key), and hiding it across the repository would blank ordinary code; it too is
 hidden only in the requests that carry code a rule finds it in. A secret copied bare into more files
-than that is therefore not hidden across requests. Plain words (``description``, ``read_only``) are
-not known either: hidden across requests they would rewrite a point's words, or refuse every request
-whose structure names them. A host masker that hides more than JVN's rules (``Masker.masked_values``
-listing values the rules miss) hides those within each request only.
+than that is therefore not hidden across requests. A known value of plain words (``description``,
+``read_only``) is hidden in code like any other, but never in a point or a key of a request's
+structure, where it is a word (``secrets._is_plain_word``). A host masker that hides more than JVN's
+rules (``Masker.masked_values`` listing values the rules miss) hides those within each request only.
 
-A cut that keeps a text's start (a long line, a history section) can split a known value; the masker
+A cut that keeps a text's start (a long line, a history section, a slice's first lines) can split a
+known value; the masker
 also lists a value whose start stands right before the cut's mark, and request masking hides that start
 (``secrets.split_starts``).
 """
@@ -39,7 +40,7 @@ import asyncio
 import re
 import threading
 import weakref
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from ..index.code_index import CodeIndex
@@ -50,13 +51,13 @@ from .secrets import (
     DEFAULT_MASKER,
     MASK_TOKEN,
     Masker,
+    ValueStarts,
     split_starts,
     value_starts,
 )
 
 KNOWN_VALUE_MAX_FILES = 5
 """A value standing in more files than this is a placeholder, not a secret (see the module docstring)."""
-_PLAIN_WORDS = re.compile(r"[A-Z]?[a-z]+(?:_[a-z]+)*|[A-Z]+(?:_[A-Z]+)*")
 
 __all__ = [
     "KNOWN_VALUE_MAX_FILES",
@@ -77,7 +78,7 @@ class KnownValuesMasker:
 
     inner: Masker
     known: frozenset[str]
-    _starts: Mapping[str, tuple[str, ...]] = field(init=False, repr=False, compare=False)
+    _starts: ValueStarts = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_starts", value_starts(self.known))
@@ -86,14 +87,11 @@ class KnownValuesMasker:
         return self.inner.mask(text, path)
 
     def masked_values(self, text: str, path: str | None = None) -> list[str]:
-        """The inner masker's values, each known value the text holds, and each known value whose start
-        a cut kept (``secrets.split_starts``), so request masking hides that start too."""
+        """The inner masker's values, each known value the text holds, and for each cut that kept a known
+        value's start one value it starts (``secrets.split_starts``), which is enough for request masking
+        to hide that start: a start that 10,000 lockfile hashes share needs one copy pattern, not 10,000."""
         whole = [value for value in self.known if value in text]
-        split = [
-            owner
-            for begin, end in split_starts(text, self._starts)
-            for owner in self._starts[text[begin:end]]
-        ]
+        split = [owners[0] for _, _, owners in split_starts(text, self._starts)]
         return [*self.inner.masked_values(text, path), *whole, *split]
 
     @property
@@ -166,7 +164,7 @@ def _values_in(index: CodeIndex) -> frozenset[str]:
             dict.fromkeys(
                 value
                 for value in DEFAULT_MASKER.masked_values(text, file)
-                if len(value) >= BY_CONTENT_MIN_CHARS and not _plain_words(value)
+                if len(value) >= BY_CONTENT_MIN_CHARS
             )
         )
     holders = _holders(index, list(found), text_files)
@@ -189,14 +187,6 @@ def _holders(index: CodeIndex, values: list[str], text_files: set[str]) -> dict[
             len(files) if key == value else sum(value in "\n".join(index.lines(file)) for file in files)
         )
     return counts
-
-
-def _plain_words(value: str) -> bool:
-    """A value of plain words (``description``, ``read_only``, ``Described``, ``READ_ONLY``) is a
-    placeholder: hidden across requests it would rewrite a point's words, or refuse every request whose
-    structure names it (``instructions``). It stays hidden where a rule finds it. Mixed case, as in a
-    generated token, or a digit is not plain words."""
-    return bool(_PLAIN_WORDS.fullmatch(value))
 
 
 def _texts(index: CodeIndex) -> Iterator[tuple[str, str]]:
