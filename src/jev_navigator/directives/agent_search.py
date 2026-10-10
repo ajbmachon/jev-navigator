@@ -697,7 +697,8 @@ class _Run:
 
     def label(self) -> Steps[None]:
         """Label each point's shortlisted places at 0.5 or more for that point, refuting points first,
-        while the budget lasts; every point not labelled says why."""
+        while the budget lasts; every point not labelled says why, a failed request included, so a
+        labelling failure never costs the search's result."""
         for point in sorted(self.points, key=lambda point: point.kind != REFUTING):
             pieces = [
                 self._piece(answer.place)
@@ -719,6 +720,9 @@ class _Run:
             )
         except CallCapReachedError:
             point.labels = "incomplete: the budget ran out inside this point's labelling request"
+            return
+        except Exception as error:  # noqa: BLE001 - the search's result stands; the point names the failure
+            point.labels = f"not labelled: the request failed: {type(error).__name__}: {error}"
             return
         finally:
             self.calls["labels"] += self.total.calls - before

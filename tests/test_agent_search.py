@@ -467,6 +467,30 @@ def test_a_failed_request_ends_the_search_failed_and_keeps_the_answers_before_it
     assert result.point("h1.e1").labels == "labelled"
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_a_failed_labelling_request_is_named_and_the_result_still_returns(
+    shop: CodeIndex, asynchronous: bool
+) -> None:
+    # Arrange: every role-label question fails; ranking and existence answer
+    labelling = scripted(
+        {"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": limit_exists, "h1_r1": constant(0.1)}
+    )
+
+    def answer(question_id: str, question: Mapping, state: Mapping) -> float:
+        if question_id.startswith(("match_", "exists_")):
+            return labelling.nouls(question_id, question, state)
+        raise ConnectionError("Jev is down")
+
+    # Act
+    result = searched(ScriptedJevClient(nouls=answer), request(), shop, asynchronous=asynchronous)
+
+    # Assert
+    assert result.stopped_by == "points_settled" and result.failure is None
+    assert result.point("h1.e1").outcome == "established"
+    assert result.point("h1.e1").labels == "not labelled: the request failed: ConnectionError: Jev is down"
+    assert result.requests.labels == 1
+
+
 def test_cancelling_the_async_search_raises_instead_of_returning(shop: CodeIndex) -> None:
     class Hanging(AsyncScriptedJevClient):
         async def send(self, state: Mapping, questions: Mapping):
