@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from conftest import WEBSITE_QUERIES, labelled
+from git_repos import commit_files
 from shop_search import shop_index
 
 from jev_navigator.directives.find_all import find_all
 from jev_navigator.directives.frontier import VALUE
-from jev_navigator.index.units import LineAnchor, RangeAnchor, Unit, list_units
+from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.index.units import LineAnchor, RangeAnchor, Unit, list_units, read_ranges
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.selection.scent import ScentIndex, ScentIndexTooLargeError, scent_document, unit_scent
 from jev_navigator.sources import (
     ANCHORS,
     CALLEES,
@@ -27,6 +31,7 @@ from jev_navigator.sources import (
     TEXT_NAMED_FILES,
     TEXT_NAMES,
     Reach,
+    ScentSource,
     Seeds,
 )
 from jev_navigator.testing import ScriptedJevClient
@@ -301,3 +306,112 @@ def test_owner_qualified_callees_with_the_same_name_reach_both_bound_owners(tmp_
         LineAnchor("worker.py", 1),
         LineAnchor("guard.py", 1),
     }
+
+
+SCENTED = {
+    "shop/limits.py": (
+        "MAX_ITEMS = 4\n\n\n"
+        "def check_item_limit(order):\n"
+        "    # a refund never passes through here\n"
+        "    if len(order.items) > MAX_ITEMS:\n"
+        '        raise ValueError("order over the item limit")\n\n\n'
+        "def item_count(order):\n    return len(order.items)\n"
+    ),
+    "shop/refunds.py": "def issue_refund(order):\n    return -order.total\n",
+    "shop/quota.py": "def enforce_quota(order):\n    return order.quota\n",
+    "shop/render.py": "def render_page(page):\n    return page.html\n",
+}
+LIMIT_POINT = "code that refuses an order over the item limit"
+
+
+def test_the_scent_source_reaches_the_best_bm25_units_in_order_after_name_hits(tmp_path: Path) -> None:
+    # Arrange: the expected order, scored unit by unit from each unit's own code
+    commit_files(tmp_path, SCENTED)
+    index = CodeIndex.from_git(tmp_path)
+    seeds = Seeds(names=("MAX_ITEMS",), texts=(LIMIT_POINT,))
+    units = list_units(index, index.files, box_chars=BOX).units
+    scores = ScentIndex(
+        scent_document(unit.id, unit.path, unit.symbol, read_ranges(index, unit.path, unit.ranges))
+        for unit in units
+    ).scores(f"{LIMIT_POINT} MAX_ITEMS")
+    matched = [unit for unit in units if scores[unit.id] > 0]
+    best = sorted(matched, key=lambda unit: (-scores[unit.id], unit.id))
+
+    # Act
+    reaches = ScentSource(limit=3).reach(index, seeds)
+
+    # Assert
+    assert places(reaches) == [
+        (LineAnchor(unit.path, unit.start), f"bm25 {scores[unit.id]:.3f}", 4 + rank)
+        for rank, unit in enumerate(best[:3])
+    ]
+    assert {reach.source for reach in reaches} == {"scent"} and not any(reach.names for reach in reaches)
+    assert reaches[0].at == LineAnchor("shop/limits.py", 4), "check_item_limit matches the most words"
+    assert "shop/render.py" not in {reach.at.file for reach in ScentSource(limit=99).reach(index, seeds)}
+
+
+def test_the_scent_index_is_built_once_per_code_index_and_refuses_more_units_than_its_bound(
+    tmp_path: Path,
+) -> None:
+    commit_files(tmp_path, SCENTED)
+    index = CodeIndex.from_git(tmp_path)
+
+    bound = "lists 6 units, more than the scent index's bound of 5"
+    with pytest.raises(ScentIndexTooLargeError, match=bound):
+        ScentSource(max_units=5).reach(index, Seeds(texts=(LIMIT_POINT,)))
+
+    assert unit_scent(index, max_units=6) is unit_scent(index, max_units=6)
+
+
+def test_the_scent_source_ranks_only_inside_the_seeds_scope_before_cutting_its_limit(tmp_path: Path) -> None:
+    # Arrange: a test file that matches the point best, outside a scope that leaves tests out
+    commit_files(
+        tmp_path,
+        {
+            **SCENTED,
+            "tests/test_limits.py": (
+                "def test_refuses_an_order_over_the_item_limit(order_over_item_limit):\n"
+                "    refuse_order_over_item_limit(order_over_item_limit)\n"
+            ),
+        },
+    )
+    index = CodeIndex.from_git(tmp_path)
+    unscoped = Seeds(texts=(LIMIT_POINT,))
+
+    everywhere = ScentSource(limit=99).reach(index, unscoped)
+
+    # Act
+    in_scope = ScentSource(limit=2).reach(
+        index, Seeds(texts=(LIMIT_POINT,), in_scope=lambda path: not path.startswith("tests/"))
+    )
+
+    # Assert
+    assert everywhere[0].at.file == "tests/test_limits.py"
+    kept = [reach.at for reach in everywhere if reach.at.file != "tests/test_limits.py"]
+    assert [(reach.at, reach.distance) for reach in in_scope] == [(kept[0], 4), (kept[1], 5)]
+
+
+def test_the_per_text_scent_option_gives_every_seed_text_its_own_best_units_in_turn(tmp_path: Path) -> None:
+    # Arrange: the combined query's best units all match the limit point, none the html point
+    commit_files(tmp_path, SCENTED)
+    index = CodeIndex.from_git(tmp_path)
+    html = "code that returns html"
+    seeds = Seeds(texts=(LIMIT_POINT, html))
+    best_for = {text: ScentSource(limit=1).reach(index, Seeds(texts=(text,)))[0].at for text in seeds.texts}
+
+    # Act
+    combined = ScentSource(limit=3).reach(index, seeds)
+    per_text = ScentSource(limit=2, queries="per_text").reach(index, seeds)
+
+    # Assert
+    assert {reach.at.file for reach in combined} == {"shop/limits.py"}
+    assert best_for[html] == LineAnchor("shop/render.py", 1)
+    assert [(reach.at, reach.distance) for reach in per_text] == [
+        (best_for[LIMIT_POINT], 4),
+        (best_for[html], 5),
+    ]
+    twice = ScentSource(limit=3, queries="per_text").reach(index, Seeds(texts=(LIMIT_POINT, LIMIT_POINT)))
+    assert [reach.at for reach in twice] == [
+        reach.at for reach in ScentSource(limit=3).reach(index, Seeds(texts=(LIMIT_POINT,)))
+    ], "a unit two texts rank is reached once"
+    assert ScentSource().queries == "combined"

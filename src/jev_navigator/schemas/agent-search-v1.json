@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jev-navigator/schemas/agent-search-v1.json",
+  "$ref": "#/$defs/AgentSearchRequest",
+  "$defs": {
+    "AgentSearchRequest": {
+      "title": "AgentSearchRequest",
+      "description": "One composed search: hypotheses with their points, and how to search for them.",
+      "type": "object",
+      "properties": {
+        "hypotheses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Hypothesis"
+          },
+          "maxItems": 3,
+          "minItems": 1
+        },
+        "terms": {
+          "description": "Identifiers, literals and config keys to seed and rank the search; never its scope.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "anchors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Anchor"
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        },
+        "follow": {
+          "description": "Relations to expand through from the best units of a point still undecided.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "callees",
+              "callers",
+              "named_files"
+            ]
+          }
+        },
+        "budget_requests": {
+          "description": "Judge requests this search may send, role labels included.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "default": 8
+        }
+      },
+      "required": [
+        "hypotheses",
+        "terms",
+        "anchors",
+        "files",
+        "scope",
+        "follow"
+      ],
+      "additionalProperties": false
+    },
+    "Hypothesis": {
+      "title": "Hypothesis",
+      "description": "One candidate explanation. The mechanism is returned as written and never judged; the\nevidence points would show it and the refuting points would contradict it.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Letters and digits, starting with a letter, such as h1, e2 or r1.",
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9]{0,15}$"
+        },
+        "mechanism": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Point"
+          },
+          "maxItems": 4,
+          "minItems": 1
+        },
+        "refuted_by": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Point"
+          },
+          "maxItems": 2
+        }
+      },
+      "required": [
+        "id",
+        "mechanism",
+        "evidence",
+        "refuted_by"
+      ],
+      "additionalProperties": false
+    },
+    "Point": {
+      "title": "Point",
+      "description": "A point to search for: code the agent expects to find, judged one unit at a time.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Letters and digits, starting with a letter, such as h1, e2 or r1.",
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9]{0,15}$"
+        },
+        "point": {
+          "description": "One concrete piece of code in plain words, such as 'code that refuses an order over the item limit'.",
+          "type": "string",
+          "maxLength": 600,
+          "minLength": 1
+        }
+      },
+      "required": [
+        "id",
+        "point"
+      ],
+      "additionalProperties": false
+    },
+    "Anchor": {
+      "title": "Anchor",
+      "description": "Lines to start from, relative to the repository root: ``line``, or ``line`` to ``end``.",
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "file",
+        "line"
+      ],
+      "additionalProperties": false
+    },
+    "SearchScope": {
+      "title": "SearchScope",
+      "description": "The files the search may reach beyond the anchors: folders or globs to include (empty for\nall) and exclude, and whether test files count.",
+      "type": "object",
+      "properties": {
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "with_tests": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "include",
+        "exclude",
+        "with_tests"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

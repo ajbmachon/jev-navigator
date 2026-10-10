@@ -1,4 +1,4 @@
-"""The admitted local-match ranking question and the independent role wording owner."""
+"""The admitted local-match ranking question, its existence form over a set, and the role wording owner."""
 
 from __future__ import annotations
 
@@ -58,3 +58,9 @@ class QuestionProfile:
 
 
 J1 = QuestionProfile("J1-3", json.loads(files(__package__).joinpath("local_match_question.json").read_text()))
+EXISTS = QuestionProfile(
+    "exists-1", json.loads(files(__package__).joinpath("existence_question.json").read_text())
+)
+"""Whether a set of supplied entries holds the code that settles a part of a point: J1-3's local-match
+property asked once over the set (``fetched``) instead of once per unit, so a ranking says where to look
+and this says whether the shortlist answers the point."""

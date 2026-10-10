@@ -1296,3 +1296,52 @@ def test_a_pgp_key_cut_before_its_begin_marker_hides_its_body_above_the_checksum
 
     assert [line for line in body if line in masked] == []
     assert "print(len(lines))" in masked
+
+
+COPIED_PASSWORD = "Tr0ub4dor-horse-staple"
+
+
+@pytest.mark.parametrize(
+    "point",
+    [{"target": {"description": "key"}}, {"targets": {"p0": "key"}}, {"workflow": {"question": "key"}}],
+    ids=["target", "targets", "workflow"],
+)
+def test_a_point_hides_a_long_secret_its_writer_copied_from_the_code(point: dict) -> None:
+    # Arrange: an agent read the code and copied its password into the point it searches for
+    key, inner = next(iter(point.items()))
+    field = next(iter(inner))
+    written = {key: {field: f"where the database login uses {COPIED_PASSWORD}"}}
+    state = {**written, "slice": {"file": "app/db.py", "code": f'DB_PASSWORD = "{COPIED_PASSWORD}"\n'}}
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state[key][field] == "where the database login uses [MASKED]"
+
+
+def test_the_final_check_refuses_a_long_secret_left_in_a_point() -> None:
+    state = {
+        "targets": {"p0": f"where the login uses {COPIED_PASSWORD}"},
+        "slice": {"file": "a.py", "code": ""},
+    }
+
+    with pytest.raises(SecretInRequestError):
+        refuse_if_secret(state, {}, None, frozenset({COPIED_PASSWORD}))
+
+
+def test_jvns_own_question_wording_never_hides_a_masked_value() -> None:
+    # Arrange: a fixture's secret-named variable holds a word JVN's own question uses
+    state = {"slice": {"file": "tests/test_rank.py", "code": 'API_TOKEN = "relevance"\n'}}
+    questions = {
+        "q": {"type": "noul", "instructions": "Judge the relevance of `slice.code`.", "criteria": {}}
+    }
+
+    # Act
+    masked_state, masked_questions, values = mask_request(state, questions, SecretMasker())
+    refuse_if_secret(masked_state, masked_questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_questions == questions
+    assert masked_state["slice"]["code"] == 'API_TOKEN = "[MASKED]"\n'
