@@ -87,10 +87,11 @@ class KnownValuesMasker:
         return self.inner.mask(text, path)
 
     def masked_values(self, text: str, path: str | None = None) -> list[str]:
-        """The inner masker's values, each known value the text holds, and each known value whose start
-        a cut kept (``secrets.split_starts``), so request masking hides that start too."""
+        """The inner masker's values, each known value the text holds, and for each cut that kept a known
+        value's start one value it starts (``secrets.split_starts``), which is enough for request masking
+        to hide that start: a start that 10,000 lockfile hashes share needs one copy pattern, not 10,000."""
         whole = [value for value in self.known if value in text]
-        split = [owner for _, _, owners in split_starts(text, self._starts) for owner in owners]
+        split = [owners[0] for _, _, owners in split_starts(text, self._starts)]
         return [*self.inner.masked_values(text, path), *whole, *split]
 
     @property

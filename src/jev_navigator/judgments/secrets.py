@@ -9,7 +9,7 @@ passes its own objects; turning either off must be explicit (``masker=None`` or 
 from __future__ import annotations
 
 import re
-from bisect import bisect_left, bisect_right
+from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -274,26 +274,21 @@ def split_starts(text: str, starts: ValueStarts) -> list[tuple[int, int, tuple[s
     """Where ``text`` holds a proper start of ``COPY_MIN_CHARS`` or more characters of a value right before
     a cut mark: the longest such start there, and the values it starts. A cut that keeps a text's start (a
     long line, a history section, a slice's first lines) can split a value, and the start it keeps matches
-    no copy of the whole value, so request masking hides it here. Each character before a mark is read
-    once for a value's first characters, however long the values are."""
+    no copy of the whole value, so request masking hides it here. A kept start never reaches back past
+    an earlier mark, which no value holds, so each character is read once however long the values are."""
     if not starts.heads or "cut" not in text:
         return []
-    marks = [mark.start() for mark in CUT_MARKS.finditer(text)]
-    heads: list[int] = []
-    scanned = 0
-    for end in marks:
-        for begin in range(max(scanned, end - starts.longest + 1), end - COPY_MIN_CHARS + 1):
-            if text[begin : begin + COPY_MIN_CHARS] in starts.heads:
-                heads.append(begin)
-        scanned = max(scanned, end - COPY_MIN_CHARS + 1)
     found = []
-    for end in marks:
-        for begin in heads[
-            bisect_left(heads, end - starts.longest + 1) : bisect_right(heads, end - COPY_MIN_CHARS)
-        ]:
-            if owners := starts.owners(text[begin:end]):
+    previous = 0
+    for mark in CUT_MARKS.finditer(text):
+        end = mark.start()
+        for begin in range(max(previous, end - starts.longest + 1), end - COPY_MIN_CHARS + 1):
+            if text[begin : begin + COPY_MIN_CHARS] in starts.heads and (
+                owners := starts.owners(text[begin:end])
+            ):
                 found.append((begin, end, owners))
                 break
+        previous = mark.end()
     return found
 
 
