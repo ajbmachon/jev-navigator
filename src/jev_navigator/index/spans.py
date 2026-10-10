@@ -36,6 +36,18 @@ class Span:
         return self.file == other.file and self.start <= other.end and other.start <= self.end
 
 
+def merged_ranges(ranges: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The ranges in order, each one that starts at or before the end of the one before joined into it:
+    character spans that overlap or touch, or line ranges that share a line."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def holder_of(symbols: Iterable[Span], symbol: Span) -> Span | None:
     """The smallest of ``symbols`` whose lines contain ``symbol``'s and fill more of them: a method's
     class, a nested function's outer function. Lines are all a span knows, so a symbol on the same

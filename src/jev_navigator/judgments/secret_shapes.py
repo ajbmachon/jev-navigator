@@ -16,6 +16,7 @@ import re
 from collections import Counter
 from collections.abc import Callable
 
+from ..index.spans import merged_ranges
 from .secret_structures import flow_spans, yaml_block_spans
 from .secret_values import (
     CALL_OR_INDEX,
@@ -399,7 +400,7 @@ def _private_key_spans(text: str) -> list[Span]:
         if begin >= covered:
             covered = _unterminated_key_end(text, begin)
             spans.append((begin, covered))
-    return merged_spans(spans)
+    return merged_ranges(spans)
 
 
 def _unterminated_key_end(text: str, begin: int) -> int:
@@ -463,17 +464,6 @@ def _unopened_key_start(text: str, end_marker: int, floor: int) -> int:
 def _line_end(text: str, position: int) -> int:
     end = text.find("\n", position)
     return len(text) if end == -1 else end
-
-
-def merged_spans(spans: list[Span]) -> list[Span]:
-    """The spans in order, with overlapping or touching spans joined into one."""
-    merged: list[Span] = []
-    for start, end in sorted(spans):
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    return merged
 
 
 _RULES: tuple[Callable[[str], list[Span]], ...] = (
