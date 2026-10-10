@@ -95,7 +95,7 @@ class SecretMasker:
         return hide_secrets(text, path)[0]
 
     def masked_values(self, text: str, path: str | None = None) -> list[str]:
-        return [value for value in hide_secrets(text, path)[1] if _is_copied(value)]
+        return [form for value in hide_secrets(text, path)[1] for form in _copied_forms(value)]
 
 
 DEFAULT_MASKER = SecretMasker()
@@ -136,8 +136,11 @@ def masked_values(value: object, masker: Masker) -> frozenset[str]:
 
 
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str], questions: bool = False) -> object:
-    """Masks every string by the masker's rules and hides each of ``values`` wherever it still appears.
-    A string a copy changed is masked once more, because a hidden copy can turn a kept value into one
+    """Hides each of ``values`` wherever it appears, masks every string by the masker's rules, and hides
+    the values once more. Copies go first because a rule can end a value early (a URL password at its
+    first ``@``, a config value at ``#``) and the rest of a known value would no longer match its copy;
+    the longest values go first, so a token is hidden whole before a shorter value inside it. A string
+    the second hiding changed is masked once more, because a hidden copy can turn a kept value into one
     the rules hide (``sessionToken: "[MASKED]-token"`` no longer repeats its key), and the request sent
     must be one the rules leave as it is. Keys are left as they are. Wording, the request's point and
     JVN's own question text, hides no copies: masking protects the code, and a point is masked only
@@ -146,9 +149,9 @@ def mask_everywhere(value: object, masker: Masker, values: frozenset[str], quest
 
     @cache
     def hide(text: str, path: str | None, role: str) -> str:
-        masked = masker.mask(text, path)
         if role == "wording":
-            return masked
+            return masker.mask(text, path)
+        masked = masker.mask(_hide_copies(text, copies), path)
         copied = _hide_copies(masked, copies)
         return masked if copied == masked else masker.mask(copied, path)
 
@@ -207,6 +210,13 @@ def _holds_copy(text: _RequestText, value: str, copy: re.Pattern[str]) -> bool:
     if text.role == "wording" or (text.role == "key" and len(value) < BY_CONTENT_MIN_CHARS):
         return False
     return bool(copy.search(text.text))
+
+
+def _copied_forms(value: str) -> list[str]:
+    """A masked value and, for a value wrapped in quotes (a shell word such as ``"pa55word"``), the value
+    between them, which is the same secret where it stands unquoted (the bare value in a command or URL)."""
+    inner = value[1:-1] if len(value) > 2 and value[0] == value[-1] and value[0] in "\"'" else None
+    return [form for form in (value, inner) if form is not None and _is_copied(form)]
 
 
 def _is_copied(value: str) -> bool:
