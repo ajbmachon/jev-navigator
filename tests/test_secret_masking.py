@@ -52,8 +52,7 @@ def test_repeated_request_text_is_scanned_once_without_retaining_other_requests(
         "rows": [{"code": 'send("[MASKED]")'} for _ in range(200)],
     }
     assert discovered[reference] == 1
-    # The rules read each repeated text once, after the request's known values are hidden in it.
-    assert masked['send("[MASKED]")'] == 1
+    assert masked[reference] == 1
     # Without the assignment this ordinary string is not secret-shaped. The previous request's
     # discovered values must not survive as hidden state in a later masking operation.
     assert mask_by_content({"code": reference}, masker) == {"code": reference}
@@ -771,8 +770,8 @@ def test_a_value_hidden_at_its_key_is_hidden_where_it_stands_bare_in_the_same_re
     ],
 )
 def test_a_known_value_a_rule_would_cut_short_is_hidden_whole(state: dict, rest: str) -> None:
-    """A rule can end a value early: a URL password at its first ``@``, a config value at ``#``. A value
-    the request already knows is hidden before the rules read the text, or the rest of it is sent."""
+    """A rule can end a value early: a URL password at its first ``@``, a config value at ``#``. The rest
+    of a value the request already knows is hidden where it follows the mask, or it would be sent."""
     # Act
     masked_state, questions, values = mask_request(state, {}, SecretMasker())
     refuse_if_secret(masked_state, questions, SecretScanner(), values)
@@ -809,6 +808,30 @@ def test_a_token_holding_a_shorter_known_value_is_hidden_whole() -> None:
 
     # Assert
     assert masked_state["ci"]["code"] == "curl -H 'x' [MASKED]\n"
+
+
+class _OwnTokenMasker(SecretMasker):
+    """A masker with a rule of its own that JVN's rules do not have, and that lists only JVN's values."""
+
+    def mask(self, text: str, path: str | None = None) -> str:
+        return super().mask(re.sub(r"\btok_[A-Za-z0-9]{20,}", MASK, text), path)
+
+
+def test_a_known_value_inside_a_secret_only_the_masker_finds_leaves_that_secret_whole() -> None:
+    """A known value can stand inside a longer secret that only the caller's masker recognizes. Hiding
+    the known value first would break that secret's shape and send the rest of it."""
+    # Arrange
+    state = {
+        "keyed": {"file": "app/fixtures.py", "code": 'password = "Lm4nRt9vKq2w"\n'},
+        "ci": {"file": "ci.sh", "code": "publish --auth tok_Lm4nRt9vKq2wAbCdEfGh1234\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, _OwnTokenMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert "AbCdEfGh1234" not in json.dumps(masked_state)
 
 
 @pytest.mark.parametrize(
