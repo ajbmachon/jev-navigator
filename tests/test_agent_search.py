@@ -751,3 +751,29 @@ def test_a_possible_match_evicted_from_the_existence_request_never_supports_not_
     assert point.existence is not None
     assert any(place.startswith(("a_rules.py", "b_rules.py")) for place in point.existence.evicted)
     assert point.outcome == "undecided"
+
+
+def test_existence_and_label_requests_hide_a_bare_copy_of_a_value_another_place_reveals(
+    tmp_path: Path,
+) -> None:
+    value = "Tr0ub4dor-horse-staple"
+    write_files(
+        tmp_path,
+        {
+            "shop/a.py": f'def configure(order):\n    password = "{value}"\n    return order\n',
+            "shop/b.py": f'def connect(order):\n    return open_session(order, "{value}")\n',
+        },
+    )
+    commit_all(tmp_path)
+    client = scripted(
+        {"h1_e1": constant(0.6), "h1_r1": constant(0.6)}, {"h1_e1": constant(0.5), "h1_r1": constant(0.5)}
+    )
+    asked = request(anchors=[], files=["shop/a.py", "shop/b.py"], follow=[])
+
+    agent_search(asked, CodeIndex.from_git(tmp_path), Judge(client, items_per_request=1))
+
+    later = [
+        state for (state, _), kind in zip(client.requests, kinds(client), strict=True) if kind != "ranking"
+    ]
+    assert later
+    assert value not in json.dumps(later)

@@ -635,7 +635,9 @@ class _Run:
         return {answer.place.id: self._piece(answer.place) for _, answer in self._beam(point)}
 
     def _piece(self, place: Item) -> LabelPiece:
-        return LabelPiece(place, self._code(place))
+        """A place's raw code for a request Jev reads: the Judge masks the request as one, so a value
+        one piece reveals is hidden in every other piece too."""
+        return LabelPiece(place, read_ranges(self.index, place.file, place.ranges))
 
     def _apply_bands(self) -> None:
         for point in self._open_points():
