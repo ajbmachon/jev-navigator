@@ -18,6 +18,7 @@ from typing import Protocol
 
 from ..directives.places import located_file
 from ..directives.shown import CUT_MARKS
+from ..index.spans import merged_ranges
 from .secret_shapes import (
     BY_CONTENT_MIN_CHARS,
     HIGH_ENTROPY_MIN_CHARS,
@@ -25,7 +26,6 @@ from .secret_shapes import (
     TOKEN_CHARACTER_CLASS,
     hide_secrets,
     is_high_entropy,
-    merged_spans,
 )
 
 _SHORT_NUMBER = re.compile(r"[\d.,:_+-]{1,4}")
@@ -232,7 +232,7 @@ class _KnownEdges:
             )
             if before or after:
                 spans.append((begin - len(before or ""), end + len(after or "")))
-        for begin, end in reversed(merged_spans(spans)):
+        for begin, end in reversed(merged_ranges(spans)):
             text = text[:begin] + MASK + text[end:]
         return text
 
