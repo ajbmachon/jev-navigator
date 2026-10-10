@@ -76,13 +76,16 @@ def test_a_client_whose_model_takes_fewer_items_is_sent_smaller_batches() -> Non
     smaller = ScriptedJevClient()
     smaller.items_per_request = 4
 
-    # Act
-    Judge(client).check_each(DESCRIBES, _items(10), SHARED)
-    Judge(smaller, items_per_request=3).check_each(DESCRIBES, _items(10), SHARED)
+    capped, below = Judge(client), Judge(smaller, items_per_request=3)
 
-    # Assert: the smaller count closes each batch
+    # Act
+    capped.check_each(DESCRIBES, _items(10), SHARED)
+    below.check_each(DESCRIBES, _items(10), SHARED)
+
+    # Assert: the smaller count closes each batch, and a sixteen-item batch goes out as four requests
     assert sorted(len(members) for members in _sent_members(client)) == [2, 4, 4]
     assert sorted(len(members) for members in _sent_members(smaller)) == [1, 3, 3, 3]
+    assert (capped.sent_per_request(), below.sent_per_request()) == (4, 1)
 
 
 def test_the_same_population_forms_the_same_batches_in_any_input_order() -> None:

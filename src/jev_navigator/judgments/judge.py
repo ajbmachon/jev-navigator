@@ -252,6 +252,12 @@ class Judge:
             self.items_per_request, getattr(self.client, "items_per_request", None) or self.items_per_request
         )
 
+    def sent_per_request(self) -> int:
+        """The requests one ``items_per_request`` batch goes out as: 1, or more when the client's model
+        takes fewer items at once. A caller budgeting in ``items_per_request`` batches multiplies its cap
+        by this, so a model taking fewer items is sent the same work in smaller requests."""
+        return -(-self.items_per_request // self.items_per_sent_request())
+
     @property
     def unanswered_requests(self) -> int:
         """The requests sent without a response that reported usage: cancelled, failed with an error,

@@ -334,7 +334,7 @@ class _Run:
         self.options = options
         self.points = _points(request)
         self.targets = {point.key: point.text for point in self.points}
-        self.sent = -(-judge.items_per_request // judge.items_per_sent_request())
+        self.sent = judge.sent_per_request()
         """The requests one round's items travel in: one, or more for a model that takes fewer items."""
         self.charged = 0
         """Sent requests added to round each step up to whole requests of the judge's size."""
