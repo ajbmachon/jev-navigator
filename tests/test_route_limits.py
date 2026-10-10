@@ -114,6 +114,33 @@ def test_a_custom_route_takes_its_box_from_its_input_tokens() -> None:
         route.client.close()
 
 
+def test_a_route_caps_the_items_per_request_and_the_routed_client_takes_the_smallest_cap() -> None:
+    # Arrange
+    pytest.importorskip("typesafe_sdk")
+    decider = {
+        "SYSTEM_ONE_DECIDER_ENDPOINT": "http://127.0.0.1:9",
+        "SYSTEM_ONE_DECIDER_MODEL": "decider-4b",
+        "SYSTEM_ONE_DECIDER_INPUT_TOKENS": "4096",
+        "SYSTEM_ONE_DECIDER_CONCURRENCY": "4",
+    }
+    environment = {**KEY, **decider, "SYSTEM_ONE_ROUTES": "decider,jev", "SYSTEM_ONE_JEV": "1"}
+
+    # Act
+    uncapped = system_one_client({**environment, "SYSTEM_ONE_ROUTES": "jev"})
+    routed = system_one_client({**environment, "SYSTEM_ONE_DECIDER_ITEMS_PER_REQUEST": "4"})
+
+    # Assert
+    try:
+        assert uncapped.items_per_request is None
+        assert [route.client.items_per_request for route in routed.routes] == [4, None]
+        assert routed.items_per_request == 4
+        with pytest.raises(ValueError, match="SYSTEM_ONE_DECIDER_ITEMS_PER_REQUEST"):
+            routes_from_env({**environment, "SYSTEM_ONE_DECIDER_ITEMS_PER_REQUEST": "0"})
+    finally:
+        uncapped.close()
+        routed.close()
+
+
 def test_a_size_refusal_is_recorded_under_the_limits_of_the_route_that_refused(tmp_path: Path) -> None:
     # Arrange: the primary is down, so the fallback answers, and it refuses the request for its size
     pytest.importorskip("typesafe_sdk")

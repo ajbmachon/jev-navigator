@@ -134,7 +134,8 @@ class Conflict:
 
 @dataclass(frozen=True)
 class RequestUse:
-    """Requests sent against ``budget``, by step; ``replayed_answers`` came from the answer store free."""
+    """``used`` of ``budget`` in requests of the judge's own size; each step's count is the requests it sent,
+    more and smaller ones to a model capped below that size. ``replayed_answers`` came from the store free."""
 
     budget: int
     used: int
