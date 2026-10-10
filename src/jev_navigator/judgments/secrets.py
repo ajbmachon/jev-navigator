@@ -16,6 +16,7 @@ from functools import cache, lru_cache
 from typing import Protocol
 
 from ..directives.places import located_file
+from ..directives.shown import CUT_MARKS
 from .secret_shapes import (
     BY_CONTENT_MIN_CHARS,
     HIGH_ENTROPY_MIN_CHARS,
@@ -66,6 +67,8 @@ __all__ = [
     "masked_values",
     "refuse_if_secret",
     "safe_options",
+    "split_starts",
+    "value_starts",
 ]
 
 
@@ -207,11 +210,12 @@ class _KnownEdges:
                     starts[secret[cut - 1]].add(secret[:cut])
         self._rests = {first: sorted(edges, key=len, reverse=True) for first, edges in rests.items()}
         self._starts = {last: sorted(edges, key=len, reverse=True) for last, edges in starts.items()}
+        self._split = value_starts(frozenset(known))
 
     def hide(self, text: str) -> str:
-        if not self._rests and not self._starts:
+        if not self._rests and not self._starts and not self._split:
             return text
-        spans: list[tuple[int, int]] = []
+        spans: list[tuple[int, int]] = split_starts(text, self._split)
         for token in self._token.finditer(text):
             begin, end = token.span()
             before = begin and next(
@@ -231,9 +235,55 @@ def _has_alnum(text: str) -> bool:
     return any(character.isalnum() for character in text)
 
 
+@lru_cache(maxsize=16)
+def value_starts(values: frozenset[str]) -> dict[str, tuple[str, ...]]:
+    """Every proper start of ``COPY_MIN_CHARS`` or more characters of each value up to ``EDGE_MAX_CHARS``
+    long, with the values it starts: what a cut that split one of them keeps (see ``split_starts``)."""
+    starts: defaultdict[str, list[str]] = defaultdict(list)
+    for value in sorted(values):
+        if len(value) <= EDGE_MAX_CHARS:
+            for cut in range(COPY_MIN_CHARS, len(value)):
+                starts[value[:cut]].append(value)
+    return {start: tuple(owners) for start, owners in starts.items()}
+
+
+def split_starts(text: str, starts: Mapping[str, object]) -> list[tuple[int, int]]:
+    """Where ``text`` holds one of ``starts`` (``value_starts``) right before a cut mark, the longest
+    there. A cut that keeps a text's start (a long line, a history section) can split a value, and the
+    start it keeps matches no copy of the whole value, so request masking hides it here."""
+    if not starts or "cut]" not in text:
+        return []
+    spans = []
+    for mark in CUT_MARKS.finditer(text):
+        end = mark.start()
+        for length in range(min(end, EDGE_MAX_CHARS - 1), COPY_MIN_CHARS - 1, -1):
+            if text[end - length : end] in starts:
+                spans.append((end - length, end))
+                break
+    return spans
+
+
 def _hide_copies(text: str, copies: list[re.Pattern[str]]) -> str:
+    text = _hide_overlapping_copies(text, copies)
     for copy in copies:
         text = copy.sub(MASK, text)
+    return text
+
+
+def _hide_overlapping_copies(text: str, copies: list[re.Pattern[str]]) -> str:
+    """Copies that share characters, hidden one after another, would leave part of whichever came second,
+    and which comes first among values of one length is a set's order. Each run of such copies is hidden
+    as one mask instead; a copy inside a longer one joins it, as hiding the longer first would."""
+    runs: list[list[int]] = []
+    for begin, end in sorted(match.span() for copy in copies for match in copy.finditer(text)):
+        if runs and begin < runs[-1][1]:
+            runs[-1][1] = max(runs[-1][1], end)
+            runs[-1][2] += 1
+        else:
+            runs.append([begin, end, 1])
+    for begin, end, count in reversed(runs):
+        if count > 1:
+            text = text[:begin] + MASK + text[end:]
     return text
 
 
