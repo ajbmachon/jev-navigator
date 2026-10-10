@@ -212,30 +212,8 @@ sets `SYSTEM_ONE_<NAME>_CONCURRENCY`, or the command stops naming that setting. 
 free slot of the route it goes to before it is sent, so waiting never counts against its timeout, and a
 request that falls back to Jev is not held back by Drex's limit.
 
-Microsoft-Decision-1, served from Azure in the EU Data Zone, is a route you configure. Name it alone,
-so no request falls back to a model outside the EU:
-
-```sh
-export SYSTEM_ONE_ROUTES=decision1
-export SYSTEM_ONE_DECISION1_ENDPOINT=https://<resource>.services.ai.azure.com/providers/microsoft
-export SYSTEM_ONE_DECISION1_MODEL=decision-1-eu
-export SYSTEM_ONE_DECISION1_INPUT_TOKENS=32000
-export SYSTEM_ONE_DECISION1_CONCURRENCY=1
-export SYSTEM_ONE_DECISION1_ITEMS_PER_REQUEST=4
-export SYSTEM_ONE_DECISION1_API_KEY="$(az account get-access-token --resource https://cognitiveservices.azure.com --query accessToken -o tsv)"
-```
-
-The key is an Entra access token that lasts about an hour: set it in the shell for one run, never in an
-env file, and fetch a fresh one for the next run. Decision-1 accepts 32,768 tokens including its decision
-token and refuses a longer request with HTTP 422, which `jvn` splits like any size refusal. Its
-deployment admits 60 requests a minute, and a request takes under half a second, so even one in flight
-can pass that: the SDK then waits out each HTTP 429 for the `Retry-After` the endpoint sends (a
-`jvn findall` of 150 requests met 25 and lost none). Four items per request, not 16: Decision-1 ranks
-code worse when sixteen units share a request. Replaying 39 recorded composed searches, it showed
-13.8% of the labelled deciding code at 16 and 22.4% at 4, against Jev's 20.6% at 16, at 13.6
-requests a search instead of 6.6 and about the same tokens. Answers record the served model,
-`microsoft-decision-1`, so the answer store never mixes them with Jev's. The model is a preview that
-Microsoft retires on 4 February 2027.
+Microsoft-Decision-1, served from Azure in the EU Data Zone, is a route you configure. Its settings, how its
+answers differ from Jev's, and how to tune JVN for a model are in [docs/models.md](docs/models.md).
 
 One difference under routes: Ctrl-C cannot abort a request already in flight, so the command waits for
 those requests to finish, keeps their answers, and then stops with a resumable pack. Without routes,
