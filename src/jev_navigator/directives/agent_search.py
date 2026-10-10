@@ -85,6 +85,7 @@ from .agent_search_result import (
     RankedPlace,
     RequestUse,
     SearchCoverage,
+    UnmatchedAnchor,
     code_within,
 )
 from .existence import ExistenceAnswer, ask_existence, ask_existence_async, existence_fits
@@ -897,7 +898,20 @@ class _Run:
             self.outside_scope,
             evicted,
             self.request.scope,
+            tuple(
+                UnmatchedAnchor(unit_id, self.units[unit_id].symbol, best)
+                for unit_id in reached
+                if self.entered[unit_id] == ANCHORS.name
+                and ((best := self._best(unit_id)) is None or best < POSSIBLE_AT)
+            ),
         )
+
+    def _best(self, unit_id: str) -> float | None:
+        """A unit's best J1-3 probability over every point, or None when no point judged it."""
+        scores = [
+            answer.probability for key in self.targets if (answer := self._score(key, unit_id)) is not None
+        ]
+        return max(scores, default=None)
 
     def _why_not_judged(self, unit_id: str) -> str:
         if self._pending(unit_id):

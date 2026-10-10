@@ -145,11 +145,27 @@ class RequestUse:
 
 
 @dataclass(frozen=True)
+class UnmatchedAnchor:
+    """A unit an anchor named that no point matched: ``best_probability`` is its best J1-3 answer over
+    every point, below a possible match, or None when it was never judged."""
+
+    place: str
+    symbol: str
+    best_probability: float | None
+
+    def to_json(self) -> dict[str, Any]:
+        best = None if self.best_probability is None else round(self.best_probability, 4)
+        return {"place": self.place, "symbol": self.symbol, "best_probability": best}
+
+
+@dataclass(frozen=True)
 class SearchCoverage:
     """What the search reached and examined. ``not_judged`` counts reached units left unjudged by the
     source that reached them (its label) or by the reason they could not be judged; ``unlisted`` files
     gave no units, ``unresolved`` anchors named none, ``outside_scope`` files were named but left out by
-    the request's scope, and ``evicted`` places had to leave an existence request for its size."""
+    the request's scope, and ``evicted`` places had to leave an existence request for its size.
+    ``unmatched_anchors`` are the units the anchors named that no point matched, such as a cited
+    finding the agent wrote no point for: what its points have not explained yet."""
 
     units_reached: int
     units_judged: int
@@ -159,6 +175,7 @@ class SearchCoverage:
     outside_scope: tuple[str, ...]
     evicted: tuple[str, ...]
     scope: SearchScope
+    unmatched_anchors: tuple[UnmatchedAnchor, ...]
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -171,6 +188,7 @@ class SearchCoverage:
             ],
             "outside_scope": list(self.outside_scope),
             "evicted_from_existence": list(self.evicted),
+            "unmatched_anchors": [anchor.to_json() for anchor in self.unmatched_anchors],
             "scope": {
                 "include": list(self.scope.include),
                 "exclude": list(self.scope.exclude),
