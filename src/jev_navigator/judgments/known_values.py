@@ -6,12 +6,12 @@ it, but a search spreads its code over many requests: ``password = "<value>"`` i
 while ``dial(order, "<value>")``, judged in another request, holds nothing a rule could recognise. So
 before a search sends anything, JVN's rules (``secrets.SecretMasker``) read every file of the search's
 index once (``repository_values``), and the search's Judge masks with a ``KnownValuesMasker`` around its
-own masker, which hides each of those values wherever a request holds a copy; the final pre-send check
-(``secrets.refuse_if_secret``) refuses a request still holding one. A request's point is masked by the
-masker's ``mask`` too, so a point whose writer copied a known value hides it, though no request shows
-the file it came from. The values depend on the files of the index's scope only, never on what a search
-reached or in which order, so a request's bytes are the same in every search and run over the same
-scope, and code holding no copy is sent exactly as before.
+own masker, which lists each of those values wherever a request holds a copy. Request masking then
+hides the copy as it hides a copy of a value found in the request, wherever it hides those, and the
+final pre-send check (``secrets.refuse_if_secret``) refuses a request still holding one. The values
+depend on the files of the index's scope only, never on what a search reached or in which order, so a
+request's bytes are the same in every search and run over the same scope, and code holding no copy is
+sent exactly as before.
 
 Every file of the scope is read but a binary one and one the index cannot read, which no request can
 carry; an env file in the scope is read here too, though never sent. Reading fixes each file as the
@@ -34,12 +34,12 @@ import re
 import threading
 import weakref
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..index.code_index import CodeIndex
 from ..index.scope import BINARY_SNIFF_BYTES
 from .judge import Judge
-from .secrets import BY_CONTENT_MIN_CHARS, DEFAULT_MASKER, MASK, MASK_TOKEN, Masker
+from .secrets import BY_CONTENT_MIN_CHARS, DEFAULT_MASKER, MASK_TOKEN, Masker
 
 KNOWN_VALUE_MAX_FILES = 5
 """A value standing in more files than this is a placeholder, not a secret (see the module docstring)."""
@@ -56,26 +56,16 @@ __all__ = [
 
 @dataclass(frozen=True)
 class KnownValuesMasker:
-    """``inner`` that also hides every copy of ``known``: ``mask`` hides each copy after ``inner``'s
-    rules have read the text, and ``masked_values`` lists each known value the text holds, so request
-    masking hides its copies everywhere in the request and the final check refuses one left behind."""
+    """``inner`` knowing ``known``: ``masked_values`` also lists each known value a text holds, so request
+    masking (``secrets.mask_everywhere``) hides its copies wherever it hides a value found in the request
+    and the final check refuses one left behind. ``mask`` is ``inner``'s, so JVN's own question wording,
+    which request masking leaves as it is, stays byte for byte."""
 
     inner: Masker
     known: frozenset[str]
-    _longest_first: tuple[str, ...] = field(init=False, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        ordered = sorted(self.known, key=lambda value: (-len(value), value))
-        object.__setattr__(self, "_longest_first", tuple(ordered))
 
     def mask(self, text: str, path: str | None = None) -> str:
-        masked = self.inner.mask(text, path)
-        copies = [value for value in self._longest_first if value in masked]
-        if not copies:
-            return masked
-        for value in copies:
-            masked = masked.replace(value, MASK)
-        return self.inner.mask(masked, path)
+        return self.inner.mask(text, path)
 
     def masked_values(self, text: str, path: str | None = None) -> list[str]:
         return [*self.inner.masked_values(text, path), *(value for value in self.known if value in text)]

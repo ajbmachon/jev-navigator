@@ -137,19 +137,23 @@ def test_a_point_never_sends_a_value_its_writer_copied_from_a_file_no_request_sh
     assert VALUE not in sent(client)
 
 
-def test_code_holding_no_copy_is_sent_byte_for_byte_whatever_secrets_the_repository_holds(
-    tmp_path: Path,
+# "described" is a word of JVN's own question wording, which request masking leaves as it is.
+@pytest.mark.parametrize("secret", [VALUE, "described"])
+def test_code_holding_no_copy_and_jvns_wording_are_sent_byte_for_byte_whatever_secrets_the_repository_holds(
+    tmp_path: Path, secret: str
 ) -> None:
     # Arrange
     plain = {"shop/orders.py": "def place(order):\n    return save(order)\n"}
+    config = {"shop/z_config.py": CONFIG["shop/z_config.py"].replace(VALUE, secret)}
     clients = {"without": ScriptedJevClient(default_noul=0.1), "with": ScriptedJevClient(default_noul=0.1)}
 
     # Act
-    for name, files in (("without", plain), ("with", {**plain, **CONFIG})):
+    for name, files in (("without", plain), ("with", {**plain, **config})):
         index = repository(tmp_path / name, files)
         find_all(index, judge(clients[name]), {"session": TARGET}, files=list(plain))
 
     # Assert
+    assert secret in sent(clients["with"]) or secret == VALUE
     assert clients["with"].requests == clients["without"].requests
 
 
