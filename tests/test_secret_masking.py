@@ -1205,11 +1205,25 @@ KEY_LAYOUTS = {
 }
 
 
+KEY_ARMORS = {
+    "bare": [KEY_BEGIN],
+    "encrypted": [
+        "-----BEGIN RSA " + "PRIVATE KEY-----",
+        "Proc-Type: 4,ENCRYPTED",
+        "DEK-Info: AES-128-CBC,0011",
+        "",
+    ],
+    "pgp": [PGP_KEY_BEGIN, "Version: GnuPG v2", "Comment: laptop", ""],
+    "pgp without headers": [PGP_KEY_BEGIN, ""],
+}
+
+
+@pytest.mark.parametrize("armor", KEY_ARMORS.values(), ids=KEY_ARMORS.keys())
 @pytest.mark.parametrize("layout", KEY_LAYOUTS.values(), ids=KEY_LAYOUTS.keys())
-def test_an_unterminated_key_hides_its_body_in_any_layout_and_keeps_the_code_after_it(layout):
+def test_an_unterminated_key_hides_its_body_in_any_layout_and_keeps_the_code_after_it(layout, armor):
     body = _pem_body(3)
 
-    masked = SecretMasker().mask(layout([KEY_BEGIN, *body]) + "\nprint(len(lines))\n", "app/keys.py")
+    masked = SecretMasker().mask(layout([*armor, *body]) + "\nprint(len(lines))\n", "app/keys.py")
 
     assert [line for line in body if line in masked] == []
     assert "print(len(lines))" in masked
@@ -1226,15 +1240,6 @@ def test_a_key_cut_before_its_begin_marker_hides_its_body_and_keeps_the_code_bef
     assert masked.endswith("\nrun()")
 
 
-def test_an_armored_key_cut_before_its_end_marker_hides_its_body_after_its_headers():
-    body = _pem_body(3)
-    text = "\n".join([PGP_KEY_BEGIN, "Version: GnuPG v2", "Comment: laptop", "", *body])
-
-    masked = SecretMasker().mask(text, "keys/backup.asc")
-
-    assert [line for line in body if line in masked] == []
-
-
 def test_a_mentioned_key_marker_keeps_the_code_before_a_later_key():
     body = _pem_body(2)
     text = f'if value.startswith("{KEY_BEGIN}"):\n    return parse(value)\n' + "\n".join(
@@ -1244,6 +1249,19 @@ def test_a_mentioned_key_marker_keeps_the_code_before_a_later_key():
     masked = SecretMasker().mask(text, "app/keys.py")
 
     assert "    return parse(value)" in masked
+    assert [line for line in body if line in masked] == []
+
+
+def test_a_mentioned_key_marker_never_takes_a_later_cut_key_as_its_own():
+    body = _pem_body(3)
+    # The name after the mention is a run long enough to read as key material, so the mention's scan
+    # reaches the real key's BEGIN line: the case this test guards.
+    text = f'if value.startswith("{KEY_BEGIN}"):\n    return loadPrivateKeyFromPem(value)\n' + "\n".join(
+        [f"data = '''{KEY_BEGIN}", *body]
+    )
+
+    masked = SecretMasker().mask(text, "app/keys.py")
+
     assert [line for line in body if line in masked] == []
 
 

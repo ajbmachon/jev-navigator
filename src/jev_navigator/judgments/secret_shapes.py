@@ -43,12 +43,16 @@ _KEY_BEGIN = r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----"
 _KEY_END = r"-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----"
 _KEY_MARKER = re.compile(rf"(?P<begin>{_KEY_BEGIN})|{_KEY_END}")
 # Key material on a line in any layout (bare, quoted, appended, commented, numbered or diffed): a base64
-# run of a PEM line's length. A key's last line may be shorter; it is padded or a multiple of four long.
+# run of 16 or more characters. A key's last line may be shorter; it is padded or a multiple of four long.
 _KEY_BODY_RUN = re.compile(r"[A-Za-z0-9+/]{16,}")
 _KEY_TAIL_RUN = re.compile(
     r"(?<![A-Za-z0-9+/])(?:[A-Za-z0-9+/]{2,}={1,2}|(?:[A-Za-z0-9+/]{4})+)(?![A-Za-z0-9+/=])"
 )
 _KEY_HEADER = re.compile(r"[ \t\"'`#*/>+-]*(?:Proc-Type|DEK-Info|Version|Comment|Hash|Charset|MessageID):")
+# A full line of key material (PEM, OpenSSH and armor wrap at 64 to 76 characters), and how many lines of
+# armor (headers and the blank line before the body, in any layout) may stand between it and the BEGIN line.
+_KEY_LINE_RUN = re.compile(r"[A-Za-z0-9+/]{40,}")
+_ARMOR_MAX_LINES = 6
 _KEY_MARKER_LINE = re.compile(r"^.*-----(?:BEGIN|END) [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*$", re.M)
 _TOKEN_SHAPES = (
     re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
@@ -386,14 +390,17 @@ def _private_key_spans(text: str) -> list[Span]:
 
 
 def _unterminated_key_end(text: str, begin: int) -> int:
-    """Where a key without an END marker ends: after its BEGIN line, any PEM or armor headers, the
-    following lines that hold key material, and one shorter last line: padded, a multiple of four
-    characters long, or cut by the end of the text."""
-    end = _line_end(text, begin)
+    """Where a key without an END marker ends: after its BEGIN line, its armor (``_armor_end``) or any
+    PEM or armor headers, the following lines that hold key material, and one shorter last line: padded,
+    a multiple of four characters long, or cut by the end of the text. It never reaches a line holding
+    another marker, which starts or ends a key of its own."""
+    end = _armor_end(text, _line_end(text, begin))
     in_body = False
     while end < len(text):
         line_end = _line_end(text, end + 1)
         line = text[end + 1 : line_end]
+        if _KEY_MARKER.search(line):
+            return end
         if _KEY_BODY_RUN.search(line):
             in_body = True
         elif in_body and line.strip() and (line_end == len(text) or _KEY_TAIL_RUN.search(line)):
@@ -401,6 +408,24 @@ def _unterminated_key_end(text: str, begin: int) -> int:
         elif line.strip() and (in_body or not _KEY_HEADER.match(line)):
             return end
         end = line_end
+    return end
+
+
+def _armor_end(text: str, end: int) -> int:
+    """Where a key's armor ends, from the end of its BEGIN line: before the first full line of key material
+    within ``_ARMOR_MAX_LINES`` lines, whatever the lines between hold; the BEGIN line's end when none
+    follows before another marker."""
+    position = end
+    for _ in range(_ARMOR_MAX_LINES + 1):
+        if position >= len(text):
+            break
+        line_end = _line_end(text, position + 1)
+        line = text[position + 1 : line_end]
+        if _KEY_MARKER.search(line):
+            break
+        if _KEY_LINE_RUN.search(line):
+            return position
+        position = line_end
     return end
 
 
