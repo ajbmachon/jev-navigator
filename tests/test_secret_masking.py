@@ -1,5 +1,6 @@
 import base64
 import json
+import random
 import re
 import time
 from collections import Counter
@@ -341,6 +342,9 @@ LONG_LINES = {
     "plus run after a key marker": KEY_BEGIN + "\n" + "+" * 300 + "#",
     "quote run after a key body run": KEY_BEGIN + "\n" + "A" * 16 + '"' * 16_000 + "#",
     "many key marker mentions": f'x = "{KEY_BEGIN}"\n' * 6_000,
+    "key words repeated after BEGIN": "-----BEGIN " + "PRIVATE KEY " * 20_000,
+    "key words repeated after END": "-----END " + "PRIVATE KEY " * 20_000,
+    "key words repeated after a mentioned BEGIN": 'x = "-----BEGIN ' + "PRIVATE KEY " * 20_000,
 }
 
 
@@ -1296,6 +1300,31 @@ def test_a_pgp_key_cut_before_its_begin_marker_hides_its_body_above_the_checksum
 
     assert [line for line in body if line in masked] == []
     assert "print(len(lines))" in masked
+
+
+def _random_body(seed: int, lines: int, width: int = 64) -> list[str]:
+    """Key body lines from seeded random bytes: shaped like a real key's, and no key at all."""
+    encoded = base64.b64encode(random.Random(seed).randbytes(width * lines * 3 // 4)).decode()
+    return [encoded[start : start + width] for start in range(0, len(encoded), width)]
+
+
+PRIVATE_KEY_LABELS = [
+    "PRIVATE KEY", "RSA PRIVATE KEY", "DSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY",
+    "ENCRYPTED PRIVATE KEY", "SSH2 ENCRYPTED PRIVATE KEY", "PGP PRIVATE KEY BLOCK",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("label", PRIVATE_KEY_LABELS)
+def test_every_private_key_label_marks_a_key_from_either_end(label: str) -> None:
+    body = _random_body(7, 3)
+    unterminated = "\n".join([f"-----BEGIN {label}-----", *body, "print(len(lines))", ""])
+    unopened = "\n".join(["load(path)", *body, f"-----END {label}-----"])
+
+    masked = [SecretMasker().mask(text, "app/keys.py") for text in (unterminated, unopened)]
+
+    assert [line for text in masked for line in body if line in text] == []
+    assert masked[0].endswith("\nprint(len(lines))\n")
+    assert masked[1].startswith("load(path)\n")
 
 
 COPIED_PASSWORD = "Tr0ub4dor-horse-staple"

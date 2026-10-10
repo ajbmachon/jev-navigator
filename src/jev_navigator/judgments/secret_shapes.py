@@ -39,8 +39,11 @@ TOKEN_CHARACTER_CLASS = r"[A-Za-z0-9+/=_\-]"
 
 Span = tuple[int, int]
 
-_KEY_BEGIN = r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----"
-_KEY_END = r"-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----"
+# A private key marker's label: up to three words before PRIVATE KEY and one after it (RSA, DSA, EC, OPENSSH,
+# ENCRYPTED, SSH2 ENCRYPTED, PGP ... BLOCK). Bounded and possessive, so a long run of words is read once.
+_KEY_LABEL = r"(?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: [A-Z]++)?"
+_KEY_BEGIN = rf"-----BEGIN {_KEY_LABEL}-----"
+_KEY_END = rf"-----END {_KEY_LABEL}-----"
 _KEY_MARKER = re.compile(rf"(?P<begin>{_KEY_BEGIN})|{_KEY_END}")
 # Key material on a line in any layout (bare, quoted, appended, commented, numbered or diffed): a base64
 # run of 16 or more characters. A key's last line may be shorter; it is padded or a multiple of four long.
@@ -55,7 +58,7 @@ _KEY_HEADER = re.compile(r"[ \t\"'`#*/>+-]*(?:Proc-Type|DEK-Info|Version|Comment
 # armor (headers and the blank line before the body, in any layout) may stand between it and the BEGIN line.
 _KEY_LINE_RUN = re.compile(r"[A-Za-z0-9+/]{40,}")
 _ARMOR_MAX_LINES = 6
-_KEY_MARKER_LINE = re.compile(r"^.*-----(?:BEGIN|END) [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*$", re.M)
+_KEY_MARKER_LINE = re.compile(rf"^.*-----(?:BEGIN|END) {_KEY_LABEL}-----.*$", re.M)
 _TOKEN_SHAPES = (
     re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
