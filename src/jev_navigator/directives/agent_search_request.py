@@ -14,6 +14,7 @@ map one to one.
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from collections.abc import Mapping
@@ -140,12 +141,23 @@ def parse_agent_search_request(
 
 
 def agent_search_schema() -> dict[str, Any]:
-    """The request's JSON Schema, exported from the Structs that parse it."""
+    """The request's JSON Schema, exported from the Structs that parse it. A description taken from a
+    docstring is dedented, so every Python version exports the same text: before 3.13 a docstring keeps
+    its indentation."""
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": SCHEMA_ID,
-        **msgspec.json.schema(AgentSearchRequest),
+        **_dedented(msgspec.json.schema(AgentSearchRequest)),
     }
+
+
+def _dedented(schema: Any) -> Any:
+    if isinstance(schema, dict):
+        return {
+            key: inspect.cleandoc(value) if key == "description" else _dedented(value)
+            for key, value in schema.items()
+        }
+    return [_dedented(value) for value in schema] if isinstance(schema, list) else schema
 
 
 def schema_text() -> str:
