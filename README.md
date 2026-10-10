@@ -200,6 +200,12 @@ route sets its own with `SYSTEM_ONE_<NAME>_INPUT_TOKENS`, or the command stops n
 and remembers a size refusal under the limit of the route that refused. Point Drex at `jvn` through
 the route table: the default client always packs to Jev's limit.
 
+A route can also cap the items one request carries with `SYSTEM_ONE_<NAME>_ITEMS_PER_REQUEST`, for
+a model that ranks better with fewer units at once; the routed client takes the smallest cap. A search
+still plans its rounds at the judge's own size (16), so a capped model is sent each round in smaller
+requests, and `agent_search` counts its budget in requests of the judge's size: a capped model gets
+the same rounds, at more requests and about the same tokens.
+
 Each route also has its own concurrency: how many requests it receives in flight at once. Drex admits
 2 (it answers HTTP 429 to a third) and Jev takes 32, as Analysis Engine measured them; any other route
 sets `SYSTEM_ONE_<NAME>_CONCURRENCY`, or the command stops naming that setting. A request waits for a
@@ -215,6 +221,7 @@ export SYSTEM_ONE_DECISION1_ENDPOINT=https://<resource>.services.ai.azure.com/pr
 export SYSTEM_ONE_DECISION1_MODEL=decision-1-eu
 export SYSTEM_ONE_DECISION1_INPUT_TOKENS=32000
 export SYSTEM_ONE_DECISION1_CONCURRENCY=1
+export SYSTEM_ONE_DECISION1_ITEMS_PER_REQUEST=4
 export SYSTEM_ONE_DECISION1_API_KEY="$(az account get-access-token --resource https://cognitiveservices.azure.com --query accessToken -o tsv)"
 ```
 
@@ -223,7 +230,10 @@ env file, and fetch a fresh one for the next run. Decision-1 accepts 32,768 toke
 token and refuses a longer request with HTTP 422, which `jvn` splits like any size refusal. Its
 deployment admits 60 requests a minute, and a request takes under half a second, so even one in flight
 can pass that: the SDK then waits out each HTTP 429 for the `Retry-After` the endpoint sends (a
-`jvn findall` of 150 requests met 25 and lost none). Answers record the served model,
+`jvn findall` of 150 requests met 25 and lost none). Four items per request, not 16: Decision-1 ranks
+code worse when sixteen units share a request. Replaying 39 recorded composed searches, it showed
+13.8% of the labelled deciding code at 16 and 22.4% at 4, against Jev's 20.6% at 16, at 13.6
+requests a search instead of 6.6 and about the same tokens. Answers record the served model,
 `microsoft-decision-1`, so the answer store never mixes them with Jev's. The model is a preview that
 Microsoft retires on 4 February 2027.
 
