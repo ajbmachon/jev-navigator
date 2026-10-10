@@ -821,6 +821,15 @@ on its own scope, so searches sharing one judge never use up each other's budget
   quote's string ends where that string closes.
   The complete candidate set is masked once, before packing, so copied values stay hidden across
   batches; the final scan still runs on every request before it is sent.
+  A search hides a known value's copies across all its requests, too
+  (`judgments/known_values.py`): before it sends anything, JVN's rules read every file of its index
+  once, and every value of 8 or more characters they hide that stands in at most five of those files
+  is hidden wherever a request holds a copy, so `dial(order, "<value>")` is masked although the
+  `password = "<value>"` it copies is judged in another request, or never. A value in more files is a
+  placeholder (`password: password`), hidden only in the requests that show it where a rule finds it.
+  Code holding no copy is sent byte for byte as before. Reading every file costs a one-time scan per
+  index (about 11 s for the 1,500 files of analysis-engine and 32 s for the 5,200 of heedvane); reuse
+  one index across searches.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
   left in a key is refused too. Both are on by default; a host passes its own (a masker offers
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.

@@ -50,6 +50,7 @@ from ..judgments.judge import (
     Judge,
     masked_request_fits,
 )
+from ..judgments.known_values import with_known_values, with_known_values_async
 from ..judgments.questions import (
     ITEM_PLACEHOLDER,
     MAX_CHOICE_OPTIONS,
@@ -355,7 +356,7 @@ def find_code(
     options = _SearchOptions(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates, ceiling_seconds
     )
-    search, judge = _begin(index, judge, target_description, start, options)
+    search, judge = _begin(index, with_known_values(judge, index), target_description, start, options)
     stop = None
     try:
         while (stop := _stop_reason(search, index)) is None:
@@ -399,6 +400,7 @@ async def find_code_async(
     options = _SearchOptions(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates, ceiling_seconds
     )
+    judge = await with_known_values_async(judge, index)
     search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, index)) is None:
         opened = await asyncio.to_thread(_open_round_or_fail, index, search, judge)

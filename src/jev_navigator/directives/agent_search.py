@@ -57,6 +57,7 @@ from ..index.units import (
     read_ranges,
 )
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge
+from ..judgments.known_values import with_known_values, with_known_values_async
 from ..judgments.role_labels import LabelPiece, label_roles, label_roles_async
 from ..mentions import code_names_in, names_from_text
 from ..selection.active import normalized_scores, reranked
@@ -153,6 +154,7 @@ def agent_search(
     are kept for role labels while ranking runs; whatever ranking leaves goes to labels too. The
     judge's own call cap, store, masker and journal apply to every request."""
     options = _Options.of(beam_width, bands, label_requests, max_code_chars, extra_sources, cancelled)
+    judge = with_known_values(judge, index)
     return _driven(_run(request, index, judge, options, anchors, files).steps())
 
 
@@ -176,6 +178,7 @@ async def agent_search_async(
     stays free. ``cancelled`` is read between rounds as in ``agent_search``; a cancelled task's
     ``CancelledError`` is never caught."""
     options = _Options.of(beam_width, bands, label_requests, max_code_chars, extra_sources, cancelled)
+    judge = await with_known_values_async(judge, index)
     return await _driven_async(_run(request, index, judge, options, anchors, files).steps())
 
 
