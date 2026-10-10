@@ -360,6 +360,25 @@ def test_code_travels_for_the_best_places_first_within_the_allowance(shop: CodeI
     assert all("code" not in place for place in result.to_json()["hypotheses"][0]["points"][0]["shortlist"])
 
 
+def test_coverage_names_each_cited_place_that_matched_no_point(shop: CodeIndex) -> None:
+    # Arrange: two cited places; the points match place_order and nothing in bulk_import
+    def match(code: str) -> float:
+        return 0.92 if "raise ValueError" in code else 0.55 if "def place_order" in code else 0.1
+
+    client = scripted(
+        {"h1_e1": match, "h1_r1": constant(0.05)}, {"h1_e1": limit_exists, "h1_r1": constant(0.1)}
+    )
+    asked = request(anchors=[{"file": "shop/orders.py", "line": 5}, {"file": "shop/admin.py", "line": 6}])
+
+    # Act
+    result = agent_search(asked, shop, Judge(client, masker=None, scanner=None))
+
+    # Assert
+    assert result.to_json()["coverage"]["unmatched_anchors"] == [
+        {"place": "shop/admin.py:4-6", "symbol": "bulk_import", "best_probability": 0.1}
+    ]
+
+
 def test_scope_leaves_tests_out_and_names_files_it_left_out(shop: CodeIndex) -> None:
     client = scripted(
         {"h1_e1": limit_match, "h1_r1": constant(0.05)}, {"h1_e1": constant(0.5), "h1_r1": constant(0.5)}
