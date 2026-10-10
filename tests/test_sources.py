@@ -361,3 +361,31 @@ def test_the_scent_index_is_built_once_per_code_index_and_refuses_more_units_tha
         ScentSource(max_units=5).reach(index, Seeds(texts=(LIMIT_POINT,)))
 
     assert unit_scent(index, max_units=6) is unit_scent(index, max_units=6)
+
+
+def test_the_scent_source_ranks_only_inside_the_seeds_scope_before_cutting_its_limit(tmp_path: Path) -> None:
+    # Arrange: a test file that matches the point best, outside a scope that leaves tests out
+    commit_files(
+        tmp_path,
+        {
+            **SCENTED,
+            "tests/test_limits.py": (
+                "def test_refuses_an_order_over_the_item_limit(order_over_item_limit):\n"
+                "    refuse_order_over_item_limit(order_over_item_limit)\n"
+            ),
+        },
+    )
+    index = CodeIndex.from_git(tmp_path)
+    unscoped = Seeds(texts=(LIMIT_POINT,))
+
+    everywhere = ScentSource(limit=99).reach(index, unscoped)
+
+    # Act
+    in_scope = ScentSource(limit=2).reach(
+        index, Seeds(texts=(LIMIT_POINT,), in_scope=lambda path: not path.startswith("tests/"))
+    )
+
+    # Assert
+    assert everywhere[0].at.file == "tests/test_limits.py"
+    kept = [reach.at for reach in everywhere if reach.at.file != "tests/test_limits.py"]
+    assert [(reach.at, reach.distance) for reach in in_scope] == [(kept[0], 4), (kept[1], 5)]

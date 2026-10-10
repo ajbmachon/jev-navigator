@@ -375,7 +375,9 @@ class _Run:
         self._close_exhausted(at_end=self.stopped_by == FRONTIER_EXHAUSTED)
 
     def _start(self) -> Steps[None]:
-        seeds = Seeds(self.names, tuple(self.targets.values()), self.files, self.anchors)
+        seeds = Seeds(
+            self.names, tuple(self.targets.values()), self.files, self.anchors, in_scope=self.in_scope
+        )
         sources = (*START_SOURCES, *self.options.extra_sources)
         reached: list[ReachedSource] = yield _work(self._reached, sources, seeds)
         listing = yield from self._list(reached)
@@ -670,7 +672,13 @@ class _Run:
     def _hop_seeds(self, unit: Unit) -> Seeds:
         """A unit as find_all's own hops seed it: its code's names, its code, its file and itself."""
         code = read_ranges(self.index, unit.path, unit.ranges)
-        return Seeds(names=tuple(code_names_in(code)), texts=(code,), files=(unit.path,), units=(unit,))
+        return Seeds(
+            names=tuple(code_names_in(code)),
+            texts=(code,),
+            files=(unit.path,),
+            units=(unit,),
+            in_scope=self.in_scope,
+        )
 
     def _settle_expansions(self) -> None:
         """Once an expansion's hops are all judged, an unchanged shortlist stops its point."""

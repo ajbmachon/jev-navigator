@@ -574,3 +574,35 @@ def test_scent_units_left_unjudged_are_counted_by_their_source_within_the_bounds
     assert result.requests.used <= 3
     assert all(len(state["items"]) <= 2 for state, _ in client.requests if "items" in state)
     assert sum(len(code) for code in result.code.values() if code is not None) <= 200
+
+
+def test_agent_search_hands_its_scope_to_the_scent_source_so_left_out_units_use_no_rank(
+    tmp_path: Path,
+) -> None:
+    # Arrange: a test unit outranks the quota check by BM25, and the request leaves tests out
+    write_files(
+        tmp_path,
+        {
+            **SHOP,
+            **QUOTA,
+            "tests/test_quota.py": (
+                "def test_refuses_an_order_over_the_item_limit(order_over_item_limit):\n"
+                "    refuse_order_over_item_limit(order_over_item_limit)\n"
+            ),
+        },
+    )
+    commit_all(tmp_path)
+    client = quota_client()
+
+    # Act
+    result = agent_search(
+        request(follow=[]),
+        CodeIndex.from_git(tmp_path),
+        Judge(client, masker=None, scanner=None),
+        extra_sources=[ScentSource(limit=1)],
+    )
+
+    # Assert
+    assert "refuse_oversized_order" in sent_code(client)
+    assert "test_refuses_an_order" not in sent_code(client)
+    assert "shop/quota.py" in result.point("h1.e1").definite_files

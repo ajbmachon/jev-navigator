@@ -17,7 +17,7 @@ import re
 import threading
 import weakref
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -161,10 +161,16 @@ class UnitScent:
     index: ScentIndex
     starts: Mapping[str, LineAnchor]
 
-    def ranked(self, text: str, limit: int) -> list[tuple[LineAnchor, float]]:
+    def ranked(
+        self, text: str, limit: int, in_scope: Callable[[str], bool] | None = None
+    ) -> list[tuple[LineAnchor, float]]:
         """The first line of the ``limit`` units scoring above zero for ``text``, best first, each with
-        its score; a tie goes to the smaller unit id."""
-        scored = ((-score, unit_id) for unit_id, score in self.index.scores(text).items() if score > 0)
+        its score, counting only units whose file ``in_scope`` keeps; a tie goes to the smaller unit id."""
+        scored = (
+            (-score, unit_id)
+            for unit_id, score in self.index.scores(text).items()
+            if score > 0 and (in_scope is None or in_scope(self.starts[unit_id].file))
+        )
         return [(self.starts[unit_id], -negative) for negative, unit_id in heapq.nsmallest(limit, scored)]
 
 
