@@ -7,9 +7,11 @@ while ``dial(order, "<value>")``, judged in another request, holds nothing a rul
 before a search sends anything, JVN's rules (``secrets.SecretMasker``) read every file of the search's
 index once (``repository_values``), and the search's Judge masks with a ``KnownValuesMasker`` around its
 own masker, which hides each of those values wherever a request holds a copy; the final pre-send check
-(``secrets.refuse_if_secret``) refuses a request still holding one. The values depend on the files of
-the index's scope only, never on what a search reached or in which order, so a request's bytes are the
-same in every search and run over the same scope, and code holding no copy is sent exactly as before.
+(``secrets.refuse_if_secret``) refuses a request still holding one. A request's point is masked by the
+masker's ``mask`` too, so a point whose writer copied a known value hides it, though no request shows
+the file it came from. The values depend on the files of the index's scope only, never on what a search
+reached or in which order, so a request's bytes are the same in every search and run over the same
+scope, and code holding no copy is sent exactly as before.
 
 Every file of the scope is read but a binary one and one the index cannot read, which no request can
 carry; an env file in the scope is read here too, though never sent. Reading fixes each file as the

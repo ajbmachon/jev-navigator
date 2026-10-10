@@ -13,6 +13,7 @@ import pytest
 from git_repos import write_files
 
 from jev_navigator.directives.agent_search import agent_search, agent_search_async
+from jev_navigator.directives.entry import choose_initial_candidates
 from jev_navigator.directives.find_all import find_all, find_all_async
 from jev_navigator.directives.find_code import find_code
 from jev_navigator.directives.places import function_place
@@ -37,7 +38,7 @@ REQUEST = {
     ],
     "terms": [],
     "anchors": [],
-    "files": [*USE, *CONFIG],
+    "files": ["shop/a_session.py", "shop/z_config.py"],
     "scope": {"include": [], "exclude": [], "with_tests": False},
     "follow": [],
     "budget_requests": 8,
@@ -101,6 +102,38 @@ def test_a_bare_copy_is_hidden_although_no_request_before_it_carried_the_code_a_
 
     # Assert
     assert "dial(order" in sent(client)
+    assert VALUE not in sent(client)
+
+
+POINT = f"code that dials an order session with {VALUE}"
+ENV_ONLY = {
+    "deploy/app.env": f"DB_PASSWORD={VALUE}\n",
+    "shop/a_session.py": "def connect(order):\n    return dial(order)\n",
+    "shop/b_orders.py": "def place(order):\n    return order\n",
+}
+POINT_SEARCHES: dict[str, Search] = {
+    "entry": lambda index, client: choose_initial_candidates(index, Judge(client), POINT),
+    "agent_search": lambda index, client: agent_search(
+        {**REQUEST, "hypotheses": [{**REQUEST["hypotheses"][0], "evidence": [{"id": "e1", "point": POINT}]}]},
+        index,
+        Judge(client),
+    ),
+}
+
+
+@pytest.mark.parametrize("search", POINT_SEARCHES.values(), ids=POINT_SEARCHES)
+def test_a_point_never_sends_a_value_its_writer_copied_from_a_file_no_request_shows(
+    tmp_path: Path, search: Search
+) -> None:
+    # Arrange: the value stands only in an env file, which no request ever shows
+    index = repository(tmp_path, ENV_ONLY)
+    client = ScriptedJevClient(default_noul=0.6)
+
+    # Act
+    search(index, client)
+
+    # Assert
+    assert client.requests
     assert VALUE not in sent(client)
 
 

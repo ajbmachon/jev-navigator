@@ -825,7 +825,8 @@ on its own scope, so searches sharing one judge never use up each other's budget
   (`judgments/known_values.py`): before it sends anything, JVN's rules read every file of its index
   once, and every value of 8 or more characters they hide that stands in at most five of those files
   is hidden wherever a request holds a copy, so `dial(order, "<value>")` is masked although the
-  `password = "<value>"` it copies is judged in another request, or never. A value in more files is a
+  `password = "<value>"` it copies is judged in another request, or never; a point that copies such a
+  value hides it too, even when it came from an env file no request shows. A value in more files is a
   placeholder (`password: password`), hidden only in the requests that show it where a rule finds it.
   Code holding no copy is sent byte for byte as before. Reading every file costs a one-time scan per
   index (about 11 s for the 1,500 files of analysis-engine and 32 s for the 5,200 of heedvane); reuse
