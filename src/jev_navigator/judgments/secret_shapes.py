@@ -48,6 +48,8 @@ _KEY_BODY_RUN = re.compile(r"[A-Za-z0-9+/]{16,}")
 _KEY_TAIL_RUN = re.compile(
     r"(?<![A-Za-z0-9+/])(?:[A-Za-z0-9+/]{2,}={1,2}|(?:[A-Za-z0-9+/]{4})+)(?![A-Za-z0-9+/=])"
 )
+# An armored key's checksum line (PGP): "=" and four base64 characters, between its last body line and END.
+_KEY_CHECKSUM = re.compile(r"(?<![A-Za-z0-9/=])=[A-Za-z0-9+/]{4}(?![A-Za-z0-9+/=])")
 _KEY_HEADER = re.compile(r"[ \t\"'`#*/>+-]*(?:Proc-Type|DEK-Info|Version|Comment|Hash|Charset|MessageID):")
 # A full line of key material (PEM, OpenSSH and armor wrap at 64 to 76 characters), and how many lines of
 # armor (headers and the blank line before the body, in any layout) may stand between it and the BEGIN line.
@@ -432,12 +434,15 @@ def _armor_end(text: str, end: int) -> int:
 def _unopened_key_start(text: str, end_marker: int, floor: int) -> int:
     """Where a key whose BEGIN marker lies outside the text starts (a window that opens inside it): the
     lines before its END line that hold key material, the one right above it possibly a shorter last
-    line, back to ``floor`` at most."""
+    line (above an armor checksum line, when there is one), back to ``floor`` at most."""
     start = max(text.rfind("\n", floor, end_marker) + 1, floor)
     last_line = True
     while start > floor:
         line_start = max(text.rfind("\n", floor, start - 1) + 1, floor)
         line = text[line_start : start - 1]
+        if last_line and _KEY_CHECKSUM.search(line):
+            start = line_start
+            continue
         if not (_KEY_BODY_RUN.search(line) or (last_line and _KEY_TAIL_RUN.search(line))):
             break
         start, last_line = line_start, False

@@ -1280,3 +1280,14 @@ def test_a_terminated_key_is_hidden_whole_whatever_its_lines_look_like():
 
     assert [line for line in body if line in masked] == []
     assert "print(len(lines))" in masked
+
+
+@pytest.mark.parametrize("layout", KEY_LAYOUTS.values(), ids=KEY_LAYOUTS.keys())
+def test_a_pgp_key_cut_before_its_begin_marker_hides_its_body_above_the_checksum(layout):
+    body = [*_pem_body(3), "QUJDRA=="]
+    lines = [*body, "=nX4q", "-----END PGP " + "PRIVATE KEY BLOCK-----"]
+
+    masked = SecretMasker().mask(layout(lines) + "\nprint(len(lines))\n", "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+    assert "print(len(lines))" in masked
