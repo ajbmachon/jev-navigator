@@ -19,7 +19,7 @@ from ..judgments.answers import AnswerSource, answered_by
 from ..judgments.judge import Judge, PickResult
 from ..judgments.known_values import with_known_values
 from ..judgments.questions import Pick, serialized_chars
-from ..judgments.secrets import TARGET
+from ..judgments.secrets import TARGET, mask_by_content
 from .places import Place, function_place, range_place
 
 MAX_OPTIONS = 200
@@ -166,8 +166,11 @@ def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> En
 
 
 def _mask_of(judge: Judge) -> Mask:
-    """The judge's own masker, so what the receipt shows is what the request offers."""
-    return judge.masker.mask if judge.masker is not None else str
+    """The judge's own masking of one text, as a request masks it: the rules, then every copy of a value
+    they or the judge know (a search's known values), so what the receipt shows is what the request
+    offers and a description cut afterwards never keeps part of a known value."""
+    masker = judge.masker
+    return str if masker is None else lambda text: mask_by_content(text, masker)
 
 
 def _path_entries(files: tuple[str, ...], parent: str) -> tuple[_PathEntry, ...]:

@@ -1338,3 +1338,21 @@ def test_binary_matches_cannot_corrupt_the_next_text_hit_path(tmp_path: Path) ->
     for hits in (index.search_texts(["sandbox"])["sandbox"], index.search_text("sandbox", whole_word=True)):
         assert {(hit.file, hit.line) for hit in hits} == {("a.png", 1), ("config.yaml", 1)}
         assert all(hit.file in index.files for hit in hits)
+
+
+def test_a_text_search_reads_a_file_as_the_index_first_read_it_after_it_grew(tmp_path: Path) -> None:
+    from shop_search import shop_index
+
+    # Arrange: the index reads the file, which then grows on disk
+    index = shop_index(tmp_path, {"app.py": "def place(order):\n    return order\n"})
+    first = index.lines("app.py")
+    (tmp_path / "app.py").write_text(
+        "def place(order):\n    return order\n\n\ndef later():\n    return sandbox\n"
+    )
+
+    # Act
+    hits = index.search_texts(["sandbox"])
+
+    # Assert
+    assert index.lines("app.py") == first
+    assert hits == {"sandbox": ()}
