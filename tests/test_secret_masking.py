@@ -1329,6 +1329,24 @@ def test_every_private_key_label_marks_a_key_from_either_end(label: str) -> None
     assert masked[1].startswith("load(path)\n")
 
 
+@pytest.mark.parametrize(
+    "joined",
+    [
+        "-----BEGIN RSA PRIVATE KEY-----END RSA PRIVATE KEY-----",
+        "-----END RSA PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----",
+    ],
+    ids=["begin then end", "end then begin"],
+)
+def test_two_markers_sharing_dashes_never_close_the_key_before_its_body(joined: str) -> None:
+    body = _random_body(11, 3)
+    text = "\n".join([joined, *body, "print(len(lines))", ""])
+
+    masked = SecretMasker().mask(text, "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+    assert masked.endswith("\nprint(len(lines))\n")
+
+
 COPIED_PASSWORD = "Tr0ub4dor-horse-staple"
 
 

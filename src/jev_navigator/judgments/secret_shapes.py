@@ -461,10 +461,15 @@ def _unopened_key_start(text: str, end_marker: int, floor: int) -> int:
 
 
 def _key_markers(text: str) -> Iterator[tuple[int, int, bool]]:
-    """Each private key marker in ``text``: its start, its end and whether it is a BEGIN."""
+    """Each private key marker in ``text``: its start, its end and whether it is a BEGIN. An END whose dashes
+    are the closing dashes of the marker before it (``BEGIN … KEY-----END … KEY-----``) does not close that
+    key: its body follows. A BEGIN there (``END … KEY-----BEGIN … KEY-----``) opens the next key."""
+    previous_end = 0
     for marker in _MARKER.finditer(text):
-        if "PRIVATE KEY" in marker["label"]:
-            yield marker.start(), marker.end() + _MARKER_DASHES, marker["kind"] == "BEGIN"
+        begins = marker["kind"] == "BEGIN"
+        if "PRIVATE KEY" in marker["label"] and (begins or marker.start() >= previous_end):
+            previous_end = marker.end() + _MARKER_DASHES
+            yield marker.start(), previous_end, begins
 
 
 def _key_marker_lines(text: str) -> list[Span]:
