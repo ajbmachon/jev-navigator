@@ -52,7 +52,8 @@ def test_repeated_request_text_is_scanned_once_without_retaining_other_requests(
         "rows": [{"code": 'send("[MASKED]")'} for _ in range(200)],
     }
     assert discovered[reference] == 1
-    assert masked[reference] == 1
+    # The rules read each repeated text once, after the request's known values are hidden in it.
+    assert masked['send("[MASKED]")'] == 1
     # Without the assignment this ordinary string is not secret-shaped. The previous request's
     # discovered values must not survive as hidden state in a later masking operation.
     assert mask_by_content({"code": reference}, masker) == {"code": reference}
@@ -743,6 +744,71 @@ def test_a_value_hidden_at_its_key_is_hidden_where_it_stands_bare_in_the_same_re
     # Assert
     assert random_value not in masked_state["slice"]["code"]
     refuse_if_secret(masked_state, questions, SecretScanner(), masked)
+
+
+@pytest.mark.parametrize(
+    ("state", "rest"),
+    [
+        (
+            {
+                "compose": {
+                    "file": "docker-compose.yml",
+                    "code": (
+                        "    environment:\n      POSTGRES_PASSWORD: Zq7wPx@Lm4nRt9vK\n"
+                        "      DATABASE_URL: postgres://app:Zq7wPx@Lm4nRt9vK@db/app\n"
+                    ),
+                }
+            },
+            "Lm4nRt9vK",
+        ),
+        (
+            {
+                "keyed": {"file": "app/fixtures.py", "code": 'password = "Ka9#vQ2mLx7pRt4w"\n'},
+                "conf": {"file": "config.yml", "code": "db_pass: Ka9#vQ2mLx7pRt4w\n"},
+            },
+            "vQ2mLx7pRt4w",
+        ),
+    ],
+)
+def test_a_known_value_a_rule_would_cut_short_is_hidden_whole(state: dict, rest: str) -> None:
+    """A rule can end a value early: a URL password at its first ``@``, a config value at ``#``. A value
+    the request already knows is hidden before the rules read the text, or the rest of it is sent."""
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert rest not in json.dumps(masked_state)
+
+
+def test_a_quoted_shell_value_is_hidden_where_it_stands_unquoted() -> None:
+    # Arrange
+    state = {
+        "env": {"file": "deploy.sh", "code": 'export DB_PASS="pa55word99xq"\n'},
+        "notes": {"file": "docs/restore.md", "code": "psql -h db -W pa55word99xq\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["notes"]["code"] == "psql -h db -W [MASKED]\n"
+
+
+def test_a_token_holding_a_shorter_known_value_is_hidden_whole() -> None:
+    # Arrange
+    state = {
+        "keyed": {"file": "app/fixtures.py", "code": 'password = "Lm4nRt9vKq2w"\n'},
+        "ci": {"file": "ci.sh", "code": "curl -H 'x' ghp_Lm4nRt9vKq2wAbCdEfGhIjKlMnOpQrStUvWx12\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["ci"]["code"] == "curl -H 'x' [MASKED]\n"
 
 
 @pytest.mark.parametrize(
