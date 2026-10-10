@@ -263,7 +263,9 @@ def refuse_if_secret(
     texts = _strings(state) + _strings(questions, questions=True)
     copies = [(value, copy_pattern(value)) for value in masked - {MASK}]
     if any(_holds_copy(text, value, copy) for text in texts for value, copy in copies):
-        raise SecretInRequestError("a masked value is still in the request, in a key; nothing was sent")
+        raise SecretInRequestError(
+            "a masked value is still in the request, in a key or its point; nothing was sent"
+        )
     if scanner is None:
         return
     for text in texts:
