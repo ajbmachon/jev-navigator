@@ -31,6 +31,9 @@ EDGE_MAX_CHARS = 512
 """A known value up to this length also has the edges a mask cut it at hidden (see ``_KnownEdges``); a
 longer one, in practice code an unclosed quote swallowed, is hidden by its copies only."""
 MASK_TOKEN = re.compile(re.escape(MASK))
+# The role of a request string: a value, a key of the request's structure, the request's point, or
+# JVN's own question wording.
+VALUE, KEY, POINT, WORDING = "value", "key", "point", "wording"
 TARGET = "target"
 TARGETS = "targets"
 WORKFLOW = "workflow"
@@ -152,17 +155,24 @@ def mask_everywhere(value: object, masker: Masker, values: frozenset[str], quest
     of the value beside the mask is hidden too (``_KnownEdges``). A string the hiding changed is masked
     once more, because a hidden copy can turn a kept value into one the rules hide (``sessionToken:
     "[MASKED]-token"`` no longer repeats its key), and the request sent must be one the rules leave as
-    it is. Keys are left as they are. Wording, the request's point and JVN's own question text, hides
-    no copies: masking protects the code, and a point is masked only where the rules find a secret in it."""
+    it is. Keys are left as they are. JVN's own question wording hides no copies. The request's point
+    hides copies of a value of ``BY_CONTENT_MIN_CHARS`` or more characters only: its ordinary words stay
+    (a short secret value such as ``"shared"`` can equal one), while a long secret its writer copied from
+    the code is hidden."""
+    token = getattr(masker, "token_pattern", MASK_TOKEN)
     known = sorted(values - {MASK}, key=len, reverse=True)
-    copies = [copy_pattern(secret) for secret in known]
-    edges = _known_edges(frozenset(known), getattr(masker, "token_pattern", MASK_TOKEN))
+    long_known = [secret for secret in known if len(secret) >= BY_CONTENT_MIN_CHARS]
+    hiders = {
+        VALUE: (_known_edges(frozenset(known), token), [copy_pattern(secret) for secret in known]),
+        POINT: (_known_edges(frozenset(long_known), token), [copy_pattern(secret) for secret in long_known]),
+    }
 
     @cache
     def hide(text: str, path: str | None, role: str) -> str:
         masked = masker.mask(text, path)
-        if role == "wording":
+        if role not in hiders:
             return masked
+        edges, copies = hiders[role]
         copied = edges.hide(_hide_copies(masked, copies))
         return masked if copied == masked else masker.mask(copied, path)
 
@@ -247,8 +257,9 @@ def refuse_if_secret(
     state: Mapping, questions: Mapping, scanner: Scanner | None, masked: frozenset[str] = frozenset()
 ) -> None:
     """Refuses when a value masked elsewhere is still in the request, or when the scanner finds a secret.
-    A key counts only for a value of ``BY_CONTENT_MIN_CHARS`` or more characters (a short value such as
-    ``"false"`` equals JVN's own keys), and wording, which keeps its words, never counts."""
+    A key or the request's point counts only for a value of ``BY_CONTENT_MIN_CHARS`` or more characters (a
+    short value such as ``"false"`` equals JVN's own keys and ordinary words), and JVN's own question
+    wording, which keeps its words, never counts."""
     texts = _strings(state) + _strings(questions, questions=True)
     copies = [(value, copy_pattern(value)) for value in masked - {MASK}]
     if any(_holds_copy(text, value, copy) for text in texts for value, copy in copies):
@@ -271,7 +282,7 @@ def copy_pattern(value: str) -> re.Pattern[str]:
 @dataclass(frozen=True)
 class _RequestText:
     """A string of a request, the file it comes from, and its role: a "value", a "key" of the request's
-    structure, or question "wording"."""
+    structure, the request's "point", or JVN's own question "wording"."""
 
     text: str
     path: str | None
@@ -279,7 +290,7 @@ class _RequestText:
 
 
 def _holds_copy(text: _RequestText, value: str, copy: re.Pattern[str]) -> bool:
-    if text.role == "wording" or (text.role == "key" and len(value) < BY_CONTENT_MIN_CHARS):
+    if text.role == WORDING or (text.role in (KEY, POINT) and len(value) < BY_CONTENT_MIN_CHARS):
         return False
     return bool(copy.search(text.text))
 
@@ -301,6 +312,11 @@ def _is_copied(value: str) -> bool:
     )
 
 
+def _wording_role(questions: bool) -> str:
+    """Wording keeps its words: in a question it is JVN's own text, in the state the request's point."""
+    return WORDING if questions else POINT
+
+
 def _wording_keys(mapping: Mapping, questions: bool, root: bool) -> frozenset[str]:
     """The keys that hold wording: in the state, its own point (``POINT_KEYS`` at the top level, never a
     key inside an item); in a question, JVN's own text written from code, its instructions, and its
@@ -318,7 +334,7 @@ def _each_string(
     value: object,
     change: Callable[[str, str | None, str], str],
     path: str | None = None,
-    role: str = "value",
+    role: str = VALUE,
     questions: bool = False,
     root: bool = True,
 ) -> object:
@@ -328,7 +344,9 @@ def _each_string(
     if isinstance(value, Mapping):
         inner, wording = _file_of(value, path), _wording_keys(value, questions, root)
         return {
-            key: _each_string(item, change, inner, "wording" if key in wording else role, questions, False)
+            key: _each_string(
+                item, change, inner, _wording_role(questions) if key in wording else role, questions, False
+            )
             for key, item in value.items()
         }
     if isinstance(value, list | tuple):
@@ -337,7 +355,7 @@ def _each_string(
 
 
 def _strings(
-    value: object, path: str | None = None, role: str = "value", questions: bool = False, root: bool = True
+    value: object, path: str | None = None, role: str = VALUE, questions: bool = False, root: bool = True
 ) -> list[_RequestText]:
     """Every string, keys included, with the file it comes from and its role."""
     if isinstance(value, str):
@@ -348,8 +366,10 @@ def _strings(
             text
             for key, item in value.items()
             for text in [
-                _RequestText(str(key), None, "key"),
-                *_strings(item, inner, "wording" if key in wording else role, questions, False),
+                _RequestText(str(key), None, KEY),
+                *_strings(
+                    item, inner, _wording_role(questions) if key in wording else role, questions, False
+                ),
             ]
         ]
     if isinstance(value, list | tuple):
