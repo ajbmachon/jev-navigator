@@ -23,6 +23,7 @@ from .secret_shapes import (
     TOKEN_CHARACTER_CLASS,
     hide_secrets,
     is_high_entropy,
+    merged_spans,
 )
 
 _SHORT_NUMBER = re.compile(r"[\d.,:_+-]{1,4}")
@@ -211,19 +212,9 @@ class _KnownEdges:
             )
             if before or after:
                 spans.append((begin - len(before or ""), end + len(after or "")))
-        for begin, end in reversed(_merged(spans)):
+        for begin, end in reversed(merged_spans(spans)):
             text = text[:begin] + MASK + text[end:]
         return text
-
-
-def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    merged: list[tuple[int, int]] = []
-    for begin, end in sorted(spans):
-        if merged and begin <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((begin, end))
-    return merged
 
 
 def _has_alnum(text: str) -> bool:

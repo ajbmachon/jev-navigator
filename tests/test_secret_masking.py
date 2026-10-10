@@ -62,6 +62,8 @@ def test_repeated_request_text_is_scanned_once_without_retaining_other_requests(
 SLACK_TOKEN = "xoxb" + "-123456789012-abcdefghijklmnop"
 GITHUB_TOKEN = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
 PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAx9k2\n-----END RSA PRIVATE KEY-----"
+KEY_BEGIN = "-----BEGIN " + "PRIVATE KEY-----"
+KEY_END = "-----END " + "PRIVATE KEY-----"
 
 SECRET_VALUES = {
     "private key": (f"const key = `{PRIVATE_KEY}`;", "MIIEowIBAAKCAQEAx9k2"),
@@ -336,6 +338,9 @@ LONG_LINES = {
     "YAML block of many lines": "password:\n" + "  x: y\n" * 10_000,
     "assignment pairs": "a=b " * 8_000,
     "inline SVG attributes": "<svg " + 'x="1" y="2" fill="none" ' * 2_700 + "/>",
+    "plus run after a key marker": KEY_BEGIN + "\n" + "+" * 300 + "#",
+    "quote run after a key body run": KEY_BEGIN + "\n" + "A" * 16 + '"' * 16_000 + "#",
+    "many key marker mentions": f'x = "{KEY_BEGIN}"\n' * 6_000,
 }
 
 
@@ -1157,8 +1162,7 @@ def test_a_code_item_under_a_nested_target_key_still_hides_copies() -> None:
     assert masked_state["slice"]["binding"]["target"] == "[MASKED]"
 
 
-KEY_BEGIN = "-----BEGIN " + "PRIVATE KEY-----"
-KEY_END = "-----END " + "PRIVATE KEY-----"
+PGP_KEY_BEGIN = "-----BEGIN PGP " + "PRIVATE KEY BLOCK-----"
 
 
 def _pem_body(lines: int) -> list[str]:
@@ -1186,20 +1190,50 @@ def test_a_mentioned_key_marker_hides_only_its_own_line(path):
     assert (lines[0], *lines[2:]) == ("def is_key(value):", '        return "key"', '    return "plain"')
 
 
-@pytest.mark.parametrize("layout", ["pem", "crlf", "quoted lines"])
-def test_an_unterminated_key_hides_its_body_and_keeps_the_code_after_it(layout):
+KEY_LAYOUTS = {
+    "pem": "\n".join,
+    "crlf": "\r\n".join,
+    "quoted lines": lambda lines: "\n".join(f'    "{line}",' for line in lines),
+    "commented": lambda lines: "\n".join(f"# {line}" for line in lines),
+    "appended": lambda lines: "\n".join(f'sb.append("{line}\\n");' for line in lines),
+    "concatenated with dots": lambda lines: "\n".join(f'    "{line}\\n" .' for line in lines),
+    "escaped CRLF": lambda lines: "\n".join(f'    "{line}\\r\\n" +' for line in lines),
+    "byte literals": lambda lines: "\n".join(f'    b"{line}\\n"' for line in lines),
+    "YAML list": lambda lines: "\n".join(f"  - {line}" for line in lines),
+    "removed in a diff": lambda lines: "\n".join(f"-{line}" for line in lines),
+    "numbered": lambda lines: "\n".join(f"{number}: {line}" for number, line in enumerate(lines, 1)),
+}
+
+
+@pytest.mark.parametrize("layout", KEY_LAYOUTS.values(), ids=KEY_LAYOUTS.keys())
+def test_an_unterminated_key_hides_its_body_in_any_layout_and_keeps_the_code_after_it(layout):
     body = _pem_body(3)
-    newline = "\r\n" if layout == "crlf" else "\n"
-    text = (
-        _quoted_lines([KEY_BEGIN, *body])
-        if layout == "quoted lines"
-        else newline.join([KEY_BEGIN, *body, "print(len(lines))", ""])
+
+    masked = SecretMasker().mask(layout([KEY_BEGIN, *body]) + "\nprint(len(lines))\n", "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+    assert "print(len(lines))" in masked
+
+
+def test_an_armored_key_cut_before_its_end_marker_hides_its_body_after_its_headers():
+    body = _pem_body(3)
+    text = "\n".join([PGP_KEY_BEGIN, "Version: GnuPG v2", "Comment: laptop", "", *body])
+
+    masked = SecretMasker().mask(text, "keys/backup.asc")
+
+    assert [line for line in body if line in masked] == []
+
+
+def test_a_mentioned_key_marker_keeps_the_code_before_a_later_key():
+    body = _pem_body(2)
+    text = f'if value.startswith("{KEY_BEGIN}"):\n    return parse(value)\n' + "\n".join(
+        [KEY_BEGIN, *body, KEY_END]
     )
 
     masked = SecretMasker().mask(text, "app/keys.py")
 
+    assert "    return parse(value)" in masked
     assert [line for line in body if line in masked] == []
-    assert "print(len(lines))" in masked
 
 
 def test_an_unterminated_key_at_the_end_of_text_hides_its_whole_body():

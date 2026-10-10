@@ -41,19 +41,14 @@ Span = tuple[int, int]
 
 _KEY_BEGIN = r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----"
 _KEY_END = r"-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----"
-# One whole line of key body as it stands in a file or in source: a base64 run, bare or wrapped in
-# quotes, commas, concatenation or an escaped newline; a PEM header; or a blank line. A run shorter
-# than a PEM line counts only when padded or last in the text, so a word such as `return` after a
-# marker that code merely mentions is never taken for key material.
-_PEM_WRAP = r"""[ \t\r"'`,;+()]*"""
-_PEM_LINE_END = rf"{_PEM_WRAP}(?:\\n)?{_PEM_WRAP}"
-_PEM_RUN = rf"(?:[A-Za-z0-9+/]{{16,}}={{0,2}}|[A-Za-z0-9+/]+={{1,2}}|[A-Za-z0-9+/]+(?={_PEM_LINE_END}\Z))"
-_PEM_BODY_LINE = (
-    rf"(?:[ \t]*(?:Proc-Type|DEK-Info):[^\n]*|{_PEM_WRAP}{_PEM_RUN}{_PEM_LINE_END}|[ \t\r]*)(?=\n|\Z)"
+_KEY_MARKER = re.compile(rf"(?P<begin>{_KEY_BEGIN})|{_KEY_END}")
+# Key material on a line in any layout (bare, quoted, appended, commented, numbered or diffed): a base64
+# run of a PEM line's length. A key's last line may be shorter; it is padded or a multiple of four long.
+_KEY_BODY_RUN = re.compile(r"[A-Za-z0-9+/]{16,}")
+_KEY_TAIL_RUN = re.compile(
+    r"(?<![A-Za-z0-9+/])(?:[A-Za-z0-9+/]{2,}={1,2}|(?:[A-Za-z0-9+/]{4})+)(?![A-Za-z0-9+/=])"
 )
-# A key block runs to its END marker. Without one it is the BEGIN line and the key body lines that
-# follow it, never the rest of the text: a file that only mentions the marker keeps its code.
-_PRIVATE_KEY_BLOCK = re.compile(rf"{_KEY_BEGIN}(?:.*?{_KEY_END}|[^\n]*(?:\n{_PEM_BODY_LINE})*)", re.S)
+_KEY_HEADER = re.compile(r"[ \t\"'`#*/>+-]*(?:Proc-Type|DEK-Info|Version|Comment|Hash|Charset|MessageID):")
 _KEY_MARKER_LINE = re.compile(r"^.*-----(?:BEGIN|END) [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*$", re.M)
 _TOKEN_SHAPES = (
     re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
@@ -366,8 +361,63 @@ def is_high_entropy(value: str) -> bool:
     return bits >= HIGH_ENTROPY_BITS_PER_CHAR
 
 
+def _private_key_spans(text: str) -> list[Span]:
+    """Each private key block: from its BEGIN marker to the END marker that closes it, the nearest one
+    no later BEGIN claims first. A BEGIN no END closes is the BEGIN line and the key body lines after
+    it (``_unterminated_key_end``), never the rest of the text: code that only mentions the marker
+    keeps its code. One pass over the markers, so the work grows with the text."""
+    open_begins: list[int] = []
+    spans: list[Span] = []
+    for marker in _KEY_MARKER.finditer(text):
+        if marker["begin"]:
+            open_begins.append(marker.start())
+        elif open_begins:
+            spans.append((open_begins.pop(), marker.end()))
+    covered = 0
+    for begin in open_begins:
+        if begin >= covered:
+            covered = _unterminated_key_end(text, begin)
+            spans.append((begin, covered))
+    return merged_spans(spans)
+
+
+def _unterminated_key_end(text: str, begin: int) -> int:
+    """Where a key without an END marker ends: after its BEGIN line, any PEM or armor headers, the
+    following lines that hold key material, and one shorter last line: padded, a multiple of four
+    characters long, or cut by the end of the text."""
+    end = _line_end(text, begin)
+    in_body = False
+    while end < len(text):
+        line_end = _line_end(text, end + 1)
+        line = text[end + 1 : line_end]
+        if _KEY_BODY_RUN.search(line):
+            in_body = True
+        elif in_body and line.strip() and (line_end == len(text) or _KEY_TAIL_RUN.search(line)):
+            return line_end
+        elif line.strip() and (in_body or not _KEY_HEADER.match(line)):
+            return end
+        end = line_end
+    return end
+
+
+def _line_end(text: str, position: int) -> int:
+    end = text.find("\n", position)
+    return len(text) if end == -1 else end
+
+
+def merged_spans(spans: list[Span]) -> list[Span]:
+    """The spans in order, with overlapping or touching spans joined into one."""
+    merged: list[Span] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 _RULES: tuple[Callable[[str], list[Span]], ...] = (
-    _matches(_PRIVATE_KEY_BLOCK),
+    _private_key_spans,
     _matches(_KEY_MARKER_LINE),
     *(_matches(shape) for shape in _TOKEN_SHAPES),
     _matches(_BEARER_VALUE, _bearer_value),
