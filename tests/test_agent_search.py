@@ -353,11 +353,15 @@ def test_code_travels_for_the_best_places_first_within_the_allowance(shop: CodeI
         request(), shop, Judge(client, masker=None, scanner=None), max_code_chars=len(check_limit)
     )
 
-    code = result.to_json()["code"]
-    assert code["shop/limits.py:4-6"] == {"code": check_limit}
+    answer = result.to_json()
+    code = answer["code"]
+    assert code["shop/limits.py:4-6"] == {"file": "shop/limits.py", "lines": [[4, 6]], "code": check_limit}
     omitted = [entry for place, entry in code.items() if place != "shop/limits.py:4-6"]
     assert omitted and all(entry["code"] is None and entry["omitted"] for entry in omitted)
-    assert all("code" not in place for place in result.to_json()["hypotheses"][0]["points"][0]["shortlist"])
+    shortlist = answer["hypotheses"][0]["points"][0]["shortlist"]
+    compact = {"place", "symbol", "probability"}
+    assert shortlist and all(set(place) - {"roles"} == compact for place in shortlist)
+    assert "request_sha256" not in json.dumps(answer), "provenance stays in the journal"
 
 
 def test_scope_leaves_tests_out_and_names_files_it_left_out(shop: CodeIndex) -> None:
