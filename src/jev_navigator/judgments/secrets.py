@@ -9,9 +9,10 @@ passes its own objects; turning either off must be explicit (``masker=None`` or 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections import defaultdict
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, lru_cache
 from typing import Protocol
 
 from ..directives.places import located_file
@@ -26,6 +27,10 @@ from .secret_shapes import (
 
 _SHORT_NUMBER = re.compile(r"[\d.,:_+-]{1,4}")
 COPY_MIN_CHARS = 4
+EDGE_MAX_CHARS = 512
+"""A known value up to this length also has the edges a mask cut it at hidden (see ``_KnownEdges``); a
+longer one, in practice code an unclosed quote swallowed, is hidden by its copies only."""
+MASK_TOKEN = re.compile(re.escape(MASK))
 TARGET = "target"
 TARGETS = "targets"
 WORKFLOW = "workflow"
@@ -36,8 +41,10 @@ _CHOICE_QUESTION = "choice"
 
 __all__ = [
     "BY_CONTENT_MIN_CHARS",
+    "EDGE_MAX_CHARS",
     "HIGH_ENTROPY_MIN_CHARS",
     "MASK",
+    "MASK_TOKEN",
     "POINT_KEYS",
     "TARGET",
     "TARGETS",
@@ -60,7 +67,9 @@ __all__ = [
 
 class Masker(Protocol):
     """``mask`` hides secrets in one text; ``masked_values`` lists the values it hides there, so they
-    can be hidden everywhere else in the request too."""
+    can be hidden everywhere else in the request too. A masker that writes tokens of its own besides
+    ``MASK`` names them all in a ``token_pattern`` attribute, so the rest of a known value beside any
+    of them is found (``MASK_TOKEN`` when it has none)."""
 
     def mask(self, text: str, path: str | None = None) -> str: ...
 
@@ -95,7 +104,7 @@ class SecretMasker:
         return hide_secrets(text, path)[0]
 
     def masked_values(self, text: str, path: str | None = None) -> list[str]:
-        return [value for value in hide_secrets(text, path)[1] if _is_copied(value)]
+        return [form for value in hide_secrets(text, path)[1] for form in _copied_forms(value)]
 
 
 DEFAULT_MASKER = SecretMasker()
@@ -137,22 +146,88 @@ def masked_values(value: object, masker: Masker) -> frozenset[str]:
 
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str], questions: bool = False) -> object:
     """Masks every string by the masker's rules and hides each of ``values`` wherever it still appears.
-    A string a copy changed is masked once more, because a hidden copy can turn a kept value into one
-    the rules hide (``sessionToken: "[MASKED]-token"`` no longer repeats its key), and the request sent
-    must be one the rules leave as it is. Keys are left as they are. Wording, the request's point and
-    JVN's own question text, hides no copies: masking protects the code, and a point is masked only
-    where the rules find a secret in it."""
-    copies = [copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
+    The rules read the text first, so a secret only the masker recognizes is hidden whole before a known
+    value inside it could break its shape. A rule can also cut a known value short, ending it early (a
+    URL password at its first ``@``) or starting it late (an email address after a ``#``); what is left
+    of the value beside the mask is hidden too (``_KnownEdges``). A string the hiding changed is masked
+    once more, because a hidden copy can turn a kept value into one the rules hide (``sessionToken:
+    "[MASKED]-token"`` no longer repeats its key), and the request sent must be one the rules leave as
+    it is. Keys are left as they are. Wording, the request's point and JVN's own question text, hides
+    no copies: masking protects the code, and a point is masked only where the rules find a secret in it."""
+    known = sorted(values - {MASK}, key=len, reverse=True)
+    copies = [copy_pattern(secret) for secret in known]
+    edges = _known_edges(frozenset(known), getattr(masker, "token_pattern", MASK_TOKEN))
 
     @cache
     def hide(text: str, path: str | None, role: str) -> str:
         masked = masker.mask(text, path)
         if role == "wording":
             return masked
-        copied = _hide_copies(masked, copies)
+        copied = edges.hide(_hide_copies(masked, copies))
         return masked if copied == masked else masker.mask(copied, path)
 
     return _each_string(value, hide, questions=questions)
+
+
+@lru_cache(maxsize=16)
+def _known_edges(known: frozenset[str], token: re.Pattern[str]) -> _KnownEdges:
+    """One request's edges, built once although a request is masked again whenever it is split."""
+    return _KnownEdges(known, token)
+
+
+class _KnownEdges:
+    """What a mask left of a known value it cut short: the value's rest after a mask token, from one of
+    its non-alphanumeric characters on, and its start before one, up to such a character. Rules begin
+    and end at such characters, so these are the shapes a cut leaves. Each edge is checked in place
+    beside each token, longest first, so the work grows with the tokens and the edges, not with every
+    suffix of every value."""
+
+    def __init__(self, known: Iterable[str], token: re.Pattern[str]) -> None:
+        self._token = token
+        rests: defaultdict[str, set[str]] = defaultdict(set)
+        starts: defaultdict[str, set[str]] = defaultdict(set)
+        for secret in known:
+            if len(secret) > EDGE_MAX_CHARS:
+                continue
+            for cut in range(1, len(secret)):
+                if not secret[cut].isalnum() and _has_alnum(secret[cut:]):
+                    rests[secret[cut]].add(secret[cut:])
+                if not secret[cut - 1].isalnum() and _has_alnum(secret[:cut]):
+                    starts[secret[cut - 1]].add(secret[:cut])
+        self._rests = {first: sorted(edges, key=len, reverse=True) for first, edges in rests.items()}
+        self._starts = {last: sorted(edges, key=len, reverse=True) for last, edges in starts.items()}
+
+    def hide(self, text: str) -> str:
+        if not self._rests and not self._starts:
+            return text
+        spans: list[tuple[int, int]] = []
+        for token in self._token.finditer(text):
+            begin, end = token.span()
+            before = begin and next(
+                (edge for edge in self._starts.get(text[begin - 1], ()) if text.endswith(edge, 0, begin)), ""
+            )
+            after = end < len(text) and next(
+                (edge for edge in self._rests.get(text[end], ()) if text.startswith(edge, end)), ""
+            )
+            if before or after:
+                spans.append((begin - len(before or ""), end + len(after or "")))
+        for begin, end in reversed(_merged(spans)):
+            text = text[:begin] + MASK + text[end:]
+        return text
+
+
+def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for begin, end in sorted(spans):
+        if merged and begin <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((begin, end))
+    return merged
+
+
+def _has_alnum(text: str) -> bool:
+    return any(character.isalnum() for character in text)
 
 
 def _hide_copies(text: str, copies: list[re.Pattern[str]]) -> str:
@@ -207,6 +282,13 @@ def _holds_copy(text: _RequestText, value: str, copy: re.Pattern[str]) -> bool:
     if text.role == "wording" or (text.role == "key" and len(value) < BY_CONTENT_MIN_CHARS):
         return False
     return bool(copy.search(text.text))
+
+
+def _copied_forms(value: str) -> list[str]:
+    """A masked value and, for a value wrapped in quotes (a shell word such as ``"pa55word"``), the value
+    between them, which is the same secret where it stands unquoted (the bare value in a command or URL)."""
+    inner = value[1:-1] if len(value) > 2 and value[0] == value[-1] and value[0] in "\"'" else None
+    return [form for form in (value, inner) if form is not None and _is_copied(form)]
 
 
 def _is_copied(value: str) -> bool:

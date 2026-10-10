@@ -747,6 +747,121 @@ def test_a_value_hidden_at_its_key_is_hidden_where_it_stands_bare_in_the_same_re
 
 
 @pytest.mark.parametrize(
+    ("state", "rest"),
+    [
+        (
+            {
+                "compose": {
+                    "file": "docker-compose.yml",
+                    "code": (
+                        "    environment:\n      POSTGRES_PASSWORD: Zq7wPx@Lm4nRt9vK\n"
+                        "      DATABASE_URL: postgres://app:Zq7wPx@Lm4nRt9vK@db/app\n"
+                    ),
+                }
+            },
+            "Lm4nRt9vK",
+        ),
+        (
+            {
+                "keyed": {"file": "app/fixtures.py", "code": 'password = "Ka9#vQ2mLx7pRt4w"\n'},
+                "conf": {"file": "config.yml", "code": "db_pass: Ka9#vQ2mLx7pRt4w\n"},
+            },
+            "vQ2mLx7pRt4w",
+        ),
+    ],
+)
+def test_a_known_value_a_rule_would_cut_short_is_hidden_whole(state: dict, rest: str) -> None:
+    """A rule can end a value early: a URL password at its first ``@``, a config value at ``#``. The rest
+    of a value the request already knows is hidden where it follows the mask, or it would be sent."""
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert rest not in json.dumps(masked_state)
+
+
+def test_a_quoted_shell_value_is_hidden_where_it_stands_unquoted() -> None:
+    # Arrange
+    state = {
+        "env": {"file": "deploy.sh", "code": 'export DB_PASS="pa55word99xq"\n'},
+        "notes": {"file": "docs/restore.md", "code": "psql -h db -W pa55word99xq\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["notes"]["code"] == "psql -h db -W [MASKED]\n"
+
+
+def test_a_token_holding_a_shorter_known_value_is_hidden_whole() -> None:
+    # Arrange
+    state = {
+        "keyed": {"file": "app/fixtures.py", "code": 'password = "Lm4nRt9vKq2w"\n'},
+        "ci": {"file": "ci.sh", "code": "curl -H 'x' ghp_Lm4nRt9vKq2wAbCdEfGhIjKlMnOpQrStUvWx12\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["ci"]["code"] == "curl -H 'x' [MASKED]\n"
+
+
+class _OwnTokenMasker(SecretMasker):
+    """A masker with a rule of its own that JVN's rules do not have, and that lists only JVN's values."""
+
+    def mask(self, text: str, path: str | None = None) -> str:
+        return super().mask(re.sub(r"\btok_[A-Za-z0-9]{20,}", MASK, text), path)
+
+
+class _OwnEmailMasker(SecretMasker):
+    """A masker with an email rule of its own that writes its own token and names it."""
+
+    token_pattern = re.compile(r"\[MASKED\]|\[EMAIL\]")
+
+    def mask(self, text: str, path: str | None = None) -> str:
+        return super().mask(re.sub(r"[A-Za-z0-9.]+@[a-z]+\.[a-z]+", "[EMAIL]", text), path)
+
+
+def test_the_start_of_a_known_value_a_rule_begins_late_is_hidden_beside_the_maskers_own_token() -> None:
+    """The email rule starts after the ``#`` inside a known password, so the password's start stands
+    before the masker's own token; it is hidden there."""
+    # Arrange
+    state = {
+        "keyed": {"file": "app/fixtures.py", "code": 'password = "Zq7w#Px9@corp.example"\n'},
+        "notes": {"file": "docs/login.md", "code": "log in with Zq7w#Px9@corp.example today\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, _OwnEmailMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["notes"]["code"] == "log in with [MASKED] today\n"
+
+
+def test_a_known_value_inside_a_secret_only_the_masker_finds_leaves_that_secret_whole() -> None:
+    """A known value can stand inside a longer secret that only the caller's masker recognizes. Hiding
+    the known value first would break that secret's shape and send the rest of it."""
+    # Arrange
+    state = {
+        "keyed": {"file": "app/fixtures.py", "code": 'password = "Lm4nRt9vKq2w"\n'},
+        "ci": {"file": "ci.sh", "code": "publish --auth tok_Lm4nRt9vKq2wAbCdEfGh1234\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, _OwnTokenMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert "AbCdEfGh1234" not in json.dumps(masked_state)
+
+
+@pytest.mark.parametrize(
     "path", ["tests/test_judgments.py", "tests/test_round.py", "tests/test_secret_masking.py"]
 )
 def test_the_final_scan_finds_nothing_in_masked_repository_code(path: str) -> None:
