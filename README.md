@@ -980,7 +980,10 @@ and reading, so units, `unlisted` files, `unresolved` anchors and each name's co
 one owner. The frontier measures every unit's code the same way whichever source reached it, so two
 sources reaching one unit never score it differently; only the distance is the source's own, and when
 several sources reach one unit the smallest counts. A source is any object with a `name`, a `label`
-(how coverage counts the units it left unjudged) and `reach(index, seeds)`.
+(how coverage counts the units it left unjudged) and `reach(index, seeds)`. `ScentSource` keeps
+its own BM25 index over every unit the index lists, one document per whole unit, built once per
+`CodeIndex` and refusing more than `max_units` (25,000) units; it still reaches anchors, which the
+search turns into its units like any other source's.
 
 | Source | Reads | Reaches | Distance |
 | --- | --- | --- | --- |
@@ -993,6 +996,7 @@ several sources reach one unit the smallest counts. A source is any object with 
 | `IMPORTS`, `IMPORTERS` | anchors, units | every unit of the files their files import, or that import their files | 1 |
 | `CALLERS`, `CALLEES` | units | the functions calling each function unit, or that it calls | 1 |
 | `MODELS`, `CLIENT_CALLS` | units | the Prisma models a unit queries, or the lines querying a model block | 1 |
+| `ScentSource(limit=20)`, opt-in only | texts, names | the `limit` units whose identifiers, strings and path best match the texts and names together by BM25 (`selection.scent`), best first; no default composition uses it | 4 plus its rank |
 
 The **frontier** ([`directives/frontier.py`](src/jev_navigator/directives/frontier.py)) is the order
 in which a search judges what its sources reached. Under a call cap whatever is ranked last is lost,
@@ -1326,7 +1330,8 @@ default). An unknown or malformed field is refused with its JSON path.
   J1-3 question; a mechanism is returned as written and never sent. Every request asks every point
   about the same units, sixteen units per request.
 - **Ranking says where to look.** The start sources (anchors, files, files the points name, and the
-  hits of the terms and of the code names the points spell, plus any `extra_sources`) reach places,
+  hits of the terms and of the code names the points spell, plus any `extra_sources`, such as the
+  opt-in BM25 `ScentSource()`) reach places,
   kept to the scope except the caller's anchors, and `find_all` lists them by `VALUE` without a call
   (`sources.ReachedSource`). Each round, `frontier.Frontier` draws one request's worth of units across
   the open points, a point's pushed hops first, then its own queue ordered by value plus the relevance

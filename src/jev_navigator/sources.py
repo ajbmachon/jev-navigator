@@ -5,10 +5,12 @@ in it, or an anchor, meaning the unit holding it. Each place it reaches carries 
 source, the seed it came from, a distance, and the request names it was reached by. A source makes
 no Jev call.
 
-A source never builds units and never scores them. The search resolves places into units with its
-own room and reading, so the units, the anchors that named none and each seed's counts have one
-owner. The frontier measures every unit's code features the same way whichever source reached it,
-so two sources reaching one unit never score it differently; only the distance is a source's own.
+A source never builds a search's units and never scores them. The search resolves places into units
+with its own room and reading, so the units, the anchors that named none and each seed's counts have
+one owner; ``ScentSource`` ranks every unit by BM25 in its own index, but it too reaches anchors
+the search resolves. The frontier measures every unit's code features the same way whichever source
+reached it, so two sources reaching one unit never score it differently; only the distance is a
+source's own.
 A workflow is a composition: the sources that start it, the sources a unit that clears a target's
 bar expands through, the frontier's policy and shares, and Jev judging in queue order.
 """
@@ -28,6 +30,7 @@ from .index.scope import is_lockfile
 from .index.spans import Span, TextHit
 from .index.units import Anchor, LineAnchor, Unit, UnitKind, read_ranges
 from .mentions import literal_names_in, spelling_variants
+from .selection.scent import DEFAULT_MAX_UNITS, unit_scent
 
 
 @dataclass(frozen=True)
@@ -376,6 +379,35 @@ class ClientCallSource:
             for unit in seeds.units
             if unit.kind is UnitKind.SCHEMA_BLOCK
             for hit, _ in operations.client_calls(index, Span(unit.path, unit.start, unit.end))
+        ]
+
+
+SCENT_DISTANCE = 4
+"""Where ``ScentSource``'s best unit lies: after anchors (0), files (1 and 2) and name hits (3)."""
+DEFAULT_SCENT_LIMIT = 20
+
+
+@dataclass(frozen=True)
+class ScentSource:
+    """The ``limit`` units whose words best match the seed texts and names together by BM25
+    (``selection.scent``), best first, at ``SCENT_DISTANCE`` plus their rank: after anchors, files and
+    name hits, and in BM25 order among themselves, since each rank costs what one step of distance does
+    in the frontier's value. A unit sharing no word with the seeds is never reached. The index covers
+    every unit the CodeIndex lists, is built on first use and kept while the CodeIndex lives, and
+    refuses more than ``max_units`` units. No search starts from it by default: a caller opts in, for
+    example through ``agent_search``'s ``extra_sources``."""
+
+    limit: int = DEFAULT_SCENT_LIMIT
+    max_units: int = DEFAULT_MAX_UNITS
+    name: ClassVar[str] = "scent"
+    label: ClassVar[str] = "from scent"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        query = " ".join((*seeds.texts, *seeds.names))
+        ranked = unit_scent(index, max_units=self.max_units).ranked(query, self.limit)
+        return [
+            Reach(start, self.name, f"bm25 {score:.3f}", SCENT_DISTANCE + rank)
+            for rank, (start, score) in enumerate(ranked)
         ]
 
 

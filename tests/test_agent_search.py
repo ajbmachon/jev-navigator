@@ -15,6 +15,7 @@ from jev_navigator.directives.agent_search import Bands, agent_search, agent_sea
 from jev_navigator.directives.agent_search_result import AgentSearchResult
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.sources import ScentSource
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 ADMITTED_J1 = json.loads((Path(__file__).parent / "fixtures/j1_admitted_contract.json").read_text())
@@ -506,3 +507,70 @@ def test_cancelling_the_async_search_raises_instead_of_returning(shop: CodeIndex
     sending = asyncio.Event()
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(cancelled_while_judging())
+
+
+QUOTA = {
+    "shop/quota.py": (
+        "def refuse_oversized_order(order, item_limit):\n"
+        "    if order.item_total > item_limit:\n        raise OrderRefused(order)\n"
+    )
+}
+
+
+@pytest.fixture
+def shop_with_quota(tmp_path: Path) -> CodeIndex:
+    write_files(tmp_path, {**SHOP, **QUOTA})
+    commit_all(tmp_path)
+    return CodeIndex.from_git(tmp_path)
+
+
+def quota_client() -> ScriptedJevClient:
+    def match(code: str) -> float:
+        if "raise" in code:
+            return 0.92
+        return 0.55 if "check_limit(order)" in code else 0.1
+
+    return scripted(
+        {"h1_e1": match, "h1_r1": constant(0.05)}, {"h1_e1": limit_exists, "h1_r1": constant(0.1)}
+    )
+
+
+def test_the_scent_source_is_off_by_default_and_reaches_what_no_other_source_does_when_passed(
+    shop_with_quota: CodeIndex,
+) -> None:
+    # Arrange: nothing names, imports or calls the quota check
+    default, scented = quota_client(), quota_client()
+
+    # Act
+    without = agent_search(request(), shop_with_quota, Judge(default, masker=None, scanner=None))
+    with_scent = agent_search(
+        request(), shop_with_quota, Judge(scented, masker=None, scanner=None), extra_sources=[ScentSource()]
+    )
+
+    # Assert
+    assert "refuse_oversized_order" not in sent_code(default)
+    assert "shop/quota.py" not in without.point("h1.e1").definite_files
+    assert "refuse_oversized_order" in sent_code(scented)
+    assert with_scent.point("h1.e1").definite_files == ("shop/limits.py", "shop/quota.py")
+    assert with_scent.requests.used <= 8 and all(
+        len(state["items"]) <= 16 for state, _ in scented.requests if "items" in state
+    )
+
+
+def test_scent_units_left_unjudged_are_counted_by_their_source_within_the_bounds(
+    shop_with_quota: CodeIndex,
+) -> None:
+    # Arrange: two units per request and one ranking request
+    client = quota_client()
+    judge = Judge(client, masker=None, scanner=None, items_per_request=2)
+
+    # Act
+    result = agent_search(
+        request(budget_requests=3), shop_with_quota, judge, extra_sources=[ScentSource()], max_code_chars=200
+    )
+
+    # Assert
+    assert result.coverage.not_judged.get("not reached: from scent", 0) >= 1
+    assert result.requests.used <= 3
+    assert all(len(state["items"]) <= 2 for state, _ in client.requests if "items" in state)
+    assert sum(len(code) for code in result.code.values() if code is not None) <= 200
