@@ -14,7 +14,7 @@ import bisect
 import math
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 from ..index.spans import merged_ranges
 from .secret_structures import flow_spans, yaml_block_spans
@@ -40,12 +40,12 @@ TOKEN_CHARACTER_CLASS = r"[A-Za-z0-9+/=_\-]"
 
 Span = tuple[int, int]
 
-# A private key marker's label: up to three words before PRIVATE KEY and one after it (RSA, DSA, EC, OPENSSH,
-# ENCRYPTED, SSH2 ENCRYPTED, PGP ... BLOCK). Bounded and possessive, so a long run of words is read once.
-_KEY_LABEL = r"(?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: [A-Z]++)?"
-_KEY_BEGIN = rf"-----BEGIN {_KEY_LABEL}-----"
-_KEY_END = rf"-----END {_KEY_LABEL}-----"
-_KEY_MARKER = re.compile(rf"(?P<begin>{_KEY_BEGIN})|{_KEY_END}")
+# A marker's BEGIN or END and its label of capitals, digits and spaces, up to the dashes that close it. The
+# label is read possessively and the dashes only looked at, so a long run of words is read once and a marker
+# that closes no label leaves its dashes to the next one. A private key's label names PRIVATE KEY anywhere
+# (RSA, OPENSSH, SSH2 ENCRYPTED, PGP ... BLOCK, extra spaces): see ``_key_markers``.
+_MARKER = re.compile(r"-----(?P<kind>BEGIN|END) (?P<label>[A-Z0-9 ]++)(?=-----)")
+_MARKER_DASHES = len("-----")
 # Key material on a line in any layout (bare, quoted, appended, commented, numbered or diffed): a base64
 # run of 16 or more characters. A key's last line may be shorter; it is padded or a multiple of four long.
 _KEY_BODY_RUN = re.compile(r"[A-Za-z0-9+/]{16,}")
@@ -59,7 +59,6 @@ _KEY_HEADER = re.compile(r"[ \t\"'`#*/>+-]*(?:Proc-Type|DEK-Info|Version|Comment
 # armor (headers and the blank line before the body, in any layout) may stand between it and the BEGIN line.
 _KEY_LINE_RUN = re.compile(r"[A-Za-z0-9+/]{40,}")
 _ARMOR_MAX_LINES = 6
-_KEY_MARKER_LINE = re.compile(rf"^.*-----(?:BEGIN|END) {_KEY_LABEL}-----.*$", re.M)
 _TOKEN_SHAPES = (
     re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
@@ -387,14 +386,14 @@ def _private_key_spans(text: str) -> list[Span]:
     open_begins: list[int] = []
     spans: list[Span] = []
     floor = 0
-    for marker in _KEY_MARKER.finditer(text):
-        if marker["begin"]:
-            open_begins.append(marker.start())
+    for start, end, begins in _key_markers(text):
+        if begins:
+            open_begins.append(start)
         elif open_begins:
-            spans.append((open_begins.pop(), marker.end()))
+            spans.append((open_begins.pop(), end))
         else:
-            spans.append((_unopened_key_start(text, marker.start(), floor), marker.end()))
-        floor = marker.end()
+            spans.append((_unopened_key_start(text, start, floor), end))
+        floor = end
     covered = 0
     for begin in open_begins:
         if begin >= covered:
@@ -413,7 +412,7 @@ def _unterminated_key_end(text: str, begin: int) -> int:
     while end < len(text):
         line_end = _line_end(text, end + 1)
         line = text[end + 1 : line_end]
-        if _KEY_MARKER.search(line):
+        if any(_key_markers(line)):
             return end
         if _KEY_BODY_RUN.search(line):
             in_body = True
@@ -435,7 +434,7 @@ def _armor_end(text: str, end: int) -> int:
             break
         line_end = _line_end(text, position + 1)
         line = text[position + 1 : line_end]
-        if _KEY_MARKER.search(line):
+        if any(_key_markers(line)):
             break
         if _KEY_LINE_RUN.search(line):
             return position
@@ -461,6 +460,18 @@ def _unopened_key_start(text: str, end_marker: int, floor: int) -> int:
     return start
 
 
+def _key_markers(text: str) -> Iterator[tuple[int, int, bool]]:
+    """Each private key marker in ``text``: its start, its end and whether it is a BEGIN."""
+    for marker in _MARKER.finditer(text):
+        if "PRIVATE KEY" in marker["label"]:
+            yield marker.start(), marker.end() + _MARKER_DASHES, marker["kind"] == "BEGIN"
+
+
+def _key_marker_lines(text: str) -> list[Span]:
+    """Each line holding a private key marker, whole: a marker line names no code."""
+    return [(text.rfind("\n", 0, start) + 1, _line_end(text, end)) for start, end, _ in _key_markers(text)]
+
+
 def _line_end(text: str, position: int) -> int:
     end = text.find("\n", position)
     return len(text) if end == -1 else end
@@ -468,7 +479,7 @@ def _line_end(text: str, position: int) -> int:
 
 _RULES: tuple[Callable[[str], list[Span]], ...] = (
     _private_key_spans,
-    _matches(_KEY_MARKER_LINE),
+    _key_marker_lines,
     *(_matches(shape) for shape in _TOKEN_SHAPES),
     _matches(_BEARER_VALUE, _bearer_value),
     _matches(_URL_PASSWORD, _url_password),
