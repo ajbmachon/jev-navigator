@@ -53,6 +53,7 @@ configuration: a recipe the caller passes as data names them, never an environme
 | `find` and `trace` as compositions of sources | not yet: they keep their own moves and call graph |
 | The spelling map | being built |
 | Static context configuration: one-hop proven calls, directly named files and structural excerpts (`selection.context`) | built |
+| Value uses configuration: the lines that use the name a value on an anchored line is assigned to, the anchor's file first, then other files, then tests, at most ten, from static text hits only (`selection.value_uses`) | built |
 | Agent search: one request a calling agent writes, with hypotheses and the points that would show or refute them, run as sources, `find_all`, the frontier, an existence check and role labels (`directives.agent_search`); see [Agent search](#agent-search-one-composed-request-for-a-calling-agent) | built |
 | Typed configurations | being built |
 | `jvn search` | being built |
