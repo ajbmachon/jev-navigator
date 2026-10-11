@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.scope_scan import FileFacts, FileStructure
-from ..index.spans import CodeSlice, Span, holder_of
+from ..index.spans import CodeSlice, Nesting, Span
 
 SymbolKind = str
 
@@ -309,12 +309,13 @@ def symbol_spans(
     functions = tuple(structure.functions)
     function_set = set(functions)
     classes = tuple(span for span in structure.symbols if span not in function_set)
+    nesting = Nesting(structure.symbols)
     found: list[Symbol] = []
     for kind, spans in (("function", functions), ("class", classes)):
         if kind not in kinds:
             continue
         for span in spans:
-            found.append(Symbol(span, kind, holder_of(structure.symbols, span)))
+            found.append(Symbol(span, kind, nesting.holder(span)))
     return tuple(found)
 
 

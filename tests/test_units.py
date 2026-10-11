@@ -19,7 +19,7 @@ from git_repos import commit_all, git, write_files
 
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.scope import BINARY, ENV_FILE, VENDORED
-from jev_navigator.index.spans import Span
+from jev_navigator.index.spans import Nesting, Span
 from jev_navigator.index.units import (
     CODE_FILE,
     UNSUPPORTED_LANGUAGE,
@@ -1007,6 +1007,29 @@ def test_a_range_names_the_function_holding_a_nested_one_and_a_line_the_innermos
     assert [(unit.symbol, unit.nested_in) for unit in inner.units] == [
         ("Basket.total.helper", "app/basket.py:5-8")
     ]
+
+
+def test_two_resolutions_on_one_index_share_one_build_of_the_files_units(shop: CodeIndex) -> None:
+    # Act: two separate resolutions of one line
+    first = resolve_anchors(shop, (LineAnchor("app/basket.py", 7),), box_chars=JEV_BOX).units
+    again = resolve_anchors(shop, (LineAnchor("app/basket.py", 7),), box_chars=JEV_BOX).units
+
+    # Assert: the second reads the units the first built, never building the file again
+    assert again[0] is first[0]
+
+
+def test_nesting_takes_the_smallest_holder_the_first_given_on_ties_and_never_one_of_equal_size() -> None:
+    # Arrange: a class, a method in it, a span crossing the method's end, two spans on the same lines
+    cls, method, crossing = Span("a.py", 1, 20, "C"), Span("a.py", 3, 8, "m"), Span("a.py", 6, 12, "x")
+    first, second = Span("a.py", 4, 5, "f"), Span("a.py", 4, 5, "g")
+
+    # Act
+    nesting = Nesting([cls, method, crossing, first, second])
+
+    # Assert
+    assert [nesting.innermost(line) for line in (2, 4, 7, 10, 21)] == [cls, first, method, crossing, None]
+    holders = [nesting.holder(span) for span in (first, second, method, crossing, cls)]
+    assert holders == [method, method, cls, cls, None]
 
 
 def test_listed_only_names_the_outermost_function_holding_a_nested_one(shop: CodeIndex) -> None:
