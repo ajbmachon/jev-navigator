@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 
 # The tool's own settings namespace. Only names under these prefixes are honoured from a file, so a
@@ -32,6 +32,7 @@ from pathlib import Path
 # judgment thresholds only; `SYSTEM_ONE_*` names the decision-model routes and their keys.
 SETTING_PREFIXES = ("TYPESAFE_", "JEV_NAVIGATOR_", "SYSTEM_ONE_")
 LEGACY_CONFIG = Path.home() / ".config/jvn/env"
+ROUTES_ENV = "SYSTEM_ONE_ROUTES"
 
 
 def checkout_root() -> Path | None:
@@ -63,8 +64,10 @@ def load_typesafe_environment(
     Real environment variables win over both files, and a file may set only the tool's own
     settings (`SETTING_PREFIXES`). Every other name in a file is named on stderr, never its value,
     and so is a `.env` in the working directory when there is no checkout to read one from. Raises
-    when no source provides an API key. ``root`` overrides the checkout the `.env` is read from;
-    passing it opts into reading that directory's `.env`.
+    when no source provides `TYPESAFE_API_KEY` and no route table is named: the default Jev client
+    needs that key, while a route table's routes each resolve their own key when they are built
+    (only the jev route falls back to `TYPESAFE_API_KEY`). ``root`` overrides the checkout the
+    `.env` is read from; passing it opts into reading that directory's `.env`.
     """
     environment = os.environ if environment is None else environment
     root = checkout_root() if root is None else root
@@ -78,9 +81,14 @@ def load_typesafe_environment(
             if not environment.get(name, "").strip() and value:
                 environment[name] = value
                 contributed[name] = value
-    if not environment.get("TYPESAFE_API_KEY", "").strip():
+    if not route_names(environment) and not environment.get("TYPESAFE_API_KEY", "").strip():
         raise RuntimeError(_missing_key_message(root, legacy))
     return contributed
+
+
+def route_names(environment: Mapping[str, str]) -> tuple[str, ...]:
+    """The decision-model routes `SYSTEM_ONE_ROUTES` names, in order, lowercase; none when unset."""
+    return tuple(name.strip().lower() for name in environment.get(ROUTES_ENV, "").split(",") if name.strip())
 
 
 def _settings_in(source: Path) -> dict[str, str]:

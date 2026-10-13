@@ -8,11 +8,13 @@ from pathlib import Path
 
 from git_repos import commit_all, write_files
 
+from jev_navigator.adapters.drex_wire import drex_wire
 from jev_navigator.directives.existence import ask_existence, existence_fits
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.units import items_to_judge, list_units, read_ranges
 from jev_navigator.judgments.client import InputLimits
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.questions import serialized_chars
 from jev_navigator.judgments.role_labels import LabelPiece
 from jev_navigator.testing import ScriptedJevClient
 
@@ -75,3 +77,25 @@ def test_pieces_that_do_not_fit_are_evicted_and_named_and_fits_says_so_beforehan
     answer = ask_existence(judge, targets, shown)["limit"]
     assert answer.evicted == (shown[0].place.id,)
     assert json.loads(json.dumps(client.requests[0][0]))["fetched"][0]["code"] == "[evicted]"
+
+
+def test_fits_and_eviction_measure_the_request_in_its_routes_form(tmp_path: Path) -> None:
+    # Arrange: the box the request fills exactly as built, once as is and once in Drex's form
+    shown = pieces(tmp_path)
+    targets = {"limit": "code that refuses a large order"}
+    probe = ScriptedJevClient(nouls={"exists_limit": 0.4})
+    ask_existence(Judge(probe, masker=None, scanner=None), targets, shown)
+    [(state, questions)] = probe.requests
+    box = serialized_chars(state) + max(serialized_chars(question) for question in questions.values())
+    as_built, as_sent = (ScriptedJevClient(nouls={"exists_limit": 0.4}) for _ in range(2))
+    as_built.input_limits = InputLimits(box)
+    as_sent.input_limits = InputLimits(box, wire=drex_wire)
+
+    # Act and Assert: as built it fits whole; in Drex's form its criteria grow, so a piece is evicted
+    # before sending instead of the judge refusing the request
+    assert existence_fits(Judge(as_built, masker=None, scanner=None), targets, shown)
+    judge = Judge(as_sent, masker=None, scanner=None)
+    assert not existence_fits(judge, targets, shown)
+    assert ask_existence(judge, targets, shown)["limit"].evicted == (shown[0].place.id,)
+    [(sent_state, sent_questions)] = as_sent.requests
+    assert not as_sent.input_limits.exceeded_by(sent_state, sent_questions)
