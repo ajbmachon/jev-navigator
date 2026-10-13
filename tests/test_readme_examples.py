@@ -9,6 +9,7 @@ from conftest import labelled
 from shop_search import SHOP, shop_index
 
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.testing import ScriptedJevClient
 
 README = Path(__file__).parent.parent / "README.md"
 PADDING = {
@@ -59,3 +60,41 @@ def test_the_frontier_composition_example_settles_both_targets_on_their_best_uni
         "model",
     ]
     assert len(client.requests) < len(result.units)
+
+
+def test_the_agent_search_example_establishes_the_limit_and_finds_no_refund_in_its_scope(
+    tmp_path: Path,
+) -> None:
+    # Arrange: check_limit raises for the limit; no unit the request reaches refunds
+    def answer(question_id: str, question: dict, state: dict) -> float:
+        asked = question_id.split("@", 1)[0]
+        if asked.startswith("exists_"):
+            shown = " ".join(entry["code"] for entry in state["fetched"])
+            return 0.9 if asked == "exists_h1_e1" and "raise ValueError" in shown else 0.1
+        if asked == "match_h1_e1":
+            return (
+                0.93
+                if "raise ValueError" in state["items"][int(question_id.rsplit("#", 1)[1])]["code"]
+                else 0.05
+            )
+        return 0.05
+
+    client = ScriptedJevClient(nouls=answer)
+    printed: list[str] = []
+    namespace = {
+        "index": shop_index(tmp_path),
+        "judge": Judge(client),
+        "print": lambda *values: printed.append(" ".join(map(str, values))),
+    }
+
+    # Act
+    exec(readme_example("agent search"), namespace)
+
+    # Assert
+    assert printed == [
+        "h1.e1 established high",
+        "h1.r1 not_found_in_scope low",
+        "check_limit ('orders/limits.py',)",
+        "points_settled 3 of 8",
+    ]
+    assert len(client.requests) == 3

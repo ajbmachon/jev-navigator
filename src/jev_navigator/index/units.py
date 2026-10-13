@@ -39,8 +39,9 @@ from ..judgments.questions import serialized_chars
 from .code_index import CodeIndex
 from .imports import import_lines
 from .languages import TEXT_LANGUAGE, is_schema_file, language_of, language_read
+from .memo import memoized
 from .scope import is_test_file
-from .spans import Span, holder_of
+from .spans import Nesting, Span
 from .text_blocks import TextBlock, child_blocks
 
 PIECE_LINES = 60
@@ -274,7 +275,10 @@ def _left_out(index: CodeIndex, files: Sequence[str], reading: Reading) -> dict[
     return code | index.text_files_left_out([file for file in files if file not in code])
 
 
+@memoized
 def _file_units(index: CodeIndex, file: str, box_chars: int) -> _FileUnits:
+    """One file's units for one request room, built on first use and kept while ``index`` lives, so
+    every reader, listing and resolution on one index shares them."""
     if is_schema_file(file):
         return _SchemaFile(index, file, box_chars)
     if language_of(file):
@@ -306,8 +310,12 @@ class _FileUnits:
         return (*outermost, *top_level)
 
     def unit_at(self, line: int) -> Unit | None:
-        holding = [unit for unit in self.inner if unit.start <= line <= unit.end]
-        return min(holding, key=lambda unit: unit.end - unit.start, default=self.top_level)
+        unit = self._nesting.innermost(line)
+        return self.top_level if unit is None else unit
+
+    @cached_property
+    def _nesting(self) -> Nesting[Unit]:
+        return Nesting(self.inner)
 
     def listed_holder(self, unit: Unit) -> Unit | None:
         """``unit`` itself when a listing lists it, else the outermost function holding it; None for
@@ -394,7 +402,12 @@ class _SourceFile(_FileUnits):
     def _inner_units(self) -> tuple[Unit, ...]:
         stubs = frozenset(self._index.stubs_in(self._file))
         functions = _one_per_range(span for span in self._index.functions_in(self._file) if span not in stubs)
-        return tuple(self._function_unit(span, functions) for span in functions)
+        outer = Nesting(functions)
+        return tuple(self._function_unit(span, outer) for span in functions)
+
+    @cached_property
+    def _symbol_nesting(self) -> Nesting[Span]:
+        return Nesting(self._symbols)
 
     def qualified(self, span: Span) -> str:
         """``span``'s name after every holder's: ``OrderService.place``, ``registerRoutes.<anonymous:4>``,
@@ -403,7 +416,7 @@ class _SourceFile(_FileUnits):
         current: Span | None = span
         while current is not None:
             names.append(self._own_name(current))
-            current = holder_of(self._symbols, current)
+            current = self._symbol_nesting.holder(current)
         return ".".join(reversed(names))
 
     def _own_name(self, span: Span) -> str:
@@ -413,10 +426,10 @@ class _SourceFile(_FileUnits):
             return self._constant_names[span]
         return span.name if span.is_named else f"<anonymous:{span.start}>"
 
-    def _function_unit(self, span: Span, functions: Sequence[Span]) -> Unit:
-        holder = holder_of(self._symbols, span)
+    def _function_unit(self, span: Span, functions: Nesting[Span]) -> Unit:
+        holder = self._symbol_nesting.holder(span)
         is_method = holder is not None and holder not in self._all_functions
-        outer = holder_of(functions, span)
+        outer = functions.holder(span)
         kind = UnitKind.METHOD if is_method else UnitKind.FUNCTION
         nested_in = None if outer is None else outer.key
         start = self._decorator_starts.get(span, span.start)
@@ -481,19 +494,19 @@ class _TextFile(_FileUnits):
 
 
 class UnitReader:
-    """A search-lifetime code/text unit reader. Each file is built once for one request room."""
+    """A code/text unit reader for one request room. Each file's units are built once per index and
+    room (``_file_units``), so every reader on one index shares them."""
 
     def __init__(self, index: CodeIndex, box_chars: int, listed_only: bool, reading: Reading) -> None:
         self._index = index
         self._box_chars = box_chars
         self._listed_only = listed_only
         self._reading = reading
-        self._sources: dict[str, _FileUnits] = {}
 
     def list_files(self, files: Sequence[str]) -> UnitListing:
         """List through the same file units used to resolve later anchors in this search."""
         files = tuple(dict.fromkeys(files))
-        in_scope = frozenset(self._index.files)
+        in_scope = self._index.scope
         not_indexed = self._index.not_indexed_files
         unlisted = {file: not_indexed.get(file, OUTSIDE_SCOPE) for file in files if file not in in_scope}
         unlisted |= _left_out(self._index, [file for file in files if file in in_scope], self._reading)
@@ -543,14 +556,12 @@ class UnitReader:
         return ""
 
     def _file_problem(self, file: str) -> str:
-        if file not in self._index.files:
+        if file not in self._index.scope:
             return f"{file} is not in scope"
         return _left_out(self._index, [file], self._reading).get(file, "")
 
     def _source(self, file: str) -> _FileUnits:
-        if file not in self._sources:
-            self._sources[file] = _file_units(self._index, file, self._box_chars)
-        return self._sources[file]
+        return _file_units(self._index, file, self._box_chars)
 
 
 def _non_code_lines(source: str, file: str) -> frozenset[int]:

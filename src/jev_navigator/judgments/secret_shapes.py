@@ -14,8 +14,9 @@ import bisect
 import math
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
+from ..index.spans import merged_ranges
 from .secret_structures import flow_spans, yaml_block_spans
 from .secret_values import (
     CALL_OR_INDEX,
@@ -39,10 +40,25 @@ TOKEN_CHARACTER_CLASS = r"[A-Za-z0-9+/=_\-]"
 
 Span = tuple[int, int]
 
-_PRIVATE_KEY_BLOCK = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|\Z)", re.S
+# A marker's BEGIN or END and its label of capitals, digits and spaces, up to the dashes that close it. The
+# label is read possessively and the dashes only looked at, so a long run of words is read once and a marker
+# that closes no label leaves its dashes to the next one. A private key's label names PRIVATE KEY anywhere
+# (RSA, OPENSSH, SSH2 ENCRYPTED, PGP ... BLOCK, extra spaces): see ``_key_markers``.
+_MARKER = re.compile(r"-----(?P<kind>BEGIN|END) (?P<label>[A-Z0-9 ]++)(?=-----)")
+_MARKER_DASHES = len("-----")
+# Key material on a line in any layout (bare, quoted, appended, commented, numbered or diffed): a base64
+# run of 16 or more characters. A key's last line may be shorter; it is padded or a multiple of four long.
+_KEY_BODY_RUN = re.compile(r"[A-Za-z0-9+/]{16,}")
+_KEY_TAIL_RUN = re.compile(
+    r"(?<![A-Za-z0-9+/])(?:[A-Za-z0-9+/]{2,}={1,2}|(?:[A-Za-z0-9+/]{4})+)(?![A-Za-z0-9+/=])"
 )
-_KEY_MARKER_LINE = re.compile(r"^.*-----(?:BEGIN|END) [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*$", re.M)
+# An armored key's checksum line (PGP): "=" and four base64 characters, between its last body line and END.
+_KEY_CHECKSUM = re.compile(r"(?<![A-Za-z0-9/=])=[A-Za-z0-9+/]{4}(?![A-Za-z0-9+/=])")
+_KEY_HEADER = re.compile(r"[ \t\"'`#*/>+-]*(?:Proc-Type|DEK-Info|Version|Comment|Hash|Charset|MessageID):")
+# A full line of key material (PEM, OpenSSH and armor wrap at 64 to 76 characters), and how many lines of
+# armor (headers and the blank line before the body, in any layout) may stand between it and the BEGIN line.
+_KEY_LINE_RUN = re.compile(r"[A-Za-z0-9+/]{40,}")
+_ARMOR_MAX_LINES = 6
 _TOKEN_SHAPES = (
     re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
@@ -133,9 +149,17 @@ def is_config_shaped(path: str | None) -> bool:
 
 
 def _masked_spans(text: str, spans: list[Span]) -> str:
-    for start, end in sorted(spans, reverse=True):
-        text = text[:start] + MASK + text[end:]
-    return text
+    """The text with each span replaced by ``MASK``, in one pass when the spans do not overlap."""
+    ordered = sorted(spans)
+    if any(start < previous_end for (_, previous_end), (start, _) in zip(ordered, ordered[1:], strict=False)):
+        for start, end in reversed(ordered):
+            text = text[:start] + MASK + text[end:]
+        return text
+    pieces, last = [], 0
+    for start, end in ordered:
+        pieces += [text[last:start], MASK]
+        last = end
+    return "".join([*pieces, text[last:]])
 
 
 def _matches(pattern: re.Pattern[str], hides: Callable[[re.Match[str]], bool] = bool):
@@ -354,9 +378,113 @@ def is_high_entropy(value: str) -> bool:
     return bits >= HIGH_ENTROPY_BITS_PER_CHAR
 
 
+def _private_key_spans(text: str) -> list[Span]:
+    """Each private key block: from its BEGIN marker to the END marker that closes it, the nearest one
+    no later BEGIN claims first. A BEGIN no END closes is the BEGIN line and the key body lines after
+    it (``_unterminated_key_end``), never the rest of the text: code that only mentions the marker
+    keeps its code. One pass over the markers, so the work grows with the text."""
+    open_begins: list[int] = []
+    spans: list[Span] = []
+    floor = 0
+    for start, end, begins in _key_markers(text):
+        if begins:
+            open_begins.append(start)
+        elif open_begins:
+            spans.append((open_begins.pop(), end))
+        else:
+            spans.append((_unopened_key_start(text, start, floor), end))
+        floor = end
+    covered = 0
+    for begin in open_begins:
+        if begin >= covered:
+            covered = _unterminated_key_end(text, begin)
+            spans.append((begin, covered))
+    return merged_ranges(spans)
+
+
+def _unterminated_key_end(text: str, begin: int) -> int:
+    """Where a key without an END marker ends: after its BEGIN line, its armor (``_armor_end``) or any
+    PEM or armor headers, the following lines that hold key material, and one shorter last line: padded,
+    a multiple of four characters long, or cut by the end of the text. It never reaches a line holding
+    another marker, which starts or ends a key of its own."""
+    end = _armor_end(text, _line_end(text, begin))
+    in_body = False
+    while end < len(text):
+        line_end = _line_end(text, end + 1)
+        line = text[end + 1 : line_end]
+        if any(_key_markers(line)):
+            return end
+        if _KEY_BODY_RUN.search(line):
+            in_body = True
+        elif in_body and line.strip() and (line_end == len(text) or _KEY_TAIL_RUN.search(line)):
+            return line_end
+        elif line.strip() and (in_body or not _KEY_HEADER.match(line)):
+            return end
+        end = line_end
+    return end
+
+
+def _armor_end(text: str, end: int) -> int:
+    """Where a key's armor ends, from the end of its BEGIN line: before the first full line of key material
+    within ``_ARMOR_MAX_LINES`` lines, whatever the lines between hold; the BEGIN line's end when none
+    follows before another marker."""
+    position = end
+    for _ in range(_ARMOR_MAX_LINES + 1):
+        if position >= len(text):
+            break
+        line_end = _line_end(text, position + 1)
+        line = text[position + 1 : line_end]
+        if any(_key_markers(line)):
+            break
+        if _KEY_LINE_RUN.search(line):
+            return position
+        position = line_end
+    return end
+
+
+def _unopened_key_start(text: str, end_marker: int, floor: int) -> int:
+    """Where a key whose BEGIN marker lies outside the text starts (a window that opens inside it): the
+    lines before its END line that hold key material, the one right above it possibly a shorter last
+    line (above an armor checksum line, when there is one), back to ``floor`` at most."""
+    start = max(text.rfind("\n", floor, end_marker) + 1, floor)
+    last_line = True
+    while start > floor:
+        line_start = max(text.rfind("\n", floor, start - 1) + 1, floor)
+        line = text[line_start : start - 1]
+        if last_line and _KEY_CHECKSUM.search(line):
+            start = line_start
+            continue
+        if not (_KEY_BODY_RUN.search(line) or (last_line and _KEY_TAIL_RUN.search(line))):
+            break
+        start, last_line = line_start, False
+    return start
+
+
+def _key_markers(text: str) -> Iterator[tuple[int, int, bool]]:
+    """Each private key marker in ``text``: its start, its end and whether it is a BEGIN. An END whose dashes
+    are the closing dashes of the marker before it (``BEGIN … KEY-----END … KEY-----``) does not close that
+    key: its body follows. A BEGIN there (``END … KEY-----BEGIN … KEY-----``) opens the next key."""
+    previous_end = 0
+    for marker in _MARKER.finditer(text):
+        begins = marker["kind"] == "BEGIN"
+        if "PRIVATE KEY" in marker["label"] and (begins or marker.start() >= previous_end):
+            previous_end = marker.end() + _MARKER_DASHES
+            yield marker.start(), previous_end, begins
+
+
+def _key_marker_lines(text: str) -> list[Span]:
+    """Each line holding a private key marker, whole: a marker line names no code."""
+    return [(text.rfind("\n", 0, start) + 1, _line_end(text, end)) for start, end, _ in _key_markers(text)]
+
+
+def _line_end(text: str, position: int) -> int:
+    end = text.find("\n", position)
+    return len(text) if end == -1 else end
+
+
 _RULES: tuple[Callable[[str], list[Span]], ...] = (
-    _matches(_PRIVATE_KEY_BLOCK),
-    _matches(_KEY_MARKER_LINE),
+    _private_key_spans,
+    _key_marker_lines,
     *(_matches(shape) for shape in _TOKEN_SHAPES),
     _matches(_BEARER_VALUE, _bearer_value),
     _matches(_URL_PASSWORD, _url_password),

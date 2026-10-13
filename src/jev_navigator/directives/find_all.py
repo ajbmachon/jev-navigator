@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from itertools import groupby
 from typing import TypeVar
@@ -41,9 +41,10 @@ from ..index.units import (
     read_ranges,
 )
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
+from ..judgments.known_values import KnownValuesMasker, known_values_masker, with_known_values_async
 from ..judgments.profiles import J1
 from ..judgments.questions import Check, item_path, serialized_chars
-from ..judgments.secrets import DEFAULT_MASKER
+from ..judgments.secrets import DEFAULT_MASKER, Masker
 from ..judgments.thresholds import NoulVerdict
 from ..mentions import code_names_in
 from ..sources import ANCHORS, CALLEES, CALLERS, FILE_WORDS, FILES, NAMES, TEXT_NAMES, Reach, Seeds, Source
@@ -354,6 +355,7 @@ async def find_all_async(
     loop stays free. ``cancelled`` is read before each parse and between waves, since the Judge's async
     form reads none; a cancelled task's ``CancelledError`` is never caught."""
     composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
+    judge = await with_known_values_async(judge, index)
     search = _begin(
         index, judge, targets, delivered, completed, cancelled, batches_per_wave, reading, composition
     )
@@ -379,6 +381,7 @@ async def find_all_text_async(
 ) -> FindAllResult:
     """``find_all_text`` the way ``find_all_async`` runs ``find_all``."""
     composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
+    judge = await with_known_values_async(judge, index)
     search = _begin(
         index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT, composition
     )
@@ -420,8 +423,7 @@ def _begin(
         raise ValueError("batches_per_wave must be at least 1")
     shares = checked_shares(composition.shares, targets, composition.policy)
     scoped = judge.scope()
-    if scoped.masker is DEFAULT_MASKER:
-        scoped.masker = _SearchMasker()
+    scoped.masker = _search_cached(known_values_masker(scoped.masker, index))
     search = _Search(
         index, scoped, targets, delivered, cancelled, batches_per_wave, reading, composition, shares
     )
@@ -435,6 +437,16 @@ class _SearchMasker:
     def __init__(self) -> None:
         self.mask = lru_cache(maxsize=256)(DEFAULT_MASKER.mask)
         self.masked_values = lru_cache(maxsize=256)(DEFAULT_MASKER.masked_values)
+
+
+def _search_cached(masker: Masker | None) -> Masker | None:
+    """``masker`` with the built-in masker's scans cached for this search (``_SearchMasker``), also
+    where a ``KnownValuesMasker`` wraps it."""
+    if masker is DEFAULT_MASKER:
+        return _SearchMasker()
+    if isinstance(masker, KnownValuesMasker) and masker.inner is DEFAULT_MASKER:
+        return replace(masker, inner=_SearchMasker())
+    return masker
 
 
 def _stop_by(error: KeyboardInterrupt | Exception | None) -> tuple[str, Exception | None]:

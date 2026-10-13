@@ -38,6 +38,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
+from .directives.shown import CHARACTERS_CUT_MARK
 from .judgments.answers import AnswerSource, JevResponse, without_answer_sources
 from .judgments.judge import Judge
 from .judgments.questions import Check, content_hash, serialized_chars
@@ -265,7 +266,7 @@ def _cut(value: object, max_chars: int | None) -> object:
         return (
             value
             if len(value) <= max_chars
-            else f"{value[:max_chars]}[... {len(value) - max_chars} characters cut]"
+            else value[:max_chars] + CHARACTERS_CUT_MARK.format(count=len(value) - max_chars)
         )
     if isinstance(value, Mapping):
         return {key: _cut(entry, max_chars) for key, entry in value.items()}

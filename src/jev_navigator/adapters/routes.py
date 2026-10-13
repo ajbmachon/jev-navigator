@@ -10,8 +10,10 @@ defaults apply. The first route is primary; on a failed call the next route is a
 The finetuned decider is just another route: `SYSTEM_ONE_ROUTES=decider,jev` with its endpoint, key, model,
 `SYSTEM_ONE_DECIDER_INPUT_TOKENS` and `SYSTEM_ONE_DECIDER_CONCURRENCY` set. Every route declares its
 input limits, and the routed client packs to the tightest of them, so whichever route answers can
-take the request. Concurrency stays per route: each route's client sends at most its own number of
-requests at once, so a slow route never throttles the routes after it.
+take the request. `SYSTEM_ONE_<NAME>_ITEMS_PER_REQUEST` optionally caps the items one request
+carries, for a model that ranks better with fewer at once; the routed client takes the smallest cap.
+Concurrency stays per route: each route's client sends at most its own number of requests at once,
+so a slow route never throttles the routes after it.
 
 Every route runs the same generic `SystemOneClient` over the official TypeSafe SDK: the SDK
 builds, sends and retries the request with exact-byte capture, and the response is decoded
@@ -139,6 +141,7 @@ def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
 
     input_limits = _input_limits(environment, name, known)
     max_concurrency = _concurrency(environment, name, known)
+    items_per_request = _route_number(environment, name, "ITEMS_PER_REQUEST", required=False)
     client = SystemOneClient(
         model=model,
         api_key=_route_key(environment, name),
@@ -146,6 +149,7 @@ def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
         transport=transport,
         input_limits=input_limits,
         max_concurrency=max_concurrency,
+        items_per_request=items_per_request,
         wire=known.wire if known is not None else None,
     )
     return Route(name=name, client=client)
@@ -174,6 +178,7 @@ def _concurrency(environment: Mapping[str, str], name: str, known: KnownRoute | 
 _ROUTE_NUMBERS = {
     "INPUT_TOKENS": "the tokens it accepts for the state plus the longest question",
     "CONCURRENCY": "how many requests it admits in flight at once",
+    "ITEMS_PER_REQUEST": "the most items one request carries",
 }
 
 
@@ -215,6 +220,7 @@ class SystemOneClient:
         transport=None,
         input_limits: InputLimits,
         max_concurrency: int,
+        items_per_request: int | None = None,
         wire: Wire | None = None,
     ) -> None:
         import httpx2
@@ -231,6 +237,7 @@ class SystemOneClient:
         )
         self.model = self._sdk._config.default_model  # noqa: SLF001 - the config is the env contract
         self.input_limits = input_limits if wire is None else replace(input_limits, wire=wire)
+        self.items_per_request = items_per_request
         self._slots = threading.BoundedSemaphore(max_concurrency)
         self._wire = wire
 
@@ -315,6 +322,10 @@ class RoutedJevClient:
         self.routes = routes
         self.model = routes[0].client.model
         self.input_limits = _tightest(route.client.input_limits for route in routes)
+        self.items_per_request = min(
+            (cap for route in routes if (cap := getattr(route.client, "items_per_request", None))),
+            default=None,
+        )
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
         return self.parse(self.send(state, questions))

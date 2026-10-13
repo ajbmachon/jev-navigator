@@ -53,6 +53,8 @@ configuration: a recipe the caller passes as data names them, never an environme
 | `find` and `trace` as compositions of sources | not yet: they keep their own moves and call graph |
 | The spelling map | being built |
 | Static context configuration: one-hop proven calls, directly named files and structural excerpts (`selection.context`) | built |
+| Value uses configuration: the lines that use the name a value on an anchored line is assigned to, the anchor's file first, then other files, then tests, at most ten, from static text hits only (`selection.value_uses`) | built |
+| Agent search: one request a calling agent writes, with hypotheses and the points that would show or refute them, run as sources, `find_all`, the frontier, an existence check and role labels (`directives.agent_search`); see [Agent search](#agent-search-one-composed-request-for-a-calling-agent) | built |
 | Typed configurations | being built |
 | `jvn search` | being built |
 
@@ -207,11 +209,20 @@ route sets its own with `SYSTEM_ONE_<NAME>_INPUT_TOKENS`, or the command stops n
 and remembers a size refusal under the limit of the route that refused. Point Drex at `jvn` through
 the route table: the default client always packs to Jev's limit.
 
+A route can also cap the items one request carries with `SYSTEM_ONE_<NAME>_ITEMS_PER_REQUEST`, for
+a model that ranks better with fewer units at once; the routed client takes the smallest cap. A search
+still plans its rounds at the judge's own size (16), so a capped model is sent each round in smaller
+requests, and `agent_search` counts its budget in requests of the judge's size: a capped model gets
+the same rounds, at more requests and about the same tokens.
+
 Each route also has its own concurrency: how many requests it receives in flight at once. Drex admits
 2 (it answers HTTP 429 to a third) and Jev takes 32, as Analysis Engine measured them; any other route
 sets `SYSTEM_ONE_<NAME>_CONCURRENCY`, or the command stops naming that setting. A request waits for a
 free slot of the route it goes to before it is sent, so waiting never counts against its timeout, and a
 request that falls back to Jev is not held back by Drex's limit.
+
+Microsoft-Decision-1, served from Azure in the EU Data Zone, is a route you configure. Its settings, how its
+answers differ from Jev's, and how to tune JVN for a model are in [docs/models.md](docs/models.md).
 
 One difference under routes: Ctrl-C cannot abort a request already in flight, so the command waits for
 those requests to finish, keeps their answers, and then stops with a resumable pack. Without routes,
@@ -828,6 +839,16 @@ on its own scope, so searches sharing one judge never use up each other's budget
   quote's string ends where that string closes.
   The complete candidate set is masked once, before packing, so copied values stay hidden across
   batches; the final scan still runs on every request before it is sent.
+  A search hides a known value's copies across all its requests, too
+  (`judgments/known_values.py`): before it sends anything, JVN's rules read every file of its index
+  once, and every value of 8 or more characters they hide that stands in at most five of those files
+  is hidden wherever a request holds a copy, so `dial(order, "<value>")` is masked although the
+  `password = "<value>"` it copies is judged in another request, or never; a point that copies such a
+  value hides it too, even when it came from an env file no request shows. A value in more files is a
+  placeholder (`password: password`), hidden only in the requests that show it where a rule finds it.
+  Code holding no copy is sent byte for byte as before. Reading every file costs a one-time scan per
+  index, almost all of it JVN's rules; the index's text search then counts each value's files, its
+  patterns on ripgrep's standard input, never its command line. Reuse one index across searches.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
   left in a key is refused too. Both are on by default; a host passes its own (a masker offers
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
@@ -987,7 +1008,13 @@ and reading, so units, `unlisted` files, `unresolved` anchors and each name's co
 one owner. The frontier measures every unit's code the same way whichever source reached it, so two
 sources reaching one unit never score it differently; only the distance is the source's own, and when
 several sources reach one unit the smallest counts. A source is any object with a `name`, a `label`
-(how coverage counts the units it left unjudged) and `reach(index, seeds)`.
+(how coverage counts the units it left unjudged) and `reach(index, seeds)`. `ScentSource` keeps
+its own BM25 index over every unit the index lists, one document per whole unit, built once per
+`CodeIndex` and refusing more than `max_units` (25,000) units; it still reaches anchors, which the
+search turns into its units like any other source's. A search with a scope of its own passes it as
+`Seeds.in_scope`, and `ScentSource` ranks only units inside it before cutting its `limit`, so a unit
+the search would drop never takes a rank. `queries="per_text"` asks each seed text with the names
+and takes the texts' best units in turn; the default, `"combined"`, asks one query of them all.
 
 | Source | Reads | Reaches | Distance |
 | --- | --- | --- | --- |
@@ -1000,6 +1027,7 @@ several sources reach one unit the smallest counts. A source is any object with 
 | `IMPORTS`, `IMPORTERS` | anchors, units | every unit of the files their files import, or that import their files | 1 |
 | `CALLERS`, `CALLEES` | units | the functions calling each function unit, or that it calls | 1 |
 | `MODELS`, `CLIENT_CALLS` | units | the Prisma models a unit queries, or the lines querying a model block | 1 |
+| `ScentSource(limit=20)`, opt-in only | texts, names, `in_scope` | the `limit` units in scope whose identifiers, strings and path best match the texts and names by BM25 (`selection.scent`), best first; no default composition uses it | 4 plus its rank |
 
 The **frontier** ([`directives/frontier.py`](src/jev_navigator/directives/frontier.py)) is the order
 in which a search judges what its sources reached. Under a call cap whatever is ranked last is lost,
@@ -1318,3 +1346,79 @@ historical comparison and pinned revisions. The caller-specific reproduction har
 live outside JVN at `~/.local/share/jvn-takeover/2026-10-03/search-design/case1/selection-harness/`.
 That harness reproduces historical controls at their recorded pins; JVN retains only the report and
 summary, with no six-role ranking code or recipes.
+
+### Agent search: one composed request for a calling agent
+
+`agent_search(request, index, judge)` runs one search a calling agent writes, so the agent states what
+would show and what would refute its idea once, instead of searching in many small steps. The request
+is closed and typed (`directives/agent_search_request.py`; its JSON Schema, for a tool description, is
+[`schemas/agent-search-v1.json`](src/jev_navigator/schemas/agent-search-v1.json)): one to three
+hypotheses, each a mechanism in plain words with one to four evidence points and up to two refuting
+points, plus the terms, anchors, files, scope and relations to follow, and a budget of requests (8 by
+default). An unknown or malformed field is refused with its JSON path.
+
+- **Only points are judged.** Each point is one target, its text in state and bound into the admitted
+  J1-3 question; a mechanism is returned as written and never sent. Every request asks every point
+  about the same units, sixteen units per request.
+- **Ranking says where to look.** The start sources (anchors, files, files the points name, and the
+  hits of the terms and of the code names the points spell, plus any `extra_sources`, such as the
+  opt-in BM25 `ScentSource()`, which ranks inside the request's scope) reach places,
+  kept to the scope except the caller's anchors, and `find_all` lists them by `VALUE` without a call
+  (`sources.ReachedSource`). Each round, `frontier.Frontier` draws one request's worth of units across
+  the open points, a point's pushed hops first, then its own queue ordered by value plus the relevance
+  its likely units (J1-3 at 0.5 or more) spread over the code graph (`selection.reranked`, the step
+  `active_search` re-ranks with).
+- **Existence says whether it is there.** Each open point whose shortlist (its four best units) changed
+  is asked once whether the shortlist holds it (`directives.existence`, worded in
+  `judgments/existence_question.json`), every such point in one request over the union of their
+  shortlists. A request too large for Jev's input evicts the code of the weakest places first. At 0.7
+  or more the point is established and stops; between 0.35 and 0.7 its shortlist's callers, callees
+  and named files are pushed to it, and an unchanged shortlist after they are judged stops it; below
+  0.35 it keeps drawing its own queue and, once nothing is left for it, is not found in this scope,
+  meaning among the places the request's sources and hops reached (a term the agent did not give
+  reaches nothing). It stays undecided instead while its shortlist holds a place at 0.5 or more whose
+  code its existence answer did not read, or any place at the yes bar: the two judgments disagree,
+  and the agent reads both. The bands are provisional defaults (`Bands`).
+- **The budget counts every request.** Ranking, existence and role labels all count; two requests are
+  kept for labels while ranking runs (`label_requests`), and labels take whatever ranking leaves. Labels
+  go to each point's shortlisted places at 0.5 or more, refuting points first.
+- **The result is facts, not a verdict.** Per point: its band and existence probability, its
+  shortlist and the next places, and the distinct files with a definite (at the yes bar) or possible
+  (0.5 or more) place; places matching a refuting point come first, as conflicts. Code travels for the
+  best places first, within `max_code_chars` (40,000 by default); every other place is a location.
+  A place in the answer is its id, symbol and probability; its file and lines travel with its code,
+  and the request that judged it stays on the Python result and in the journal.
+  Coverage names what was reached and not judged, files the scope left out, unresolved anchors, and
+  the units the anchors named that no point matched (below 0.5, or never judged): a cited finding
+  the agent wrote no point for shows up there, so it can cover it in its next request.
+
+<!-- example: agent search -->
+```python
+from jev_navigator.directives.agent_search import agent_search
+
+request = {
+    "hypotheses": [
+        {
+            "id": "h1",
+            "mechanism": "one helper owns the order item limit",
+            "evidence": [{"id": "e1", "point": "code that refuses an order over the item limit"}],
+            "refuted_by": [{"id": "r1", "point": "code that refunds an order"}],
+        }
+    ],
+    "terms": ["MAX_ITEMS"],
+    "anchors": [{"file": "orders/service.py", "line": 5}],
+    "files": ["orders/service.py"],
+    "scope": {"include": [], "exclude": [], "with_tests": False},
+    "follow": ["callers", "callees"],
+}
+result = agent_search(request, index, judge)
+for point in (result.point("h1.e1"), result.point("h1.r1")):
+    print(point.id, point.outcome, point.band)
+print(result.point("h1.e1").shortlist[0].symbol, result.point("h1.e1").definite_files)
+print(result.stopped_by, result.requests.used, "of", result.requests.budget)
+```
+
+`result.to_json()` is the same result as plain JSON for an agent's tool. For an async client,
+`await agent_search_async(request, index, judge)` runs the same steps and sends the same requests
+through each block's async form (`find_all_async`, `ask_existence_async`, `label_roles_async`),
+with the repository work in a worker thread; a cancelled task's `CancelledError` is never caught.

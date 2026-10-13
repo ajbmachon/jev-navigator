@@ -1,0 +1,20 @@
+{
+  "exists": {
+    "type": "noul",
+    "instructions": "Does `fetched` contain the code that settles a part of `point`?",
+    "criteria": {
+      "true": {
+        "what": "At least one supplied entry locally implements a condition, value or action described by the point.",
+        "examples": [
+          "if q < 0: raise ValueError()"
+        ]
+      },
+      "false": {
+        "what": "The entries only call, forward, mention or sit near that code, or implement something else.",
+        "examples": [
+          "return validate(q)"
+        ]
+      }
+    }
+  }
+}

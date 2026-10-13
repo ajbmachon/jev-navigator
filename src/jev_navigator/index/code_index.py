@@ -55,7 +55,7 @@ from .scope_scan import (
     scan_facts,
 )
 from .source_files import DISAPPEARED, SourceFiles
-from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
+from .spans import CallEdge, CallSite, CodeSlice, Nesting, Reference, Span, TextHit
 from .text_blocks import TextBlock, text_blocks
 from .text_search import TextMatcher
 from .tsconfig import ScriptPaths, nearest_script_paths
@@ -322,6 +322,11 @@ class CodeIndex:
         return () if available <= self._reached else ("facts",)
 
     @property
+    def scope(self) -> frozenset[str]:
+        """``files`` as a set, for asking whether a file is in scope."""
+        return self._scope
+
+    @property
     def unavailable_files(self) -> dict[str, str]:
         """Files this index has no facts for, each with the reason: an inventory entry that disappeared or
         changed after the index first read it, or a file the parser refused (see ``refused_files``)."""
@@ -357,7 +362,13 @@ class CodeIndex:
         return result
 
     def enclosing_symbol(self, file: str, line: int) -> Span | None:
-        return _innermost(self.functions_in(file), line)
+        return self._function_nesting(file).innermost(line)
+
+    @memoized
+    def _function_nesting(self, file: str) -> Nesting[Span]:
+        """Which of ``file``'s functions holds a line, built once, so a name's many call sites in one
+        file are each a lookup."""
+        return Nesting(self.functions_in(file))
 
     def known_enclosing_symbol(self, file: str, line: int) -> Span | None:
         """``enclosing_symbol`` from the facts already in memory, or None while there are none: it
@@ -1240,6 +1251,8 @@ class CodeIndex:
 
         Ripgrep returns only line identities. The literal matcher retains every overlapping term
         on those lines and gives each its own bounded context, so batching never drops provenance.
+        It matches each line as the index first read the file: a line ripgrep found in a file that
+        has grown since holds nothing the index read.
         """
         texts = tuple(dict.fromkeys(texts))
         cache = self.__dict__.setdefault("_memoized__search_text", {})
@@ -1256,7 +1269,10 @@ class CodeIndex:
             matcher = TextMatcher(ordinary)
             hits: dict[str, list[TextHit]] = {text: [] for text in ordinary}
             for line in sorted(matches):
-                source = self.lines(line.file)[line.line - 1]
+                lines = self.lines(line.file)
+                if line.line > len(lines):
+                    continue
+                source = lines[line.line - 1]
                 seen = set()
                 for term, position in matcher.matches(source):
                     if term not in seen:

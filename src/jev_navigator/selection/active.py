@@ -58,6 +58,33 @@ class ActiveResult:
 DEFAULT_ACTIVE_POLICY = ActivePolicy()
 
 
+def normalized_scores(candidates: Sequence[str], scores: Mapping[str, float]) -> dict[str, float]:
+    """Each candidate's ranking score in [0, 1], order kept: shifted up only when the minimum is
+    negative, then divided by the shifted maximum; equal nonpositive scores become zero."""
+    floor = min(0.0, min((scores[id] for id in candidates), default=0.0))
+    maximum = max((scores[id] - floor for id in candidates), default=0.0) or 1.0
+    return {id: (scores[id] - floor) / maximum for id in candidates}
+
+
+def reranked(
+    pending: Sequence[str],
+    normalized: Mapping[str, float],
+    graph: CodeGraph,
+    confirmed: Mapping[str, float],
+    policy: ActivePolicy = DEFAULT_ACTIVE_POLICY,
+) -> tuple[list[str], dict[str, float]]:
+    """``pending`` best first by normalized score plus the relevance that ``confirmed`` units,
+    weighted by their probability, spread over ``graph``; and each pending candidate's boost in
+    [0, 1]. A tie keeps the order ``pending`` gave."""
+    propagation = (
+        random_walk(graph, confirmed, max_iterations=policy.propagation_iterations) if confirmed else {}
+    )
+    propagation_max = max((propagation.get(id, 0) for id in pending), default=0) or 1
+    boost = {id: propagation.get(id, 0) / propagation_max for id in pending}
+    ordered = sorted(pending, key=lambda id: -(normalized[id] + policy.propagation_weight * boost[id]))
+    return ordered, boost
+
+
 def active_search(
     candidates: Sequence[str],
     scores: Mapping[str, float],
@@ -81,9 +108,7 @@ def active_search(
     observations: dict[str, Observation] = {}
     batches = []
     unjudged = []
-    floor = min(0.0, min((scores[id] for id in candidates), default=0.0))
-    maximum = max((scores[id] - floor for id in candidates), default=0.0) or 1.0
-    normalized = {id: (scores[id] - floor) / maximum for id in candidates}
+    normalized = normalized_scores(candidates, scores)
     expected = 0.0
     stopped = "exhausted"
     while pending:
@@ -93,12 +118,7 @@ def active_search(
         confirmed = {
             id: observation.probability for id, observation in observations.items() if observation.confirmed
         }
-        propagation = (
-            random_walk(graph, confirmed, max_iterations=policy.propagation_iterations) if confirmed else {}
-        )
-        propagation_max = max((propagation.get(id, 0) for id in pending), default=0) or 1
-        boost = {id: propagation.get(id, 0) / propagation_max for id in pending}
-        pending.sort(key=lambda id: -(normalized[id] + policy.propagation_weight * boost[id]))
+        pending, boost = reranked(pending, normalized, graph, confirmed, policy)
         batch = tuple(pending[:16])
         yield_rate = (policy.prior_positive + sum(item.probability for item in observations.values())) / (
             policy.prior_positive + policy.prior_negative + len(observations)

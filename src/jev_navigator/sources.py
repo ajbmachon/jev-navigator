@@ -5,10 +5,12 @@ in it, or an anchor, meaning the unit holding it. Each place it reaches carries 
 source, the seed it came from, a distance, and the request names it was reached by. A source makes
 no Jev call.
 
-A source never builds units and never scores them. The search resolves places into units with its
-own room and reading, so the units, the anchors that named none and each seed's counts have one
-owner. The frontier measures every unit's code features the same way whichever source reached it,
-so two sources reaching one unit never score it differently; only the distance is a source's own.
+A source never builds a search's units and never scores them. The search resolves places into units
+with its own room and reading, so the units, the anchors that named none and each seed's counts have
+one owner; ``ScentSource`` ranks every unit by BM25 in its own index, but it too reaches anchors
+the search resolves. The frontier measures every unit's code features the same way whichever source
+reached it, so two sources reaching one unit never score it differently; only the distance is a
+source's own.
 A workflow is a composition: the sources that start it, the sources a unit that clears a target's
 bar expands through, the frontier's policy and shares, and Jev judging in queue order.
 """
@@ -16,10 +18,11 @@ bar expands through, the frontier's policy and shares, and Jev judging in queue 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from itertools import zip_longest
 from pathlib import PurePosixPath
-from typing import ClassVar, Protocol
+from typing import ClassVar, Literal, Protocol
 
 from . import operations
 from .index.code_index import CodeIndex
@@ -28,13 +31,16 @@ from .index.scope import is_lockfile
 from .index.spans import Span, TextHit
 from .index.units import Anchor, LineAnchor, Unit, UnitKind, read_ranges
 from .mentions import literal_names_in, spelling_variants
+from .selection.scent import DEFAULT_MAX_UNITS, unit_scent
 
 
 @dataclass(frozen=True)
 class Seeds:
     """What sources start from. ``names`` and ``texts`` come from the request (the texts are the
     targets' descriptions), ``files`` and ``anchors`` from the caller, and ``units`` are units a search
-    already judged, such as one that cleared a target's bar."""
+    already judged, such as one that cleared a target's bar. ``in_scope``, when a search has a scope of
+    its own, says which paths it keeps, as the search's scope owner decides; a source that cuts a
+    ranking to a limit ranks only those paths, so a place the search would drop never takes a rank."""
 
     names: tuple[str, ...] = ()
     texts: tuple[str, ...] = ()
@@ -42,6 +48,7 @@ class Seeds:
     anchors: tuple[Anchor, ...] = ()
     units: tuple[Unit, ...] = ()
     literals: tuple[str, ...] | None = None
+    in_scope: Callable[[str], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -377,6 +384,74 @@ class ClientCallSource:
             if unit.kind is UnitKind.SCHEMA_BLOCK
             for hit, _ in operations.client_calls(index, Span(unit.path, unit.start, unit.end))
         ]
+
+
+SCENT_DISTANCE = 4
+"""Where ``ScentSource``'s best unit lies: after anchors (0), files (1 and 2) and name hits (3)."""
+DEFAULT_SCENT_LIMIT = 20
+
+
+@dataclass(frozen=True)
+class ScentSource:
+    """The ``limit`` units whose words best match the seeds by BM25 (``selection.scent``), best first,
+    at ``SCENT_DISTANCE`` plus their rank: after anchors, files and name hits, and in BM25 order among
+    themselves, since each rank costs what one step of distance does in the frontier's value. Only units
+    in ``seeds.in_scope`` are ranked, and a unit sharing no word with its query is never reached.
+
+    ``queries`` "combined" asks one query of every seed text and name together; "per_text" asks each
+    text with the names and takes the texts' best units in turn, each unit once, so every text gets its
+    own. The index covers every unit the CodeIndex lists, is built on first use and kept while the
+    CodeIndex lives, and refuses more than ``max_units`` units. No search starts from it by default: a
+    caller opts in, for example through ``agent_search``'s ``extra_sources``."""
+
+    limit: int = DEFAULT_SCENT_LIMIT
+    max_units: int = DEFAULT_MAX_UNITS
+    queries: Literal["combined", "per_text"] = "combined"
+    name: ClassVar[str] = "scent"
+    label: ClassVar[str] = "from scent"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        scent = unit_scent(index, max_units=self.max_units)
+        if self.queries == "per_text":
+            queries = [" ".join((text, *seeds.names)) for text in seeds.texts] or [" ".join(seeds.names)]
+            rankings = [scent.ranked(query, self.limit, seeds.in_scope) for query in queries]
+            ranked = _in_turn(rankings, self.limit)
+        else:
+            ranked = scent.ranked(" ".join((*seeds.texts, *seeds.names)), self.limit, seeds.in_scope)
+        return [
+            Reach(start, self.name, f"bm25 {score:.3f}", SCENT_DISTANCE + rank)
+            for rank, (start, score) in enumerate(ranked)
+        ]
+
+
+def _in_turn(rankings: Sequence[Sequence[tuple[Anchor, float]]], limit: int) -> list[tuple[Anchor, float]]:
+    """The rankings' first places, then their second places, and so on, each place once with the score
+    of the ranking it came from first, until ``limit``."""
+    taken: dict[Anchor, float] = {}
+    for rank in zip_longest(*rankings):
+        for entry in rank:
+            if entry is not None:
+                taken.setdefault(*entry)
+    return list(taken.items())[:limit]
+
+
+@dataclass(frozen=True)
+class ReachedSource:
+    """Places a source reached earlier, offered again under its name and label whatever the seeds. A
+    composition that reaches places itself, for example the callers of units it chose or a source's
+    places kept to a scope, hands them to a search through ``sources=`` this way, so the search still
+    resolves, ranks and counts them by their own provenance."""
+
+    name: str
+    label: str
+    reaches: tuple[Reach, ...]
+
+    @classmethod
+    def of(cls, source: Source, reaches: Iterable[Reach]) -> ReachedSource:
+        return cls(source.name, source.label, tuple(reaches))
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> tuple[Reach, ...]:
+        return self.reaches
 
 
 ANCHORS = AnchorSource()

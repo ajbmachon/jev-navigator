@@ -1,4 +1,6 @@
+import base64
 import json
+import random
 import re
 import time
 from collections import Counter
@@ -61,6 +63,8 @@ def test_repeated_request_text_is_scanned_once_without_retaining_other_requests(
 SLACK_TOKEN = "xoxb" + "-123456789012-abcdefghijklmnop"
 GITHUB_TOKEN = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
 PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAx9k2\n-----END RSA PRIVATE KEY-----"
+KEY_BEGIN = "-----BEGIN " + "PRIVATE KEY-----"
+KEY_END = "-----END " + "PRIVATE KEY-----"
 
 SECRET_VALUES = {
     "private key": (f"const key = `{PRIVATE_KEY}`;", "MIIEowIBAAKCAQEAx9k2"),
@@ -335,6 +339,12 @@ LONG_LINES = {
     "YAML block of many lines": "password:\n" + "  x: y\n" * 10_000,
     "assignment pairs": "a=b " * 8_000,
     "inline SVG attributes": "<svg " + 'x="1" y="2" fill="none" ' * 2_700 + "/>",
+    "plus run after a key marker": KEY_BEGIN + "\n" + "+" * 300 + "#",
+    "quote run after a key body run": KEY_BEGIN + "\n" + "A" * 16 + '"' * 16_000 + "#",
+    "many key marker mentions": f'x = "{KEY_BEGIN}"\n' * 6_000,
+    "key words repeated after BEGIN": "-----BEGIN " + "PRIVATE KEY " * 20_000,
+    "key words repeated after END": "-----END " + "PRIVATE KEY " * 20_000,
+    "key words repeated after a mentioned BEGIN": 'x = "-----BEGIN ' + "PRIVATE KEY " * 20_000,
 }
 
 
@@ -349,16 +359,21 @@ def test_masking_a_long_line_takes_time_linear_in_its_length(text: str) -> None:
     assert time.perf_counter() - started < 1.0
 
 
-REPEATED_PAIRS = {"assignment pairs": "a=b ", "SVG attributes": 'x="1" '}
+REPEATED_UNITS = {
+    "assignment pairs": ("a=b ", 64_000),
+    "SVG attributes": ('x="1" ', 64_000),
+    "key BEGIN lines": (KEY_BEGIN + "\n", 896_000),
+    "key END lines": (KEY_END + "\n", 896_000),
+}
 
 
-@pytest.mark.parametrize("pair", REPEATED_PAIRS.values(), ids=REPEATED_PAIRS.keys())
-def test_masking_time_grows_linearly_as_a_line_of_pairs_doubles(pair: str) -> None:
+@pytest.mark.parametrize(("unit", "longest"), REPEATED_UNITS.values(), ids=REPEATED_UNITS.keys())
+def test_masking_time_grows_linearly_as_a_text_of_repeated_units_doubles(unit: str, longest: int) -> None:
     # Arrange
-    lengths = [8_000, 16_000, 32_000, 64_000]
+    lengths = [longest // 8, longest // 4, longest // 2, longest]
 
     # Act
-    seconds = [_fastest_mask_seconds(pair * (length // len(pair))) for length in lengths]
+    seconds = [_fastest_mask_seconds(unit * (length // len(unit))) for length in lengths]
 
     # Assert
     assert seconds[-1] < 24 * max(seconds[0], 0.001), seconds
@@ -746,6 +761,121 @@ def test_a_value_hidden_at_its_key_is_hidden_where_it_stands_bare_in_the_same_re
 
 
 @pytest.mark.parametrize(
+    ("state", "rest"),
+    [
+        (
+            {
+                "compose": {
+                    "file": "docker-compose.yml",
+                    "code": (
+                        "    environment:\n      POSTGRES_PASSWORD: Zq7wPx@Lm4nRt9vK\n"
+                        "      DATABASE_URL: postgres://app:Zq7wPx@Lm4nRt9vK@db/app\n"
+                    ),
+                }
+            },
+            "Lm4nRt9vK",
+        ),
+        (
+            {
+                "keyed": {"file": "app/fixtures.py", "code": 'password = "Ka9#vQ2mLx7pRt4w"\n'},
+                "conf": {"file": "config.yml", "code": "db_pass: Ka9#vQ2mLx7pRt4w\n"},
+            },
+            "vQ2mLx7pRt4w",
+        ),
+    ],
+)
+def test_a_known_value_a_rule_would_cut_short_is_hidden_whole(state: dict, rest: str) -> None:
+    """A rule can end a value early: a URL password at its first ``@``, a config value at ``#``. The rest
+    of a value the request already knows is hidden where it follows the mask, or it would be sent."""
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert rest not in json.dumps(masked_state)
+
+
+def test_a_quoted_shell_value_is_hidden_where_it_stands_unquoted() -> None:
+    # Arrange
+    state = {
+        "env": {"file": "deploy.sh", "code": 'export DB_PASS="pa55word99xq"\n'},
+        "notes": {"file": "docs/restore.md", "code": "psql -h db -W pa55word99xq\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["notes"]["code"] == "psql -h db -W [MASKED]\n"
+
+
+def test_a_token_holding_a_shorter_known_value_is_hidden_whole() -> None:
+    # Arrange
+    state = {
+        "keyed": {"file": "app/fixtures.py", "code": 'password = "Lm4nRt9vKq2w"\n'},
+        "ci": {"file": "ci.sh", "code": "curl -H 'x' ghp_Lm4nRt9vKq2wAbCdEfGhIjKlMnOpQrStUvWx12\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["ci"]["code"] == "curl -H 'x' [MASKED]\n"
+
+
+class _OwnTokenMasker(SecretMasker):
+    """A masker with a rule of its own that JVN's rules do not have, and that lists only JVN's values."""
+
+    def mask(self, text: str, path: str | None = None) -> str:
+        return super().mask(re.sub(r"\btok_[A-Za-z0-9]{20,}", MASK, text), path)
+
+
+class _OwnEmailMasker(SecretMasker):
+    """A masker with an email rule of its own that writes its own token and names it."""
+
+    token_pattern = re.compile(r"\[MASKED\]|\[EMAIL\]")
+
+    def mask(self, text: str, path: str | None = None) -> str:
+        return super().mask(re.sub(r"[A-Za-z0-9.]+@[a-z]+\.[a-z]+", "[EMAIL]", text), path)
+
+
+def test_the_start_of_a_known_value_a_rule_begins_late_is_hidden_beside_the_maskers_own_token() -> None:
+    """The email rule starts after the ``#`` inside a known password, so the password's start stands
+    before the masker's own token; it is hidden there."""
+    # Arrange
+    state = {
+        "keyed": {"file": "app/fixtures.py", "code": 'password = "Zq7w#Px9@corp.example"\n'},
+        "notes": {"file": "docs/login.md", "code": "log in with Zq7w#Px9@corp.example today\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, _OwnEmailMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["notes"]["code"] == "log in with [MASKED] today\n"
+
+
+def test_a_known_value_inside_a_secret_only_the_masker_finds_leaves_that_secret_whole() -> None:
+    """A known value can stand inside a longer secret that only the caller's masker recognizes. Hiding
+    the known value first would break that secret's shape and send the rest of it."""
+    # Arrange
+    state = {
+        "keyed": {"file": "app/fixtures.py", "code": 'password = "Lm4nRt9vKq2w"\n'},
+        "ci": {"file": "ci.sh", "code": "publish --auth tok_Lm4nRt9vKq2wAbCdEfGh1234\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, _OwnTokenMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert "AbCdEfGh1234" not in json.dumps(masked_state)
+
+
+@pytest.mark.parametrize(
     "path", ["tests/test_judgments.py", "tests/test_round.py", "tests/test_secret_masking.py"]
 )
 def test_the_final_scan_finds_nothing_in_masked_repository_code(path: str) -> None:
@@ -1039,3 +1169,228 @@ def test_a_code_item_under_a_nested_target_key_still_hides_copies() -> None:
 
     # Assert
     assert masked_state["slice"]["binding"]["target"] == "[MASKED]"
+
+
+PGP_KEY_BEGIN = "-----BEGIN PGP " + "PRIVATE KEY BLOCK-----"
+
+
+def _pem_body(lines: int) -> list[str]:
+    """Lines shaped like a PEM body (64 base64 characters each) that hold no key."""
+    return [
+        base64.b64encode(bytes((index * 48 + offset) % 256 for offset in range(48))).decode()
+        for index in range(lines)
+    ]
+
+
+def _quoted_lines(lines: list[str]) -> str:
+    return "lines = [\n" + "".join(f'    "{line}",\n' for line in lines) + "]\nprint(len(lines))\n"
+
+
+@pytest.mark.parametrize("path", ["app/keys.py", ".github/workflows/deploy.yml"])
+def test_a_mentioned_key_marker_hides_only_its_own_line(path):
+    code = (
+        f'def is_key(value):\n    if value.startswith("{KEY_BEGIN}"):\n'
+        '        return "key"\n    return "plain"\n'
+    )
+
+    lines = SecretMasker().mask(code, path).splitlines()
+
+    assert KEY_BEGIN not in lines[1]
+    assert (lines[0], *lines[2:]) == ("def is_key(value):", '        return "key"', '    return "plain"')
+
+
+KEY_LAYOUTS = {
+    "pem": "\n".join,
+    "crlf": "\r\n".join,
+    "quoted lines": lambda lines: "\n".join(f'    "{line}",' for line in lines),
+    "commented": lambda lines: "\n".join(f"# {line}" for line in lines),
+    "appended": lambda lines: "\n".join(f'sb.append("{line}\\n");' for line in lines),
+    "concatenated with dots": lambda lines: "\n".join(f'    "{line}\\n" .' for line in lines),
+    "escaped CRLF": lambda lines: "\n".join(f'    "{line}\\r\\n" +' for line in lines),
+    "byte literals": lambda lines: "\n".join(f'    b"{line}\\n"' for line in lines),
+    "YAML list": lambda lines: "\n".join(f"  - {line}" for line in lines),
+    "removed in a diff": lambda lines: "\n".join(f"-{line}" for line in lines),
+    "numbered": lambda lines: "\n".join(f"{number}: {line}" for number, line in enumerate(lines, 1)),
+}
+
+
+KEY_ARMORS = {
+    "bare": [KEY_BEGIN],
+    "encrypted": [
+        "-----BEGIN RSA " + "PRIVATE KEY-----",
+        "Proc-Type: 4,ENCRYPTED",
+        "DEK-Info: AES-128-CBC,0011",
+        "",
+    ],
+    "pgp": [PGP_KEY_BEGIN, "Version: GnuPG v2", "Comment: laptop", ""],
+    "pgp without headers": [PGP_KEY_BEGIN, ""],
+}
+
+
+@pytest.mark.parametrize("armor", KEY_ARMORS.values(), ids=KEY_ARMORS.keys())
+@pytest.mark.parametrize("layout", KEY_LAYOUTS.values(), ids=KEY_LAYOUTS.keys())
+def test_an_unterminated_key_hides_its_body_in_any_layout_and_keeps_the_code_after_it(layout, armor):
+    body = _pem_body(3)
+
+    masked = SecretMasker().mask(layout([*armor, *body]) + "\nprint(len(lines))\n", "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+    assert "print(len(lines))" in masked
+
+
+def test_a_key_cut_before_its_begin_marker_hides_its_body_and_keeps_the_code_before_it():
+    body = [*_pem_body(3), "QUJDRA=="]
+    text = "\n".join(["load(path)", *(f'    "{line}\\n"' for line in body), f'    "{KEY_END}"', "run()"])
+
+    masked = SecretMasker().mask(text, "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+    assert masked.startswith("load(path)\n")
+    assert masked.endswith("\nrun()")
+
+
+def test_a_mentioned_key_marker_keeps_the_code_before_a_later_key():
+    body = _pem_body(2)
+    text = f'if value.startswith("{KEY_BEGIN}"):\n    return parse(value)\n' + "\n".join(
+        [KEY_BEGIN, *body, KEY_END]
+    )
+
+    masked = SecretMasker().mask(text, "app/keys.py")
+
+    assert "    return parse(value)" in masked
+    assert [line for line in body if line in masked] == []
+
+
+def test_a_mentioned_key_marker_never_takes_a_later_cut_key_as_its_own():
+    body = _pem_body(3)
+    # The name after the mention is a run long enough to read as key material, so the mention's scan
+    # reaches the real key's BEGIN line: the case this test guards.
+    text = f'if value.startswith("{KEY_BEGIN}"):\n    return loadPrivateKeyFromPem(value)\n' + "\n".join(
+        [f"data = '''{KEY_BEGIN}", *body]
+    )
+
+    masked = SecretMasker().mask(text, "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+
+
+def test_an_unterminated_key_at_the_end_of_text_hides_its_whole_body():
+    body = [*_pem_body(2), "QUJDRA"]
+
+    masked = SecretMasker().mask("key = '''" + "\n".join([KEY_BEGIN, *body]), "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+
+
+def test_a_terminated_key_is_hidden_whole_whatever_its_lines_look_like():
+    body = _pem_body(2)
+
+    masked = SecretMasker().mask(_quoted_lines([KEY_BEGIN, *body, KEY_END]), "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+    assert "print(len(lines))" in masked
+
+
+@pytest.mark.parametrize("layout", KEY_LAYOUTS.values(), ids=KEY_LAYOUTS.keys())
+def test_a_pgp_key_cut_before_its_begin_marker_hides_its_body_above_the_checksum(layout):
+    body = [*_pem_body(3), "QUJDRA=="]
+    lines = [*body, "=nX4q", "-----END PGP " + "PRIVATE KEY BLOCK-----"]
+
+    masked = SecretMasker().mask(layout(lines) + "\nprint(len(lines))\n", "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+    assert "print(len(lines))" in masked
+
+
+def _random_body(seed: int, lines: int, width: int = 64) -> list[str]:
+    """Key body lines from seeded random bytes: shaped like a real key's, and no key at all."""
+    encoded = base64.b64encode(random.Random(seed).randbytes(width * lines * 3 // 4)).decode()
+    return [encoded[start : start + width] for start in range(0, len(encoded), width)]
+
+
+PRIVATE_KEY_LABELS = [
+    "PRIVATE KEY", "RSA PRIVATE KEY", "DSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY",
+    "ENCRYPTED PRIVATE KEY", "SSH2 ENCRYPTED PRIVATE KEY", "PGP PRIVATE KEY BLOCK",
+    "OPENSSH ENCRYPTED RSA DSA PRIVATE KEY", " RSA PRIVATE KEY", "RSA PRIVATE KEY ", "PRIVATE KEY TWO WORDS",
+    "PRIVATE KEYS",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("label", PRIVATE_KEY_LABELS)
+def test_every_private_key_label_marks_a_key_from_either_end(label: str) -> None:
+    body = _random_body(7, 3)
+    unterminated = "\n".join([f"-----BEGIN {label}-----", *body, "print(len(lines))", ""])
+    unopened = "\n".join(["load(path)", *body, f"-----END {label}-----"])
+
+    masked = [SecretMasker().mask(text, "app/keys.py") for text in (unterminated, unopened)]
+
+    assert [line for text in masked for line in body if line in text] == []
+    assert masked[0].endswith("\nprint(len(lines))\n")
+    assert masked[1].startswith("load(path)\n")
+
+
+@pytest.mark.parametrize(
+    "joined",
+    [
+        "-----BEGIN RSA PRIVATE KEY-----END RSA PRIVATE KEY-----",
+        "-----END RSA PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----",
+    ],
+    ids=["begin then end", "end then begin"],
+)
+def test_two_markers_sharing_dashes_never_close_the_key_before_its_body(joined: str) -> None:
+    body = _random_body(11, 3)
+    text = "\n".join([joined, *body, "print(len(lines))", ""])
+
+    masked = SecretMasker().mask(text, "app/keys.py")
+
+    assert [line for line in body if line in masked] == []
+    assert masked.endswith("\nprint(len(lines))\n")
+
+
+COPIED_PASSWORD = "Tr0ub4dor-horse-staple"
+
+
+@pytest.mark.parametrize(
+    "point",
+    [{"target": {"description": "key"}}, {"targets": {"p0": "key"}}, {"workflow": {"question": "key"}}],
+    ids=["target", "targets", "workflow"],
+)
+def test_a_point_hides_a_long_secret_its_writer_copied_from_the_code(point: dict) -> None:
+    # Arrange: an agent read the code and copied its password into the point it searches for
+    key, inner = next(iter(point.items()))
+    field = next(iter(inner))
+    written = {key: {field: f"where the database login uses {COPIED_PASSWORD}"}}
+    state = {**written, "slice": {"file": "app/db.py", "code": f'DB_PASSWORD = "{COPIED_PASSWORD}"\n'}}
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state[key][field] == "where the database login uses [MASKED]"
+
+
+def test_the_final_check_refuses_a_long_secret_left_in_a_point() -> None:
+    state = {
+        "targets": {"p0": f"where the login uses {COPIED_PASSWORD}"},
+        "slice": {"file": "a.py", "code": ""},
+    }
+
+    with pytest.raises(SecretInRequestError):
+        refuse_if_secret(state, {}, None, frozenset({COPIED_PASSWORD}))
+
+
+def test_jvns_own_question_wording_never_hides_a_masked_value() -> None:
+    # Arrange: a fixture's secret-named variable holds a word JVN's own question uses
+    state = {"slice": {"file": "tests/test_rank.py", "code": 'API_TOKEN = "relevance"\n'}}
+    questions = {
+        "q": {"type": "noul", "instructions": "Judge the relevance of `slice.code`.", "criteria": {}}
+    }
+
+    # Act
+    masked_state, masked_questions, values = mask_request(state, questions, SecretMasker())
+    refuse_if_secret(masked_state, masked_questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_questions == questions
+    assert masked_state["slice"]["code"] == 'API_TOKEN = "[MASKED]"\n'

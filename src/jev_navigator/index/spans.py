@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 if TYPE_CHECKING:
     from .bindings import Binding
@@ -36,19 +37,59 @@ class Span:
         return self.file == other.file and self.start <= other.end and other.start <= self.end
 
 
-def holder_of(symbols: Iterable[Span], symbol: Span) -> Span | None:
-    """The smallest of ``symbols`` whose lines contain ``symbol``'s and fill more of them: a method's
-    class, a nested function's outer function. Lines are all a span knows, so a symbol on the same
-    lines as another (a method on a one-line class) has no holder."""
-    holding = [
-        other
-        for other in symbols
-        if other != symbol
-        and other.size() > symbol.size()
-        and other.contains(symbol.start)
-        and other.contains(symbol.end)
-    ]
-    return min(holding, key=Span.size, default=None)
+def merged_ranges(ranges: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The ranges in order, each one that starts at or before the end of the one before joined into it:
+    character spans that overlap or touch, or line ranges that share a line."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+class Lines(Protocol):
+    """Anything that sits on lines ``start`` to ``end`` of one file: a span or a unit."""
+
+    @property
+    def start(self) -> int: ...
+
+    @property
+    def end(self) -> int: ...
+
+
+Held = TypeVar("Held", bound=Lines)
+
+
+def _extent(held: Lines) -> int:
+    return held.end - held.start
+
+
+class Nesting(Generic[Held]):
+    """Which of one file's spans holds a line, and which holds one of them, as lookups. Each line's
+    spans are kept smallest first, and of equal size in the order given, built once, so neither
+    question scans every span again.
+
+    ``innermost`` is the smallest span holding a line. ``holder`` is the smallest span whose lines
+    contain a span's and fill more of them: a method's class, a nested function's outer function.
+    Lines are all a span knows, so a span on the same lines as another (a method on a one-line class)
+    has no holder."""
+
+    def __init__(self, spans: Iterable[Held]) -> None:
+        self._by_line: dict[int, list[Held]] = {}
+        for held in sorted(spans, key=_extent):
+            for line in range(held.start, held.end + 1):
+                self._by_line.setdefault(line, []).append(held)
+
+    def innermost(self, line: int) -> Held | None:
+        holding = self._by_line.get(line)
+        return holding[0] if holding else None
+
+    def holder(self, held: Lines) -> Held | None:
+        holding = self._by_line.get(held.start, [])
+        larger = bisect_right(holding, _extent(held), key=_extent)
+        return next((other for other in holding[larger:] if other.end >= held.end), None)
 
 
 @dataclass(frozen=True)
