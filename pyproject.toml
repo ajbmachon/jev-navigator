@@ -33,3 +33,7 @@ select = ["E", "F", "I", "B", "UP", "SIM", "N"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 required_plugins = ["pytest-timeout"]
+
+[tool.uv]
+exclude-newer = "7 days"
+exclude-newer-package = { certifi = false }
