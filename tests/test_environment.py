@@ -109,6 +109,25 @@ def test_a_missing_key_says_a_working_directory_env_is_not_read(
     assert (f"{working_directory / '.env'} is not read" in str(raised.value)) is not runs_in_checkout
 
 
+@pytest.mark.parametrize("routes", ["drex", "decider, drex"])
+def test_a_route_table_without_jev_needs_no_typesafe_key(tmp_path, routes: str):
+    # Every route resolves its own key when it is built; only the default Jev client needs this one.
+    environment_seen = {"SYSTEM_ONE_ROUTES": routes}
+
+    contributed = load_typesafe_environment(environment_seen, legacy=tmp_path / "absent-legacy-env")
+
+    assert contributed == {}
+    assert "TYPESAFE_API_KEY" not in environment_seen
+
+
+def test_a_route_table_named_only_in_a_file_also_needs_no_typesafe_key(tmp_path):
+    legacy = _written(tmp_path, {"SYSTEM_ONE_ROUTES": "drex", "SYSTEM_ONE_DREX": "1"})
+
+    contributed = load_typesafe_environment({}, legacy=legacy)
+
+    assert contributed == {"SYSTEM_ONE_ROUTES": "drex", "SYSTEM_ONE_DREX": "1"}
+
+
 def test_a_checkout_env_file_is_read_through_checkout_root(tmp_path, monkeypatch):
     # The default path (no explicit root) reads the `.env` from the tool's own checkout.
     (tmp_path / ".env").write_text("TYPESAFE_API_KEY=checkout-key\n")
