@@ -143,6 +143,12 @@ CLI launcher owns the Python process's total memory, including indexes and other
 attribute a shared process's footprint to individual libraries. See
 [Memory limit](docs/cli.md#memory-limit) for the settings and refusal behavior.
 
+The ast-grep, ripgrep and git processes JVN starts over code inherit only `PATH`, `HOME`, `TMPDIR`,
+`LANG`, `LANGUAGE`, `TZ`, `LC_*` and `GIT_*` from the host (`memory_limit.CHILD_ENVIRONMENT_NAMES`),
+so a host's model keys, bearer tokens and proxy credentials never reach a program reading untrusted
+code. A command-line connector keeps the host's whole environment: the model CLI needs its
+credentials.
+
 ## Live evidence-pack command
 
 Start in the directory you want to search:

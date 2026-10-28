@@ -49,6 +49,7 @@ class CommandConnector:
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=empty_directory,
+                env=dict(os.environ),  # the model CLI needs the host's credentials
             ) as process,
         ):
             reply, error_output = process.communicate(prompt if on_stdin else None, timeout=self.timeout)

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import re
 import subprocess
 import tempfile
@@ -527,7 +526,7 @@ def inside_git_worktree(cwd: Path) -> bool:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env={**os.environ, "LC_ALL": "C"},
+        env={**memory_limit.child_environment(), "LC_ALL": "C"},
     ) as process:
         output, error_output = process.communicate()
     if process.returncode == 0:
