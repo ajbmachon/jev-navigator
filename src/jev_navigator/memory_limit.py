@@ -74,6 +74,16 @@ ENVIRONMENT_NAMES = {
 }
 SLOTS_DIR_VARIABLE = "JEV_NAVIGATOR_MEMORY_SLOTS_DIR"
 
+CHILD_ENVIRONMENT_NAMES = frozenset({"PATH", "HOME", "TMPDIR", "LANG", "LANGUAGE", "TZ"})
+CHILD_ENVIRONMENT_PREFIXES = ("LC_", "GIT_")
+"""What a process JVN starts over code inherits from its host: where programs are found, the home git
+reads its configuration from, the temporary folder, the locale (``LC_*``) and git's own settings
+(``GIT_*``, such as which configuration files git reads and so which repositories it trusts). A host may
+hold model keys, bearer tokens and proxy credentials while the code JVN reads is untrusted, so
+ast-grep, ripgrep and git get nothing else. A host that keeps a credential in a ``GIT_*`` variable
+hands it to JVN's git. A model step's command-line connector passes the host's whole environment
+itself, because the model CLI needs its credentials."""
+
 _MB = 2**20
 
 
@@ -134,6 +144,16 @@ def slots_directory(environment: Mapping[str, str] | None = None) -> Path:
     return Path(environment.get(SLOTS_DIR_VARIABLE) or f"/tmp/jev-navigator-memory-{os.getuid()}")
 
 
+def child_environment() -> dict[str, str]:
+    """The entries of this process's environment that ``CHILD_ENVIRONMENT_NAMES`` and
+    ``CHILD_ENVIRONMENT_PREFIXES`` admit, as a new dict."""
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name in CHILD_ENVIRONMENT_NAMES or name.startswith(CHILD_ENVIRONMENT_PREFIXES)
+    }
+
+
 def process_guard() -> MemoryGuard:
     """This process's guard for the settings its environment holds now; a process's settings do not
     change, so it is always the same guard."""
@@ -180,11 +200,12 @@ class MemoryGuard:
 
     @contextmanager
     def started(self, arguments: Sequence[str], **options) -> Iterator[subprocess.Popen]:
-        """The process ``subprocess.Popen(arguments, **options)``, watched until the block ends. On leaving
-        the block the process has ended: it is killed if the block raised, and waited for otherwise. A
-        process the watchdog stopped raises ``MemoryLimitReachedError`` here, never its partial output."""
+        """The process ``subprocess.Popen(arguments, **options)``, watched until the block ends. Without an
+        ``env`` option it gets ``child_environment()``. On leaving the block the process has ended: it is
+        killed if the block raised, and waited for otherwise. A process the watchdog stopped raises
+        ``MemoryLimitReachedError`` here, never its partial output."""
         self.check()
-        process = subprocess.Popen(list(arguments), **options)
+        process = subprocess.Popen(list(arguments), **{"env": child_environment(), **options})
         done = self._watch(process)
         try:
             yield process
