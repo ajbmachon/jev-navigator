@@ -1343,12 +1343,12 @@ class CodeIndex:
 
     def co_changed_files(self, file: str, limit: int = 5) -> tuple[CoChange, ...]:
         """Scope files most often committed together with ``file``, with their shared-commit counts;
-        the history is read once per file for the life of the index."""
+        complete history is read per query without retaining a full peer population per file."""
         self._require_in_scope(file)
         return self._read_co_changes(file)[:limit]
 
-    @memoized
     def _read_co_changes(self, file: str) -> tuple[CoChange, ...]:
+        """Read complete history for one query without retaining a peer population per file."""
         if not self.commit:
             return ()
         log = tools.git(
