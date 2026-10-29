@@ -196,8 +196,17 @@ to the judge, which splits the request, because the next route would get the sam
 reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_MODEL` and `SYSTEM_ONE_<NAME>_API_KEY`; `drex`
 and `jev` also take `SYSTEM_ONE_<NAME>=1` for their hosted endpoint and model. Only the `jev` route
 falls back to `TYPESAFE_API_KEY`: every other route needs its own key, so your TypeSafe key never goes
-to Drex or to a server you configured. A route missing its endpoint, model or key stops the command
-before any request, naming the route and the setting. Without `SYSTEM_ONE_ROUTES`, `jvn` uses the default Jev client described above.
+to Drex or to a server you configured, and a table whose routes all have their own keys, such as
+`SYSTEM_ONE_ROUTES=drex`, runs with no `TYPESAFE_API_KEY` at all. A route missing its endpoint, model
+or key stops the command before any request, naming the route and the setting. Without
+`SYSTEM_ONE_ROUTES`, `jvn` uses the default Jev client described above.
+
+Drex accepts a stricter request than Jev, so the `drex` route sends what the judge built in Drex's
+form: each structured criterion goes as its JSON text, its fields still labelled, and a zero-width
+space goes after the `data` of any base64 data URL (`data:image/png;base64,…`), which Drex would
+otherwise refuse as media. The judge hashes and stores the request it built; the journal's sent body,
+and an answer store's kept request (`sent_request()`), record what Drex received. Every other route
+gets the request exactly as built.
 
 Each route has an input limit for the state plus the longest question: Drex accepts 8,192 tokens and
 Jev 32,000, as Analysis Engine measured them; `jvn` turns tokens into characters at the one rate
@@ -939,8 +948,9 @@ still order the complete frontier. Every live sub-request counts toward the sele
 Once the allowance has refused a request, the search keeps opening places only while the answer store
 still answers them; the first round that gets no answer at all ends the search as `budget`, and the
 places it did not open stay in `not_inspected` for Resume.
-Only HTTP 400 with `detail.error_type` equal to `max_tokens_exceeded` is a size refusal;
-mentions of that text in question IDs or unrelated error messages do not trigger splitting.
+Only HTTP 400 with `detail.error_type` equal to `max_tokens_exceeded`, or HTTP 422 whose `detail`
+says `context limit` (Decision-1's), is a size refusal; mentions of that text in question IDs or
+unrelated error messages do not trigger splitting.
 A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code
 is not there. The search runs out of places when no start or pick waits and no neighbour scores
 above the no bar (0.20 by default). It then ends as `nothing_left` only if its own moves parsed every
@@ -1117,7 +1127,8 @@ Text limits also apply inside nested lists and mappings. Rendering a limited vie
 complete code and judgments in the append-only record.
 The budget is a character box: the client's input limit for state plus the longest question, less
 the longest question asked, measured together with the shared state, and within `budget_chars` when
-the history sets one. Each client declares its
+the history sets one; `Judge.fits` must also accept the request as it is sent, masked and in its
+route's form. Each client declares its
 limits as `input_limits` (`InputLimits`, in characters at the rate `REQUEST_CHARS_PER_TOKEN`); a
 client that declares none is taken to be Jev, 32,000 tokens for state plus the longest question and
 64k tokens for a whole request (the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). The

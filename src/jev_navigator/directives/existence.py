@@ -56,11 +56,19 @@ def existence_check(target: str) -> Check:
 
 
 def existence_fits(judge: Judge, targets: Mapping[str, str], pieces: Sequence[LabelPiece]) -> bool:
-    """Whether every point's existence question over ``pieces`` fits the judge's box without
-    evicting any piece's code, measured the way the request is built."""
+    """Whether every point's existence question over ``pieces`` fits the judge's input limits without
+    evicting any piece's code, measured as the judge sends the request (``Judge.fits``)."""
     history = _history(pieces)
-    longest = max(serialized_chars(existence_check(target).to_question()) for target in targets)
-    history.state_for((FETCHED,), _shared(targets), longest, box_chars=judge.input_limits.box_chars)
+    checks = [existence_check(target) for target in targets]
+    questions = {check.question_id: check.to_question() for check in checks}
+    longest = max(serialized_chars(question) for question in questions.values())
+    history.state_for(
+        (FETCHED,),
+        _shared(targets),
+        longest,
+        box_chars=judge.input_limits.box_chars,
+        request_fits=lambda state: judge.fits(state, questions),
+    )
     return not history.evictions
 
 
