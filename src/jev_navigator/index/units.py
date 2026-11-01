@@ -294,7 +294,12 @@ class _FileUnits:
         self._index = index
         self._file = file
         self._box_chars = box_chars
-        self._lines = index.lines(file)
+
+    @property
+    def _lines(self) -> tuple[str, ...]:
+        """Read through the index's bounded line cache: this object lives as long as the index, so
+        holding them here would keep every file's text in memory."""
+        return self._index.lines(self._file)
 
     @cached_property
     def inner(self) -> tuple[Unit, ...]:
