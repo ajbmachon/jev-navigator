@@ -86,6 +86,10 @@ def _git_entries(cwd: Path, arguments: Sequence[str], prefixes: Sequence[str]) -
     return _entries(tools.git_over_paths(arguments, prefixes, cwd))
 
 
+_RIPGREP_NO_FILES = 1
+"""ripgrep's exit when it lists no file, which one chunk of a long path list may rightly do."""
+
+
 def _ripgrep_entries(cwd: Path, prefixes: Sequence[str], *options: str) -> list[str]:
     command = [*tools.RIPGREP_SAFE, *_RIPGREP_FILES, *options]
     if not prefixes:
@@ -93,7 +97,7 @@ def _ripgrep_entries(cwd: Path, prefixes: Sequence[str], *options: str) -> list[
     return [
         entry
         for chunk in tools.file_chunks(prefixes, bytes_only=True)
-        for entry in _entries(tools.run_command([*command, *chunk], cwd))
+        for entry in _entries(tools.run_command([*command, *chunk], cwd, no_match_exit=_RIPGREP_NO_FILES))
     ]
 
 
