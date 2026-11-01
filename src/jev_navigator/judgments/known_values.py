@@ -59,6 +59,10 @@ from .secrets import (
 KNOWN_VALUE_MAX_FILES = 5
 """A value standing in more files than this is a placeholder, not a secret (see the module docstring)."""
 
+SEARCH_KEY_CHARS = 256
+"""How much of a value the text search asks for; ripgrep needs hundreds of MB for one 74,000-character
+literal and tens of MB for a whole scan's values cut to this length."""
+
 __all__ = [
     "KNOWN_VALUE_MAX_FILES",
     "KnownValuesMasker",
@@ -175,10 +179,11 @@ def _holders(index: CodeIndex, values: list[str], text_files: set[str]) -> dict[
     """How many of ``text_files`` hold each value, found by the index's text search
     (``CodeIndex.search_texts``), whose ripgrep reads its patterns on standard input, never from its
     command line, which process listings and error messages show. It searches binary files too,
-    which ``text_files`` leaves out. A value on one line is counted from its hits; one spanning lines
-    is searched by its longest line, then confirmed in each file holding that line. The index keeps
-    those searches' lines, values among them, while it lives, as it keeps the files."""
-    keys = {value: max(value.split("\n"), key=len) for value in values}
+    which ``text_files`` leaves out. A value is searched by the start of its longest line
+    (``SEARCH_KEY_CHARS``). One that is its whole key is counted from its hits; any other is confirmed in
+    each file holding its key. The index keeps those searches' lines, values among them, while it lives,
+    as it keeps the files."""
+    keys = {value: max(value.split("\n"), key=len)[:SEARCH_KEY_CHARS] for value in values}
     hits = index.search_texts(dict.fromkeys(keys.values())) if keys else {}
     counts = {}
     for value, key in keys.items():

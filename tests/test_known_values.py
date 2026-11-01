@@ -21,7 +21,12 @@ from jev_navigator.directives.shown import LINES_CUT_MARK
 from jev_navigator.directives.trace import trace_workflow
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
-from jev_navigator.judgments.known_values import KNOWN_VALUE_MAX_FILES, KnownValuesMasker, repository_values
+from jev_navigator.judgments.known_values import (
+    KNOWN_VALUE_MAX_FILES,
+    SEARCH_KEY_CHARS,
+    KnownValuesMasker,
+    repository_values,
+)
 from jev_navigator.judgments.secrets import DEFAULT_MASKER, SecretMasker, mask_request
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
@@ -243,6 +248,27 @@ def test_a_file_holding_only_one_line_of_a_value_spanning_lines_does_not_hold_it
 
     # Assert
     assert [value for value in values if "\n" in value]
+
+
+def test_a_long_value_is_searched_by_its_start_and_held_only_where_it_stands_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: the key stands whole in as many files as a known value may, and only its start in more
+    long_line = "".join(chr(ord("A") + (column * 7) % 26) for column in range(SEARCH_KEY_CHARS * 4))
+    key = "-----BEGIN RSA " + "PRIVATE KEY-----\n" + long_line + "\n-----END RSA " + "PRIVATE KEY-----"
+    keys = {f"keys/key_{n}.py": f'KEY = """\n{key}\n"""\n' for n in range(KNOWN_VALUE_MAX_FILES)}
+    starts = {f"docs/start_{n}.txt": f"{long_line[: SEARCH_KEY_CHARS + 10]}\n" for n in range(3)}
+    index = repository(tmp_path, {**keys, **starts})
+    asked: list[str] = []
+    search_texts = index.search_texts
+    monkeypatch.setattr(index, "search_texts", lambda texts: (asked.extend(texts), search_texts(texts))[1])
+
+    # Act
+    values = repository_values(index)
+
+    # Assert
+    assert key in values
+    assert asked and max(map(len, asked)) <= SEARCH_KEY_CHARS
 
 
 def pieces_of(value: str, text: str, at_least: int = 4) -> list[str]:
