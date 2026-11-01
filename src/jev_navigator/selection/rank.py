@@ -52,7 +52,7 @@ def rank_features(
     scent, filename = index.signals(text)
     walk = random_walk(graph, seeds)
     degrees = graph.degrees()
-    ids = index.documents
+    ids = index.ids
     normalized = [_normalize({id: values.get(id, 0) for id in ids}) for values in (scent, filename, walk)]
     hub = _normalize({id: math.log1p(degrees.get(id, 0)) for id in ids})
     return {
@@ -62,9 +62,9 @@ def rank_features(
             normalized[1][id],
             (priors or {}).get(id, 0),
             hub[id],
-            float(document.test),
+            float(test),
         )
-        for id, document in ids.items()
+        for id, test in zip(ids, index.tests, strict=True)
     }
 
 
