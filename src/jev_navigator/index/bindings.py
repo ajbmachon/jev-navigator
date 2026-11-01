@@ -26,7 +26,7 @@ class BindingStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Binding:
     status: str
     reason: str

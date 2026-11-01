@@ -566,6 +566,25 @@ def git(
     return run_command(["git", *arguments], cwd, stdin=stdin, timeout=timeout)
 
 
+def git_lines(arguments: Sequence[str], cwd: Path) -> Iterator[str]:
+    """Git's output one line at a time while it runs, so a long history is never held whole. Bytes that
+    are not UTF-8 read as replacement characters: no path the index lists can hold them, since listing
+    raises on them. stderr goes to a file, so a full stderr pipe cannot stall git."""
+    with tempfile.TemporaryFile() as errors:
+        with memory_limit.started(
+            ["git", *arguments],
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=errors,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ) as process:
+            yield from process.stdout
+        if process.returncode:
+            raise _tool_failed("git", process.returncode, errors)
+
+
 def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) -> None:
     """Writes each blob, keyed by its path, into ``destination``, all read with one
     ``git cat-file --batch``. Blobs are asked for by object id, so any byte in a path is safe. A path

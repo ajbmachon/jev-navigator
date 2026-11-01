@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from .bindings import Binding
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True, order=True, slots=True)
 class Span:
     file: str
     start: int

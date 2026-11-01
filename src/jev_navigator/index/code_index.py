@@ -147,6 +147,8 @@ class CodeIndex:
         self._file_order: dict[str, int] = {}
         self._reached: set[str] = set()
         self._incomplete_in_table: frozenset[str] = frozenset()
+        self._co_changes: dict[str, list[tuple[str, ...]]] | None = None
+        self._co_change_lock = threading.Lock()
 
     @classmethod
     def from_git(
@@ -575,7 +577,7 @@ class CodeIndex:
         declaration a type can name, an export any definition, and a call or any other use (an
         argument, receiver, condition, decorator...) a function, class or declaration a value can
         name, such as a module constant holding a callable."""
-        return self._compute_binding(file, line, name, receiver, role)
+        return self._kept_binding(file, line, name, receiver, role)
 
     def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
         matches = sorted(set(matches))
@@ -592,9 +594,16 @@ class CodeIndex:
         )
 
     @memoized
-    def _compute_binding(
+    def _kept_binding(
         self, file: str, line: int, name: str, receiver: str | None, role: str | None
     ) -> Binding:
+        return self.unkept_binding(file, line, name, receiver, role)
+
+    def unkept_binding(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None = None
+    ) -> Binding:
+        """``binding_of`` that keeps no answer, for a caller that visits each use once, as a graph over
+        every call and reference of a repository does."""
         if self.binding_resolver is not None:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
@@ -808,22 +817,22 @@ class CodeIndex:
     def _readable_places(self, name: str, kinds: Sequence[str]) -> Iterator[tuple[str, NameRow]]:
         """The places of ``name`` of ``kinds`` in files still readable: a file that disappeared or
         changed since the scope was covered answers nothing."""
-        for file, row in self._places_named(name):
-            if row.kind in kinds and file not in self._unavailable:
+        for file, row in self._places_named(name, kinds):
+            if file not in self._unavailable:
                 yield file, row
 
-    @memoized
-    def _places_named(self, name: str) -> tuple[tuple[str, NameRow], ...]:
-        """Every place in scope ``name`` sits, as (file, row), in file order and then in the order of
-        the file's facts: definitions first, symbols before declarations."""
+    def _places_named(self, name: str, kinds: Sequence[str]) -> list[tuple[str, NameRow]]:
+        """Every place in scope ``name`` sits as one of ``kinds``, as (file, row), in file order and then
+        in the order of the file's facts: definitions first, symbols before declarations. Only the
+        rows asked for are read, so looking up a definition loads none of its thousands of uses."""
         self._cover_scope()
         places = [
             (file, row)
-            for row in self._name_table.rows(name)
+            for row in self._name_table.rows(name, kinds)
             for file in self._files_by_blob.get(row.blob, ())
         ]
         self._reached.update(file for file, _ in places)
-        return tuple(sorted(places, key=self._place_order))
+        return sorted(places, key=self._place_order)
 
     def _place_order(self, place: tuple[str, NameRow]) -> tuple[int, int, int]:
         file, row = place
@@ -1349,19 +1358,23 @@ class CodeIndex:
         Counted per call and never kept: every file of a commit that touched 10,000 files would hold
         a list of 10,000 partners, and only the first few are ever read."""
         self._require_in_scope(file)
-        counts = Counter(chain.from_iterable(self._read_co_change_history().get(file, ())))
+        counts = Counter(chain.from_iterable(self._co_change_history().get(file, ())))
         del counts[file]
         return tuple(heapq.nsmallest(limit, counts.items(), key=lambda item: (-item[1], item[0])))
 
-    @memoized
-    def _read_co_change_history(self) -> dict[str, list[tuple[str, ...]]]:
+    def _co_change_history(self) -> dict[str, list[tuple[str, ...]]]:
         """Each scope file's newest ``CO_CHANGE_COMMITS`` commits, each as the scope files it changed
-        and shared by those files, from one read of the history for the life of the index. A shallow
-        clone's boundary commit is left out: it has no parent there, so git lists the whole tree as
-        changed in it, whatever it really changed."""
-        if not self.commit:
-            return {}
-        log = tools.git(
+        and shared by those files, from one read of the history for the life of the index, whichever
+        thread asks first. A shallow clone's boundary commit is left out: it has no parent there, so git
+        lists the whole tree as changed in it, whatever it really changed."""
+        with self._co_change_lock:
+            if self._co_changes is None:
+                self._co_changes = self._read_co_change_history() if self.commit else {}
+            return self._co_changes
+
+    def _read_co_change_history(self) -> dict[str, list[tuple[str, ...]]]:
+        boundary = tools.shallow_boundary(self.git_root)
+        log = tools.git_lines(
             [
                 "-c",
                 "core.quotePath=false",
@@ -1372,7 +1385,6 @@ class CodeIndex:
             ],
             self.git_root,
         )
-        boundary = tools.shallow_boundary(self.git_root)
         history: dict[str, list[tuple[str, ...]]] = {}
         for commit, paths in _commits(log):
             if commit in boundary:
@@ -1552,12 +1564,20 @@ def _in_file_order(spans_and_names: Iterable[tuple[Span, str]]) -> tuple[str, ..
     return tuple(dict.fromkeys(name for _, name in ordered))
 
 
-def _commits(log: str) -> Iterator[tuple[str, list[str]]]:
-    """Each commit of a log marked with ``_COMMIT_MARK`` and the commit id, with the paths it names."""
-    for block in log.split(_COMMIT_MARK):
-        commit, *lines = block.split("\n")
-        if commit:
-            yield commit, [line.strip() for line in lines if line.strip()]
+def _commits(log: Iterable[str]) -> Iterator[tuple[str, list[str]]]:
+    """Each commit of a log marked with ``_COMMIT_MARK`` and the commit id, with the paths it names,
+    one commit at a time."""
+    commit, paths = "", []
+    for line in log:
+        text = line.strip()
+        if text.startswith(_COMMIT_MARK):
+            if commit:
+                yield commit, paths
+            commit, paths = text.removeprefix(_COMMIT_MARK), []
+        elif text:
+            paths.append(text)
+    if commit:
+        yield commit, paths
 
 
 def _innermost_lines(lines: Iterable[tuple[int, int]]) -> tuple[int, int]:

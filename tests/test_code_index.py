@@ -1114,6 +1114,24 @@ def test_a_shallow_clones_boundary_commit_is_no_co_change(tmp_path: Path) -> Non
     assert full == (("b.py", 2), ("c.py", 1))
 
 
+def test_a_path_not_in_utf8_elsewhere_in_history_leaves_co_changes_readable(tmp_path: Path) -> None:
+    # Arrange
+    git(tmp_path, "init", "-q", "-b", "main")
+    write_files(tmp_path, {"a.py": "A = 1\n", "b.py": "B = 1\n"})
+    commit_all(tmp_path)
+    blob = git(tmp_path, "hash-object", "-w", "--stdin", stdin="old").strip()
+    git(tmp_path, "update-index", "--add", "--cacheinfo", f"100644,{blob},caf\udce9.txt")
+    git(tmp_path, "commit", "-qm", "a latin-1 name")
+    git(tmp_path, "rm", "-q", "--cached", "caf\udce9.txt")
+    git(tmp_path, "commit", "-qm", "gone")
+
+    # Act
+    co_changed = CodeIndex.from_git(tmp_path).co_changed_files("a.py")
+
+    # Assert
+    assert co_changed == (("b.py", 1),)
+
+
 def test_line_numbers_follow_newlines_only_like_the_parser(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "app.py").write_text('BANNER = "a\fb"\r\n\r\ndef second():\n    return 2\n')

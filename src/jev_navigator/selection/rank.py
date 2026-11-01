@@ -10,7 +10,7 @@ from .graph import CodeGraph, random_walk
 from .scent import ScentIndex
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RankFeatures:
     scent: float = 0.0
     walk: float = 0.0

@@ -9,6 +9,7 @@ import sys
 import tracemalloc
 import weakref
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -50,6 +51,7 @@ def callback_tree(root: Path, file_count: int) -> tuple[list[str], int]:
 
 _FACT_SCAN_MEMORY_PROBE = """import sys
 import tracemalloc
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from jev_navigator.index.scope_scan import Unparsed, scan_facts
 
@@ -242,6 +244,18 @@ def test_co_changed_files_reads_history_once_per_file(sample_index: CodeIndex, s
 
     # Assert
     assert narrower == first[:1]
+    assert spawned["git log"] == 1
+
+
+def test_threads_asking_for_co_changes_at_once_read_the_history_once(
+    sample_index: CodeIndex, spawned
+) -> None:
+    # Act
+    with ThreadPoolExecutor(8) as pool:
+        answers = set(pool.map(lambda _: sample_index.co_changed_files("app/orders.py"), range(8)))
+
+    # Assert
+    assert len(answers) == 1
     assert spawned["git log"] == 1
 
 

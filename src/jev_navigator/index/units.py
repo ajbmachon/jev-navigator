@@ -74,7 +74,7 @@ class Reading(StrEnum):
     MIXED = "mixed"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Piece:
     """Lines ``start`` to ``end`` of a unit too large for the box, numbered from 0 in line order.
     ``chars`` is its size as a request spells it; a piece over the box is too large to judge."""
@@ -87,7 +87,7 @@ class Piece:
     too_large_to_judge: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Unit:
     """``ranges`` holds one range for a function and every run of lines for top-level code.
     ``nested_in`` names the function unit whose text already holds this one's, if any."""
@@ -148,7 +148,7 @@ def list_units(
     return UnitReader(index, box_chars, listed_only=True, reading=reading).list_files(files)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Item:
     """One thing a request judges: a whole unit, or one piece of a unit larger than the box."""
 
