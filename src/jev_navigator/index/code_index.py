@@ -1366,7 +1366,9 @@ class CodeIndex:
         """Each scope file's newest ``CO_CHANGE_COMMITS`` commits, each as the scope files it changed
         and shared by those files, from one read of the history for the life of the index, whichever
         thread asks first. A shallow clone's boundary commit is left out: it has no parent there, so git
-        lists the whole tree as changed in it, whatever it really changed."""
+        lists the whole tree as changed in it, whatever it really changed. One read counts every commit
+        of the history, also a branch's commit whose change a merge dropped, which a ``git log`` of one
+        file would simplify away."""
         with self._co_change_lock:
             if self._co_changes is None:
                 self._co_changes = self._read_co_change_history() if self.commit else {}
@@ -1381,6 +1383,7 @@ class CodeIndex:
                 "log",
                 self.commit,
                 "--name-only",
+                "--relative",
                 f"--format=format:{_COMMIT_MARK}%H",
             ],
             self.git_root,
