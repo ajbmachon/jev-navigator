@@ -6,12 +6,15 @@ policy only; the index has no default refusal and never drops files from a reque
 
 from __future__ import annotations
 
+import heapq
 import re
+import sys
 import tempfile
 import threading
 import weakref
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
@@ -1342,35 +1345,44 @@ class CodeIndex:
         return {imported: tuple(paths) for imported, paths in importers.items()}
 
     def co_changed_files(self, file: str, limit: int = 5) -> tuple[CoChange, ...]:
-        """Scope files most often committed together with ``file``, with their shared-commit counts;
-        the history is read once per file for the life of the index."""
+        """Scope files most often committed together with ``file``, with their shared-commit counts.
+        Counted per call and never kept: every file of a commit that touched 10,000 files would hold
+        a list of 10,000 partners, and only the first few are ever read."""
         self._require_in_scope(file)
-        return self._read_co_changes(file)[:limit]
+        counts = Counter(chain.from_iterable(self._read_co_change_history().get(file, ())))
+        del counts[file]
+        return tuple(heapq.nsmallest(limit, counts.items(), key=lambda item: (-item[1], item[0])))
 
     @memoized
-    def _read_co_changes(self, file: str) -> tuple[CoChange, ...]:
+    def _read_co_change_history(self) -> dict[str, list[tuple[str, ...]]]:
+        """Each scope file's newest ``CO_CHANGE_COMMITS`` commits, each as the scope files it changed
+        and shared by those files, from one read of the history for the life of the index. A shallow
+        clone's boundary commit is left out: it has no parent there, so git lists the whole tree as
+        changed in it, whatever it really changed."""
         if not self.commit:
-            return ()
+            return {}
         log = tools.git(
             [
                 "-c",
                 "core.quotePath=false",
                 "log",
-                *([self.commit] if self.commit else []),
-                f"-n{CO_CHANGE_COMMITS}",
-                "--full-diff",
+                self.commit,
                 "--name-only",
-                f"--format=format:{_COMMIT_MARK}",
-                "--",
-                file,
+                f"--format=format:{_COMMIT_MARK}%H",
             ],
             self.git_root,
         )
-        counts = Counter(
-            path for commit in _commits(log) if file in commit for path in commit if path != file
-        )
-        in_scope = [(path, count) for path, count in counts.most_common() if path in self._scope]
-        return tuple(sorted(in_scope, key=lambda item: (-item[1], item[0])))
+        boundary = tools.shallow_boundary(self.git_root)
+        history: dict[str, list[tuple[str, ...]]] = {}
+        for commit, paths in _commits(log):
+            if commit in boundary:
+                continue
+            in_scope = tuple(sys.intern(path) for path in paths if path in self._scope)
+            for path in in_scope:
+                held = history.setdefault(path, [])
+                if len(held) < CO_CHANGE_COMMITS:
+                    held.append(in_scope)
+        return history
 
     def _revision_of(self, file: str) -> str:
         if not self.commit:
@@ -1540,9 +1552,12 @@ def _in_file_order(spans_and_names: Iterable[tuple[Span, str]]) -> tuple[str, ..
     return tuple(dict.fromkeys(name for _, name in ordered))
 
 
-def _commits(log: str) -> list[set[str]]:
-    blocks = log.split(_COMMIT_MARK)
-    return [{line.strip() for line in block.split("\n") if line.strip()} for block in blocks if block.strip()]
+def _commits(log: str) -> Iterator[tuple[str, list[str]]]:
+    """Each commit of a log marked with ``_COMMIT_MARK`` and the commit id, with the paths it names."""
+    for block in log.split(_COMMIT_MARK):
+        commit, *lines = block.split("\n")
+        if commit:
+            yield commit, [line.strip() for line in lines if line.strip()]
 
 
 def _innermost_lines(lines: Iterable[tuple[int, int]]) -> tuple[int, int]:

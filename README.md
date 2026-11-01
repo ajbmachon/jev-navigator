@@ -514,8 +514,8 @@ parser rules as current. A file that changes on disk after the index first read 
 reported as unavailable when the index reads it again, and its code still reads as the text the
 index first read, the text its SHA-256 names, never in its new form. The index keeps each file's
 first read compressed for the run, about 2 MB per 1,000 files of Heedvane's web app. Each call
-site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
-per argument for the life of the index. The index keeps the lines of a bounded number of recently
+site's binding is computed once, `search_text` runs its tool once per argument, and
+`co_changed_files` reads the history once, for the life of the index. The index keeps the lines of a bounded number of recently
 read files (`LINE_CACHE_FILES`). Every cache an index keeps lives in the index itself and none holds
 it back, so a dropped index, with its facts and first reads, is freed at once. There is no default file-count refusal or parser timeout, and no requested file is silently
 omitted.

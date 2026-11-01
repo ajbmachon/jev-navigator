@@ -542,6 +542,12 @@ def head_commit(cwd: Path) -> str:
     return run_command(["git", "rev-parse", "-q", "--verify", "HEAD"], cwd, no_match_exit=1).strip()
 
 
+def shallow_boundary(cwd: Path) -> frozenset[str]:
+    """The commits a shallow clone at ``cwd`` holds without their parents; none in a full clone."""
+    shallow = cwd / git(["rev-parse", "--git-path", "shallow"], cwd).strip()
+    return frozenset(shallow.read_text().split()) if shallow.is_file() else frozenset()
+
+
 def _text_hit(match: dict) -> TextHit:
     return TextHit(_decoded(match["path"]), match["line_number"], _decoded(match["lines"]).rstrip("\r\n"))
 

@@ -1093,6 +1093,27 @@ def test_co_changed_files_count_files_with_non_ascii_names(tmp_path: Path) -> No
     assert co_changed == (("app/maß.py", 1),)
 
 
+def test_a_shallow_clones_boundary_commit_is_no_co_change(tmp_path: Path) -> None:
+    # Arrange
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "-q", "-b", "main")
+    write_files(origin, {"a.py": "A = 1\n", "b.py": "B = 1\n", "c.py": "C = 1\n"})
+    commit_all(origin)
+    write_files(origin, {"a.py": "A = 2\n", "b.py": "B = 2\n"})
+    git(origin, "commit", "-qam", "a and b change together")
+    clone = tmp_path / "clone"
+    git(tmp_path, "clone", "-q", "--depth", "1", f"file://{origin}", str(clone))
+
+    # Act
+    shallow = CodeIndex.from_git(clone).co_changed_files("a.py")
+    full = CodeIndex.from_git(origin).co_changed_files("a.py")
+
+    # Assert
+    assert shallow == ()
+    assert full == (("b.py", 2), ("c.py", 1))
+
+
 def test_line_numbers_follow_newlines_only_like_the_parser(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "app.py").write_text('BANNER = "a\fb"\r\n\r\ndef second():\n    return 2\n')
