@@ -1395,3 +1395,14 @@ def test_a_text_search_reads_a_file_as_the_index_first_read_it_after_it_grew(tmp
     # Assert
     assert index.lines("app.py") == first
     assert hits == {"sandbox": ()}
+
+
+def test_a_path_list_past_the_argument_limit_still_lists_every_file(tmp_path: Path) -> None:
+    write_files(tmp_path, {"kept.py": "kept = 1\n", "other.py": "other = 1\n"})
+    commit_all(tmp_path)
+    missing = [f"absent/{number:06d}/{'x' * 200}.py" for number in range(30_000)]
+
+    index = CodeIndex.from_git(tmp_path, ["kept.py", *missing])
+
+    assert index.files == ("kept.py",)
+    assert index.not_indexed_files[missing[-1]]

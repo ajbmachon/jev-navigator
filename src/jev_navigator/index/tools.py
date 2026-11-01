@@ -566,6 +566,14 @@ def git(
     return run_command(["git", *arguments], cwd, stdin=stdin, timeout=timeout)
 
 
+def git_over_paths(arguments: Sequence[str], paths: Sequence[str], cwd: Path) -> str:
+    """Git's NUL-separated output for ``paths``, however many commands the argument limit splits them
+    into; no paths ask about the whole tree."""
+    if not paths:
+        return git(arguments, cwd)
+    return "".join(git([*arguments, "--", *chunk], cwd) for chunk in file_chunks(paths, bytes_only=True))
+
+
 def git_lines(arguments: Sequence[str], cwd: Path) -> Iterator[str]:
     """Git's output one line at a time while it runs, so a long history is never held whole. Bytes that
     are not UTF-8 read as replacement characters: no path the index lists can hold them, since listing

@@ -167,7 +167,7 @@ class CodeIndex:
         the root that is not tracked, and a requested path with no file, is named in
         ``not_indexed_files``; ``from_directory`` indexes untracked files too."""
         root = Path(root)
-        blobs = _regular_blobs(tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root))
+        blobs = _regular_blobs(tools.git_over_paths(["ls-files", "--stage", "-z"], prefixes, root))
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
         return cls(
             root,
@@ -241,7 +241,7 @@ class CodeIndex:
         cannot be built."""
         repository = Path(repository)
         sha = tools.git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repository).strip()
-        blobs = _regular_blobs(tools.git(["ls-tree", "-r", "-z", sha, "--", *prefixes], repository))
+        blobs = _regular_blobs(tools.git_over_paths(["ls-tree", "-r", "-z", sha], prefixes, repository))
         listed = list(blobs)
         if max_files is not None and len(listed) > max_files:
             raise ScopeTooWideError(
@@ -1529,14 +1529,14 @@ def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, lis
     if not tools.inside_git_worktree(root):
         return "", [], {}
     commit = tools.head_commit(root)
-    staged = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
+    staged = tools.git_over_paths(["ls-files", "--stage", "-z"], prefixes, root)
     return commit, _changed_under(root, prefixes), _regular_blobs(staged)
 
 
 def _changed_under(root: Path, prefixes: Sequence[str]) -> list[str]:
     """The changed and untracked paths under ``root``, relative to it. git status names paths from the
     top of the repository, which is not ``root`` for a folder inside it."""
-    status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
+    status = tools.git_over_paths(["status", "--porcelain", "-z", "--untracked-files=all"], prefixes, root)
     prefix = tools.git(["rev-parse", "--show-prefix"], root).rstrip("\n")
     return [path.removeprefix(prefix) for path in _changed_paths(status) if path.startswith(prefix)]
 

@@ -63,9 +63,11 @@ def _plain_folder_files(cwd: Path, prefixes: Sequence[str]) -> Listing:
 def _symbolic_links(cwd: Path, prefixes: Sequence[str]) -> list[str]:
     """ripgrep lists no symbolic link, so a plain folder's links come from a walk that never follows
     one: about 0.3 seconds over 105,000 files."""
-    starts = prefixes or (".",)
-    command = ["find", *starts, "-name", ".git", "-prune", "-o", "-type", "l", "-print0"]
-    return _entries(tools.run_command(command, cwd))
+    links: list[str] = []
+    for starts in tools.file_chunks(prefixes or (".",), bytes_only=True):
+        command = ["find", *starts, "-name", ".git", "-prune", "-o", "-type", "l", "-print0"]
+        links += _entries(tools.run_command(command, cwd))
+    return links
 
 
 def _inside_any(path: str, folders: Iterable[str]) -> bool:
@@ -81,11 +83,15 @@ def _ignored_by_git(cwd: Path, prefixes: Sequence[str], kept: Iterable[str]) -> 
 
 
 def _git_entries(cwd: Path, arguments: Sequence[str], prefixes: Sequence[str]) -> list[str]:
-    return _entries(tools.git([*arguments, "--", *prefixes], cwd))
+    return _entries(tools.git_over_paths(arguments, prefixes, cwd))
 
 
 def _ripgrep_entries(cwd: Path, prefixes: Sequence[str], *options: str) -> list[str]:
-    return _entries(tools.run_command([*tools.RIPGREP_SAFE, *_RIPGREP_FILES, *options, *prefixes], cwd))
+    command = [*tools.RIPGREP_SAFE, *_RIPGREP_FILES, *options]
+    if not prefixes:
+        return _entries(tools.run_command(command, cwd))
+    return [entry for chunk in tools.file_chunks(prefixes, bytes_only=True)
+            for entry in _entries(tools.run_command([*command, *chunk], cwd))]
 
 
 def _entries(output: str) -> list[str]:
