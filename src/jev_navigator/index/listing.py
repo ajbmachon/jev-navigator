@@ -90,8 +90,11 @@ def _ripgrep_entries(cwd: Path, prefixes: Sequence[str], *options: str) -> list[
     command = [*tools.RIPGREP_SAFE, *_RIPGREP_FILES, *options]
     if not prefixes:
         return _entries(tools.run_command(command, cwd))
-    return [entry for chunk in tools.file_chunks(prefixes, bytes_only=True)
-            for entry in _entries(tools.run_command([*command, *chunk], cwd))]
+    return [
+        entry
+        for chunk in tools.file_chunks(prefixes, bytes_only=True)
+        for entry in _entries(tools.run_command([*command, *chunk], cwd))
+    ]
 
 
 def _entries(output: str) -> list[str]:
