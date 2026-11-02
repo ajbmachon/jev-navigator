@@ -1093,6 +1093,45 @@ def test_co_changed_files_count_files_with_non_ascii_names(tmp_path: Path) -> No
     assert co_changed == (("app/maß.py", 1),)
 
 
+def test_a_shallow_clones_boundary_commit_is_no_co_change(tmp_path: Path) -> None:
+    # Arrange
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "-q", "-b", "main")
+    write_files(origin, {"a.py": "A = 1\n", "b.py": "B = 1\n", "c.py": "C = 1\n"})
+    commit_all(origin)
+    write_files(origin, {"a.py": "A = 2\n", "b.py": "B = 2\n"})
+    git(origin, "commit", "-qam", "a and b change together")
+    clone = tmp_path / "clone"
+    git(tmp_path, "clone", "-q", "--depth", "1", f"file://{origin}", str(clone))
+
+    # Act
+    shallow = CodeIndex.from_git(clone).co_changed_files("a.py")
+    full = CodeIndex.from_git(origin).co_changed_files("a.py")
+
+    # Assert
+    assert shallow == ()
+    assert full == (("b.py", 2), ("c.py", 1))
+
+
+def test_a_path_not_in_utf8_elsewhere_in_history_leaves_co_changes_readable(tmp_path: Path) -> None:
+    # Arrange
+    git(tmp_path, "init", "-q", "-b", "main")
+    write_files(tmp_path, {"a.py": "A = 1\n", "b.py": "B = 1\n"})
+    commit_all(tmp_path)
+    blob = git(tmp_path, "hash-object", "-w", "--stdin", stdin="old").strip()
+    git(tmp_path, "update-index", "--add", "--cacheinfo", f"100644,{blob},caf\udce9.txt")
+    git(tmp_path, "commit", "-qm", "a latin-1 name")
+    git(tmp_path, "rm", "-q", "--cached", "caf\udce9.txt")
+    git(tmp_path, "commit", "-qm", "gone")
+
+    # Act
+    co_changed = CodeIndex.from_git(tmp_path).co_changed_files("a.py")
+
+    # Assert
+    assert co_changed == (("b.py", 1),)
+
+
 def test_line_numbers_follow_newlines_only_like_the_parser(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "app.py").write_text('BANNER = "a\fb"\r\n\r\ndef second():\n    return 2\n')
@@ -1356,3 +1395,27 @@ def test_a_text_search_reads_a_file_as_the_index_first_read_it_after_it_grew(tmp
     # Assert
     assert index.lines("app.py") == first
     assert hits == {"sandbox": ()}
+
+
+def test_a_path_list_past_the_argument_limit_still_lists_every_file(tmp_path: Path) -> None:
+    write_files(tmp_path, {"kept.py": "kept = 1\n", "other.py": "other = 1\n"})
+    commit_all(tmp_path)
+    missing = [f"absent/{number:06d}/{'x' * 200}.py" for number in range(30_000)]
+
+    index = CodeIndex.from_git(tmp_path, ["kept.py", *missing])
+
+    assert index.files == ("kept.py",)
+    assert index.not_indexed_files[missing[-1]]
+
+
+def test_a_commit_outside_the_index_folder_is_no_co_change_of_a_file_named_alike(tmp_path: Path) -> None:
+    write_files(tmp_path, {name: "one\n" for name in ("README.md", "package.json")})
+    write_files(tmp_path, {f"pkg/{name}": "one\n" for name in ("README.md", "package.json")})
+    commit_all(tmp_path)
+    write_files(tmp_path, {name: "two\n" for name in ("README.md", "package.json")})
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "outside the folder")
+
+    index = CodeIndex.from_git(tmp_path / "pkg")
+
+    assert index.co_changed_files("package.json") == (("README.md", 1),)

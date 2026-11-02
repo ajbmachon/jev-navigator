@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from ..index.units import Unit
 from ..mentions import paths_in
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class GraphEdge:
     source: str
     target: str
@@ -135,7 +136,7 @@ def _bound_edges(index: CodeIndex, graph: CodeGraph, path: str, by_file: Mapping
             if source is None:
                 continue
             role = getattr(use, "role", None)
-            binding = index.binding_of(path, use.line, use.name, use.receiver, role)
+            binding = index.unkept_binding(path, use.line, use.name, use.receiver, role)
             if not binding.proven or binding.target is None:
                 graph.unresolved[kind] += 1
                 continue
@@ -150,4 +151,4 @@ def _holding(units: Sequence[Unit], line: int) -> Unit | None:
 
 
 def _file_node(path: str) -> str:
-    return "file:" + path
+    return sys.intern("file:" + path)

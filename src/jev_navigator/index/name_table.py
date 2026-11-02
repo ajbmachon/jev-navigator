@@ -21,7 +21,7 @@ import logging
 import sqlite3
 import threading
 import weakref
-from collections.abc import Collection, Iterable, Iterator, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache
 from itertools import islice
@@ -43,7 +43,7 @@ _QUERY_CHUNK = 500
 ROWS_PER_TRANSACTION = 10_000
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FileEntry:
     """What the table knows about one file content beyond its names: whether the parser could only
     partly read it, and the lines its ERROR nodes span."""
@@ -52,7 +52,7 @@ class FileEntry:
     unparsed_lines: tuple[tuple[int, int], ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NameRow:
     """One place a name sits in one file content. ``position`` is the place's index among the file's
     facts of its kind, so rows come back in the facts' order."""
@@ -157,11 +157,16 @@ class NameTable:
                 if self._add_entry(blob, facts):
                     self._db.executemany("insert into names values (?, ?, ?, ?, ?, ?, ?, ?)", rows)
 
-    def rows(self, name: str) -> tuple[NameRow, ...]:
+    def rows(
+        self, name: str, kinds: Sequence[str] = (*DEFINITION_KINDS, CALL, REFERENCE)
+    ) -> tuple[NameRow, ...]:
+        """The rows of ``name`` of ``kinds``, every kind unless a caller narrows them."""
+        marks = ", ".join("?" * len(kinds))
         with self._lock:
             found = self._db.execute(
-                "select blob, kind, position, start, end, role, receiver from names where name = ?",
-                (name,),
+                "select blob, kind, position, start, end, role, receiver from names"
+                f" where name = ? and kind in ({marks})",
+                (name, *kinds),
             ).fetchall()
         return tuple(NameRow(*row) for row in found)
 

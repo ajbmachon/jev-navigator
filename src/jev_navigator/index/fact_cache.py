@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import zlib
 from contextlib import suppress
@@ -28,6 +29,7 @@ from .scope_scan import (
     ObjectMember,
     ReferenceMatch,
     fact_rules,
+    shared_text,
 )
 from .spans import Span
 from .tools import ast_grep_version
@@ -164,7 +166,7 @@ def _match_reader_source() -> str:
 
 
 def _span(file: str, raw: dict) -> Span:
-    return Span(file, raw["start"], raw["end"], raw.get("name", ""))
+    return Span(file, raw["start"], raw["end"], sys.intern(raw.get("name", "")))
 
 
 def _encode(facts: FileFacts) -> dict:
@@ -239,10 +241,17 @@ def _decode(file: str, raw: dict) -> FileFacts:
             tuple((int(start), int(end), int(line)) for start, end, line in structure["decorated"]),
             tuple((int(start), int(end)) for start, end in structure["stubs"]),
         ),
-        tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
+        tuple(
+            CallMatch(file, call["line"], sys.intern(call["name"]), shared_text(call.get("receiver")))
+            for call in raw["calls"]
+        ),
         tuple(
             ReferenceMatch(
-                file, reference["line"], reference["role"], reference["name"], reference["receiver"]
+                file,
+                reference["line"],
+                sys.intern(reference["role"]),
+                sys.intern(reference["name"]),
+                shared_text(reference["receiver"]),
             )
             for reference in raw["references"]
         ),

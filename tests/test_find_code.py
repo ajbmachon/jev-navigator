@@ -201,11 +201,11 @@ def test_an_empty_search_counts_files_judged_apart_from_files_only_read_to_list_
     # Act
     result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
 
-    # Assert: files count as read only when a looked-up name occurs in them, never because the name
-    # table covered the scope
+    # Assert: files count as read only when the rows a lookup asked for are in them, never because the
+    # name table covered the scope
     assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert {visit.code.span.file for visit in result.starts} == {"app/orders.py"}
-    assert (result.files_judged, result.files_read_only, result.files_never_reached) == (1, 2, 4)
+    assert (result.files_judged, result.files_read_only, result.files_never_reached) == (1, 1, 5)
     assert result.code_files == 7
 
 

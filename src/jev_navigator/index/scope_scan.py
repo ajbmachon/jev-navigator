@@ -13,6 +13,7 @@ may hide.
 
 from __future__ import annotations
 
+import sys
 import zlib
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
@@ -141,7 +142,7 @@ class ConstantFunction(NamedTuple):
     span: Span
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FileStructure:
     """``module_symbols`` are the symbols their module names: one of their syntax nodes no function,
     class, namespace or object literal holds, and no property assignment names. Symbols sharing a
@@ -177,7 +178,12 @@ class FileStructure:
     stubs: tuple[tuple[int, int], ...] = ()
 
 
-@dataclass(frozen=True)
+def shared_text(text: str | None) -> str | None:
+    """One string for one text, however many places say it; a repository repeats few names many times."""
+    return None if text is None else sys.intern(text)
+
+
+@dataclass(frozen=True, slots=True)
 class CallMatch:
     file: str
     line: int
@@ -185,7 +191,7 @@ class CallMatch:
     receiver: str | None
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True, order=True, slots=True)
 class ReferenceMatch:
     """One per file, line, role and name. ``receiver`` is what a qualified argument such as
     ``self.handler`` is read from, None for a bare name."""
@@ -197,7 +203,7 @@ class ReferenceMatch:
     receiver: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FileFacts:
     structure: FileStructure
     calls: tuple[CallMatch, ...]
@@ -593,7 +599,7 @@ class _FileFound:
             # The syntax tree names the symbol, never a physical line: a method on a one-line class
             # shares the line `class Box` opens, and naming it from that line would collapse it into
             # the class's span.
-            span = Span(self.file, start, end, symbol_name(_captured_name(match)))
+            span = Span(self.file, start, end, sys.intern(symbol_name(_captured_name(match))))
             target.add(span)
             self.ranges.append((offsets["start"], offsets["end"], span))
 
@@ -601,13 +607,23 @@ class _FileFound:
         expression = match["metaVariables"]["single"]["CALLEE"]["text"]
         name = last_identifier(expression)
         if name:
-            call = CallMatch(match["file"], _line_of(match), name, receiver_of(expression))
+            call = CallMatch(
+                sys.intern(match["file"]),
+                _line_of(match),
+                sys.intern(name),
+                shared_text(receiver_of(expression)),
+            )
             self.calls.append((_outer_first(match), call))
 
     def _add_reference(self, match: dict) -> None:
         role, text = match["ruleId"], match["text"]
-        key = (match["file"], _line_of(match), role, _reference_name(role, text))
-        self.receivers.setdefault(key, set()).add(_reference_receiver(role, text))
+        key = (
+            sys.intern(match["file"]),
+            _line_of(match),
+            sys.intern(role),
+            sys.intern(_reference_name(role, text)),
+        )
+        self.receivers.setdefault(key, set()).add(shared_text(_reference_receiver(role, text)))
 
     def _add_export(self, match: dict) -> None:
         """The names the module exports from its own definitions: exported declarations' name

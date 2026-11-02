@@ -253,3 +253,15 @@ def test_a_change_outside_the_folder_never_labels_the_same_path_inside_it_a_work
 
     # Assert
     assert index.read_slice(index.find_definition("inside")[0]).commit == commit
+
+
+def test_a_chunk_of_a_long_path_list_that_lists_no_file_leaves_the_others_in_a_plain_folder(
+    tmp_path: Path,
+) -> None:
+    empty = "e" * 200
+    (tmp_path / empty).mkdir()
+    write_files(tmp_path, {"real/kept.py": "kept = 1\n"})
+
+    files = listing.working_files(tmp_path, [*[empty] * 1_000, "real"]).files
+
+    assert files == ("real/kept.py",)

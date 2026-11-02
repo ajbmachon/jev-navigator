@@ -5,13 +5,14 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections.abc import Iterable
 from dataclasses import dataclass
+from operator import itemgetter
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 if TYPE_CHECKING:
     from .bindings import Binding
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True, order=True, slots=True)
 class Span:
     file: str
     start: int
@@ -77,17 +78,31 @@ class Nesting(Generic[Held]):
     has no holder."""
 
     def __init__(self, spans: Iterable[Held]) -> None:
-        self._by_line: dict[int, list[Held]] = {}
-        for held in sorted(spans, key=_extent):
-            for line in range(held.start, held.end + 1):
-                self._by_line.setdefault(line, []).append(held)
+        # One entry per run of lines held by the same spans, not per line: a long function is one entry.
+        opening: dict[int, list[tuple[int, Held]]] = {}
+        closing: dict[int, set[int]] = {}
+        for entry in enumerate(sorted(spans, key=_extent)):
+            opening.setdefault(entry[1].start, []).append(entry)
+            closing.setdefault(entry[1].end + 1, set()).add(entry[0])
+        self._run_starts = sorted(opening.keys() | closing.keys())
+        self._runs: list[tuple[Held, ...]] = []
+        holding: list[tuple[int, Held]] = []
+        for line in self._run_starts:
+            closed = closing.get(line, ())
+            kept = [entry for entry in holding if entry[0] not in closed]
+            holding = sorted(kept + opening.get(line, []), key=itemgetter(0))
+            self._runs.append(tuple(held for _, held in holding))
+
+    def _holding(self, line: int) -> tuple[Held, ...]:
+        run = bisect_right(self._run_starts, line) - 1
+        return self._runs[run] if run >= 0 else ()
 
     def innermost(self, line: int) -> Held | None:
-        holding = self._by_line.get(line)
+        holding = self._holding(line)
         return holding[0] if holding else None
 
     def holder(self, held: Lines) -> Held | None:
-        holding = self._by_line.get(held.start, [])
+        holding = self._holding(held.start)
         larger = bisect_right(holding, _extent(held), key=_extent)
         return next((other for other in holding[larger:] if other.end >= held.end), None)
 

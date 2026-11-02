@@ -36,7 +36,7 @@ _HEADING_PATH = " > "
 Start = tuple[int, str]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TextBlock:
     """Lines ``start`` to ``end`` of a text file, named by its heading or key path."""
 

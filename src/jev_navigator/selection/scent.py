@@ -16,6 +16,7 @@ import math
 import re
 import threading
 import weakref
+from array import array
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -111,42 +112,52 @@ def uncommented_scent_document(
 
 
 class ScentIndex:
-    """An inverted index of compact counts. Query cost follows matched terms, not source bytes."""
+    """An inverted index of compact counts, built from ``documents`` one at a time and keeping none of
+    them. Each term's postings are one flat array of document numbers and counts. Query cost follows
+    matched terms, not source bytes."""
 
     def __init__(self, documents: Iterable[ScentDocument], *, k1: float = 1.2, b: float = 0.75):
         if k1 <= 0 or not 0 <= b <= 1:
             raise ValueError("BM25 needs k1 > 0 and b between zero and one")
-        self.documents = {document.id: document for document in documents}
         self.k1, self.b = k1, b
-        self.lengths = {id: sum(doc.terms.values()) for id, doc in self.documents.items()}
-        self.average_length = sum(self.lengths.values()) / max(1, len(self.lengths))
-        self.postings: dict[str, dict[str, int]] = {}
-        self.filenames: dict[str, dict[str, int]] = {}
-        for id, document in self.documents.items():
+        self.ids: list[str] = []
+        self.tests = bytearray()
+        self.lengths = array("I")
+        self.postings: dict[str, array[int]] = {}
+        self.filenames: dict[str, array[int]] = {}
+        for document in documents:
+            number = len(self.ids)
+            self.ids.append(document.id)
+            self.tests.append(document.test)
+            self.lengths.append(sum(document.terms.values()))
             for term, count in document.terms.items():
-                self.postings.setdefault(term, {})[id] = count
+                self.postings.setdefault(term, array("I")).extend((number, count))
             for term, count in document.filename_terms.items():
-                self.filenames.setdefault(term, {})[id] = count
+                self.filenames.setdefault(term, array("I")).extend((number, count))
+        self.average_length = sum(self.lengths) / max(1, len(self.lengths))
 
     def signals(self, text: str) -> tuple[dict[str, float], dict[str, float]]:
         """BM25 and IDF-weighted file-name matches. Absent matches have score zero."""
         scent: dict[str, float] = {}
         filename: dict[str, float] = {}
-        count = len(self.documents)
+        count = len(self.ids)
         for term in set(words(text)):
-            matches = self.postings.get(term, {})
-            idf = math.log1p((count - len(matches) + 0.5) / (len(matches) + 0.5))
-            for id, frequency in matches.items():
-                norm = 1 - self.b + self.b * self.lengths[id] / (self.average_length or 1)
+            matches = self.postings.get(term, ())
+            found = len(matches) // 2
+            idf = math.log1p((count - found + 0.5) / (found + 0.5))
+            for number, frequency in zip(matches[::2], matches[1::2], strict=True):
+                norm = 1 - self.b + self.b * self.lengths[number] / (self.average_length or 1)
                 score = idf * frequency * (self.k1 + 1) / (frequency + self.k1 * norm)
+                id = self.ids[number]
                 scent[id] = scent.get(id, 0) + score
-            for id in self.filenames.get(term, {}):
+            for number in self.filenames.get(term, ())[::2]:
+                id = self.ids[number]
                 filename[id] = filename.get(id, 0) + idf
         return scent, filename
 
     def scores(self, text: str, *, filename_weight: float = 2.0) -> dict[str, float]:
         scent, filename = self.signals(text)
-        return {id: scent.get(id, 0) + filename_weight * filename.get(id, 0) for id in self.documents}
+        return {id: scent.get(id, 0) + filename_weight * filename.get(id, 0) for id in self.ids}
 
 
 class ScentIndexTooLargeError(ValueError):

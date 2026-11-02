@@ -6,12 +6,15 @@ policy only; the index has no default refusal and never drops files from a reque
 
 from __future__ import annotations
 
+import heapq
 import re
+import sys
 import tempfile
 import threading
 import weakref
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
@@ -144,6 +147,8 @@ class CodeIndex:
         self._file_order: dict[str, int] = {}
         self._reached: set[str] = set()
         self._incomplete_in_table: frozenset[str] = frozenset()
+        self._co_changes: dict[str, list[tuple[str, ...]]] | None = None
+        self._co_change_lock = threading.Lock()
 
     @classmethod
     def from_git(
@@ -162,7 +167,7 @@ class CodeIndex:
         the root that is not tracked, and a requested path with no file, is named in
         ``not_indexed_files``; ``from_directory`` indexes untracked files too."""
         root = Path(root)
-        blobs = _regular_blobs(tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root))
+        blobs = _regular_blobs(tools.git_over_paths(["ls-files", "--stage", "-z"], prefixes, root))
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
         return cls(
             root,
@@ -236,7 +241,7 @@ class CodeIndex:
         cannot be built."""
         repository = Path(repository)
         sha = tools.git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repository).strip()
-        blobs = _regular_blobs(tools.git(["ls-tree", "-r", "-z", sha, "--", *prefixes], repository))
+        blobs = _regular_blobs(tools.git_over_paths(["ls-tree", "-r", "-z", sha], prefixes, repository))
         listed = list(blobs)
         if max_files is not None and len(listed) > max_files:
             raise ScopeTooWideError(
@@ -572,7 +577,7 @@ class CodeIndex:
         declaration a type can name, an export any definition, and a call or any other use (an
         argument, receiver, condition, decorator...) a function, class or declaration a value can
         name, such as a module constant holding a callable."""
-        return self._compute_binding(file, line, name, receiver, role)
+        return self._kept_binding(file, line, name, receiver, role)
 
     def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
         matches = sorted(set(matches))
@@ -589,9 +594,16 @@ class CodeIndex:
         )
 
     @memoized
-    def _compute_binding(
+    def _kept_binding(
         self, file: str, line: int, name: str, receiver: str | None, role: str | None
     ) -> Binding:
+        return self.unkept_binding(file, line, name, receiver, role)
+
+    def unkept_binding(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None = None
+    ) -> Binding:
+        """``binding_of`` that keeps no answer, for a caller that visits each use once, as a graph over
+        every call and reference of a repository does."""
         if self.binding_resolver is not None:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
@@ -805,22 +817,22 @@ class CodeIndex:
     def _readable_places(self, name: str, kinds: Sequence[str]) -> Iterator[tuple[str, NameRow]]:
         """The places of ``name`` of ``kinds`` in files still readable: a file that disappeared or
         changed since the scope was covered answers nothing."""
-        for file, row in self._places_named(name):
-            if row.kind in kinds and file not in self._unavailable:
+        for file, row in self._places_named(name, kinds):
+            if file not in self._unavailable:
                 yield file, row
 
-    @memoized
-    def _places_named(self, name: str) -> tuple[tuple[str, NameRow], ...]:
-        """Every place in scope ``name`` sits, as (file, row), in file order and then in the order of
-        the file's facts: definitions first, symbols before declarations."""
+    def _places_named(self, name: str, kinds: Sequence[str]) -> list[tuple[str, NameRow]]:
+        """Every place in scope ``name`` sits as one of ``kinds``, as (file, row), in file order and then
+        in the order of the file's facts: definitions first, symbols before declarations. Only the
+        rows asked for are read, so looking up a definition loads none of its thousands of uses."""
         self._cover_scope()
         places = [
             (file, row)
-            for row in self._name_table.rows(name)
+            for row in self._name_table.rows(name, kinds)
             for file in self._files_by_blob.get(row.blob, ())
         ]
         self._reached.update(file for file, _ in places)
-        return tuple(sorted(places, key=self._place_order))
+        return sorted(places, key=self._place_order)
 
     def _place_order(self, place: tuple[str, NameRow]) -> tuple[int, int, int]:
         file, row = place
@@ -1342,35 +1354,50 @@ class CodeIndex:
         return {imported: tuple(paths) for imported, paths in importers.items()}
 
     def co_changed_files(self, file: str, limit: int = 5) -> tuple[CoChange, ...]:
-        """Scope files most often committed together with ``file``, with their shared-commit counts;
-        the history is read once per file for the life of the index."""
+        """Scope files most often committed together with ``file``, with their shared-commit counts.
+        Counted per call and never kept: every file of a commit that touched 10,000 files would hold
+        a list of 10,000 partners, and only the first few are ever read."""
         self._require_in_scope(file)
-        return self._read_co_changes(file)[:limit]
+        counts = Counter(chain.from_iterable(self._co_change_history().get(file, ())))
+        del counts[file]
+        return tuple(heapq.nsmallest(limit, counts.items(), key=lambda item: (-item[1], item[0])))
 
-    @memoized
-    def _read_co_changes(self, file: str) -> tuple[CoChange, ...]:
-        if not self.commit:
-            return ()
-        log = tools.git(
+    def _co_change_history(self) -> dict[str, list[tuple[str, ...]]]:
+        """Each scope file's newest ``CO_CHANGE_COMMITS`` commits, each as the scope files it changed
+        and shared by those files, from one read of the history for the life of the index, whichever
+        thread asks first. A shallow clone's boundary commit is left out: it has no parent there, so git
+        lists the whole tree as changed in it, whatever it really changed. One read counts every commit
+        of the history, also a branch's commit whose change a merge dropped, which a ``git log`` of one
+        file would simplify away."""
+        with self._co_change_lock:
+            if self._co_changes is None:
+                self._co_changes = self._read_co_change_history() if self.commit else {}
+            return self._co_changes
+
+    def _read_co_change_history(self) -> dict[str, list[tuple[str, ...]]]:
+        boundary = tools.shallow_boundary(self.git_root)
+        log = tools.git_lines(
             [
                 "-c",
                 "core.quotePath=false",
                 "log",
-                *([self.commit] if self.commit else []),
-                f"-n{CO_CHANGE_COMMITS}",
-                "--full-diff",
+                self.commit,
                 "--name-only",
-                f"--format=format:{_COMMIT_MARK}",
-                "--",
-                file,
+                "--relative",
+                f"--format=format:{_COMMIT_MARK}%H",
             ],
             self.git_root,
         )
-        counts = Counter(
-            path for commit in _commits(log) if file in commit for path in commit if path != file
-        )
-        in_scope = [(path, count) for path, count in counts.most_common() if path in self._scope]
-        return tuple(sorted(in_scope, key=lambda item: (-item[1], item[0])))
+        history: dict[str, list[tuple[str, ...]]] = {}
+        for commit, paths in _commits(log):
+            if commit in boundary:
+                continue
+            in_scope = tuple(sys.intern(path) for path in paths if path in self._scope)
+            for path in in_scope:
+                held = history.setdefault(path, [])
+                if len(held) < CO_CHANGE_COMMITS:
+                    held.append(in_scope)
+        return history
 
     def _revision_of(self, file: str) -> str:
         if not self.commit:
@@ -1505,14 +1532,14 @@ def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, lis
     if not tools.inside_git_worktree(root):
         return "", [], {}
     commit = tools.head_commit(root)
-    staged = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
+    staged = tools.git_over_paths(["ls-files", "--stage", "-z"], prefixes, root)
     return commit, _changed_under(root, prefixes), _regular_blobs(staged)
 
 
 def _changed_under(root: Path, prefixes: Sequence[str]) -> list[str]:
     """The changed and untracked paths under ``root``, relative to it. git status names paths from the
     top of the repository, which is not ``root`` for a folder inside it."""
-    status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
+    status = tools.git_over_paths(["status", "--porcelain", "-z", "--untracked-files=all"], prefixes, root)
     prefix = tools.git(["rev-parse", "--show-prefix"], root).rstrip("\n")
     return [path.removeprefix(prefix) for path in _changed_paths(status) if path.startswith(prefix)]
 
@@ -1540,9 +1567,20 @@ def _in_file_order(spans_and_names: Iterable[tuple[Span, str]]) -> tuple[str, ..
     return tuple(dict.fromkeys(name for _, name in ordered))
 
 
-def _commits(log: str) -> list[set[str]]:
-    blocks = log.split(_COMMIT_MARK)
-    return [{line.strip() for line in block.split("\n") if line.strip()} for block in blocks if block.strip()]
+def _commits(log: Iterable[str]) -> Iterator[tuple[str, list[str]]]:
+    """Each commit of a log marked with ``_COMMIT_MARK`` and the commit id, with the paths it names,
+    one commit at a time."""
+    commit, paths = "", []
+    for line in log:
+        text = line.strip()
+        if text.startswith(_COMMIT_MARK):
+            if commit:
+                yield commit, paths
+            commit, paths = text.removeprefix(_COMMIT_MARK), []
+        elif text:
+            paths.append(text)
+    if commit:
+        yield commit, paths
 
 
 def _innermost_lines(lines: Iterable[tuple[int, int]]) -> tuple[int, int]:
