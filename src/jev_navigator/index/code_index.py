@@ -93,6 +93,7 @@ class UnsafePathError(ValueError):
     """A scope path is a symbolic link or resolves outside the index root, so reading it could leave
     the root."""
 
+
 # An index keeps the facts of the files it used last and reloads the others from the fact cache on
 # disk, so what it holds does not grow with its scope. It reads a long list of files in chunks of this
 # many, so one child never parses a whole scope at once.

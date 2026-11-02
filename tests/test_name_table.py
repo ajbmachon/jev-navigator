@@ -17,7 +17,7 @@ from git_repos import commit_files, git
 
 from jev_navigator.confirmation import day_of, today
 from jev_navigator.index import fact_cache, languages, name_table, scope_scan, tools
-from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.index.code_index import FACT_PARSE_FILES, CodeIndex
 
 REPOSITORY = {
     "app/rules.py": "LIMIT = 3\n\n\ndef check(order):\n    return len(order) <= LIMIT\n",
@@ -429,8 +429,9 @@ def test_processes_building_the_table_at_once_leave_it_whole(
 def test_a_cold_scope_writes_its_rows_in_a_few_transactions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Arrange: 450 file contents, each waiting for a disk sync when its transaction commits
+    # Arrange: file contents for two parse chunks, each waiting for a disk sync when its transaction commits
     files = {f"app/m{n}.py": f"def f{n}():\n    return {n}\n" for n in range(450)}
+    assert FACT_PARSE_FILES < 450 <= 2 * FACT_PARSE_FILES
     commit_files(tmp_path, files)
     commits: list[str] = []
     real_open = name_table.open_shared_database
@@ -449,7 +450,7 @@ def test_a_cold_scope_writes_its_rows_in_a_few_transactions(
 
     # Assert
     assert [[span.file for span in found] for found in definitions] == [["app/m0.py"], ["app/m449.py"]]
-    assert len(commits) == 1
+    assert len(commits) == 2
 
 
 def contents_with_calls(prefix: str, count: int, rows: int) -> dict[str, scope_scan.FileFacts]:
