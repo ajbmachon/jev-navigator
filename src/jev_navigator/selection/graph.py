@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import math
 import sys
+from array import array
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -24,11 +25,68 @@ class GraphEdge:
     weight: float = 1.0
 
 
+class _CompactNeighbours(Mapping[str, float]):
+    """One node's neighbours, in the order they were added."""
+
+    __slots__ = ("_names", "_targets", "_weights")
+
+    def __init__(self, names: Sequence[str], targets: array[int], weights: array[float]) -> None:
+        self._names, self._targets, self._weights = names, targets, weights
+
+    def __getitem__(self, name: str) -> float:
+        for target, weight in self.items():
+            if target == name:
+                return weight
+        raise KeyError(name)
+
+    def __iter__(self) -> Iterator[str]:
+        return map(self._names.__getitem__, self._targets)
+
+    def __len__(self) -> int:
+        return len(self._targets)
+
+    def items(self) -> Iterator[tuple[str, float]]:  # type: ignore[override]
+        return zip(self, self._weights, strict=True)
+
+    def values(self) -> array[float]:  # type: ignore[override]
+        return self._weights
+
+
+class _CompactAdjacency(Mapping[str, Mapping[str, float]]):
+    """A finished adjacency in flat arrays, in the order the plain one iterates, so a walk's sums come
+    out the same to the last bit. An array entry costs twelve bytes; a dict's nested entry costs well over
+    a hundred, plus its float."""
+
+    def __init__(self, adjacency: Mapping[str, Mapping[str, float]]) -> None:
+        self._names = list(adjacency)
+        self._numbers = {name: number for number, name in enumerate(self._names)}
+        self._starts, self._targets, self._weights = array("Q", [0]), array("I"), array("d")
+        for neighbours in adjacency.values():
+            self._targets.extend(map(self._numbers.__getitem__, neighbours))
+            self._weights.extend(neighbours.values())
+            self._starts.append(len(self._targets))
+
+    def __getitem__(self, name: str) -> _CompactNeighbours:
+        number = self._numbers[name]
+        start, end = self._starts[number], self._starts[number + 1]
+        return _CompactNeighbours(self._names, self._targets[start:end], self._weights[start:end])
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._numbers
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._names)
+
+    def __len__(self) -> int:
+        return len(self._names)
+
+
 class CodeGraph:
     def __init__(self, nodes: Iterable[str], edges: Iterable[GraphEdge] = ()):
-        self.adjacency: dict[str, dict[str, float]] = {node: {} for node in nodes}
+        self.adjacency: Mapping[str, Mapping[str, float]] = {node: {} for node in nodes}
         self.edge_counts: dict[str, int] = defaultdict(int)
         self.unresolved: dict[str, int] = defaultdict(int)
+        self._degrees: dict[str, float] | None = None
         for edge in edges:
             self.add(edge)
 
@@ -42,7 +100,15 @@ class CodeGraph:
             neighbours[target] = neighbours.get(target, 0) + edge.weight
         self.edge_counts[edge.kind] += 1
 
+    def compact(self) -> None:
+        """Hold a finished graph in far less memory, answering the same. No edge can be added after, so
+        its degrees stay as they are, and every walk reads the one copy."""
+        self._degrees = self.degrees()
+        self.adjacency = _CompactAdjacency(self.adjacency)
+
     def degrees(self) -> dict[str, float]:
+        if self._degrees is not None:
+            return self._degrees
         return {node: sum(neighbours.values()) for node, neighbours in self.adjacency.items()}
 
 
