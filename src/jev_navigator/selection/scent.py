@@ -192,6 +192,7 @@ class ScentIndex:
     def load(cls, path: Path) -> ScentIndex:
         """The index ``save`` wrote to ``path``, answering as the saved one did. Its documents are in
         memory; its postings stay in the file, which must outlive the index."""
+        path = path.resolve()
         index = cls.__new__(cls)
         with closing(sqlite3.connect(f"file:{quote(str(path))}?mode=ro&immutable=1", uri=True)) as database:
             index.k1, index.b = database.execute("SELECT k1, b FROM settings").fetchone()

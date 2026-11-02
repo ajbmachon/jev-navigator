@@ -2,6 +2,7 @@
 
 import pickle
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from git_repos import git, write_files
@@ -272,6 +273,17 @@ def test_saved_scent_index_answers_as_the_built_one(tmp_path):
         assert saved.scores(text) == index.scores(text)
 
 
+def test_saved_scent_index_named_relatively_keeps_reading_after_the_directory_changes(tmp_path, monkeypatch):
+    index = ScentIndex([scent_document("owner", "order_policy.py", "limit", "def limit(): return 10")])
+    index.save(tmp_path / "scent.sqlite")
+    monkeypatch.chdir(tmp_path)
+    saved = ScentIndex.load(Path("scent.sqlite"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert saved.signals("limit") == index.signals("limit")
+
+
 def test_compact_graph_answers_as_the_plain_one():
     edges = [
         GraphEdge("a", "b", "call"),
@@ -296,3 +308,5 @@ def test_compact_graph_answers_as_the_plain_one():
     assert pickle.loads(pickle.dumps(compact)).degrees() == plain.degrees()
     with pytest.raises(AttributeError):
         compact.add(GraphEdge("a", "alone", "call"))
+    with pytest.raises(TypeError):
+        compact.degrees()["a"] = 100

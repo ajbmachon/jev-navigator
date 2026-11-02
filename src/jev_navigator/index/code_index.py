@@ -451,9 +451,7 @@ class CodeIndex:
         self._reached.update(files)
         found = {}
         for file in files:
-            if file not in self._facts:
-                self._ensure_facts((file,))
-            facts = self._facts.get(file)
+            facts = self._loaded_facts(file)
             if facts is not None:
                 found[file] = facts
         return found
@@ -916,10 +914,16 @@ class CodeIndex:
 
     def _known_facts(self, file: str) -> FileFacts | None:
         """``file``'s facts if the index has read them, reloading them if they left memory."""
+        return self._loaded_facts(file) if file in self._facts_read else self._facts.get(file)
+
+    def _loaded_facts(self, file: str) -> FileFacts | None:
+        """``file``'s facts, reading them if they are not in memory. Reading and taking them hold the facts
+        lock, the only place facts are added, so another thread's reads cannot evict them in between."""
         facts = self._facts.get(file)
-        if facts is None and file in self._facts_read:
-            self._ensure_facts((file,))
-            facts = self._facts.get(file)
+        if facts is None:
+            with self._facts_lock:
+                self._ensure_facts((file,))
+                facts = self._facts.get(file)
         return facts
 
     def _remember_facts(self, file: str, facts: FileFacts) -> None:
@@ -940,10 +944,7 @@ class CodeIndex:
         """The file counts as reached once its facts are known: a parse that fails, for any reason,
         reaches nothing."""
         self._require_in_scope(file)
-        facts = self._facts.get(file)
-        if facts is None:
-            self._ensure_facts((file,))
-            facts = self._facts.get(file, FileFacts(_NO_STRUCTURE, (), ()))
+        facts = self._loaded_facts(file) or FileFacts(_NO_STRUCTURE, (), ())
         self._reached.add(file)
         return facts
 
@@ -959,7 +960,7 @@ class CodeIndex:
         """Parses the files whose bytes are ``contents``; the caller holds the facts lock."""
         scanned = self._run_scan("facts", lambda: self._scan_available_facts(contents), len(contents))
         for file, facts in scanned.items():
-            if self._read_bytes(file) is None:
+            if self._read_bytes(file) is None and file not in self._facts_read:
                 continue
             if facts.refusal is not None:
                 self._refused[file] = facts.refusal
@@ -977,7 +978,8 @@ class CodeIndex:
             if language_of(file) is None or file in self._facts or file in self._refused:
                 continue
             memory_limit.check()
-            content = self._read_bytes(file)
+            # A file edited after its facts left memory keeps the answers of its first read.
+            content = self._sources.first_read(file) if file in self._facts_read else self._read_bytes(file)
             if content is None:
                 continue
             cached = self._fact_cache.load(file, content)

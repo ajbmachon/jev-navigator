@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from types import MappingProxyType
 
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
@@ -103,12 +104,12 @@ class CodeGraph:
     def compact(self) -> None:
         """Hold a finished graph in far less memory, answering the same. No edge can be added after, so
         its degrees stay as they are, and every walk reads the one copy."""
-        self._degrees = self.degrees()
+        self._degrees = dict(self.degrees())
         self.adjacency = _CompactAdjacency(self.adjacency)
 
-    def degrees(self) -> dict[str, float]:
+    def degrees(self) -> Mapping[str, float]:
         if self._degrees is not None:
-            return self._degrees
+            return MappingProxyType(self._degrees)
         return {node: sum(neighbours.values()) for node, neighbours in self.adjacency.items()}
 
 
