@@ -39,13 +39,15 @@ from ..judgments.questions import serialized_chars
 from .code_index import CodeIndex
 from .imports import import_lines
 from .languages import TEXT_LANGUAGE, is_schema_file, language_of, language_read
-from .memo import memoized
+from .memo import memoized_recent
 from .scope import is_test_file
 from .spans import Nesting, Span
 from .text_blocks import TextBlock, child_blocks
 
 PIECE_LINES = 60
 TOP_LEVEL_SYMBOL = "<top level>"
+# A file's units are built again from its facts and lines when they are asked for again.
+_FILE_UNITS_IN_MEMORY = 1024
 UNSUPPORTED_LANGUAGE = "language not supported"
 CODE_FILE = "code, which a text search leaves to find_all"
 OUTSIDE_SCOPE = "not in the index scope"
@@ -275,10 +277,10 @@ def _left_out(index: CodeIndex, files: Sequence[str], reading: Reading) -> dict[
     return code | index.text_files_left_out([file for file in files if file not in code])
 
 
-@memoized
+@memoized_recent(_FILE_UNITS_IN_MEMORY)
 def _file_units(index: CodeIndex, file: str, box_chars: int) -> _FileUnits:
-    """One file's units for one request room, built on first use and kept while ``index`` lives, so
-    every reader, listing and resolution on one index shares them."""
+    """One file's units for one request room, built on first use and kept while it is among the files
+    used last, so every reader, listing and resolution near each other share them."""
     if is_schema_file(file):
         return _SchemaFile(index, file, box_chars)
     if language_of(file):

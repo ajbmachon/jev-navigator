@@ -12,8 +12,9 @@ import sys
 import tempfile
 import threading
 import weakref
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import suppress
 from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
@@ -41,7 +42,7 @@ from .imports import (
     without_comments,
 )
 from .languages import export_words, is_schema_file, language_of
-from .memo import memoized
+from .memo import memoized, memoized_recent
 from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
 from .prisma_schema import SchemaBlock, schema_blocks
@@ -92,6 +93,32 @@ class UnsafePathError(ValueError):
     """A scope path is a symbolic link or resolves outside the index root, so reading it could leave
     the root."""
 
+# An index keeps the facts of the files it used last and reloads the others from the fact cache on
+# disk, so what it holds does not grow with its scope. It reads a long list of files in chunks of this
+# many, so one child never parses a whole scope at once.
+FACT_FILES_IN_MEMORY = 1024
+FACT_PARSE_FILES = 256
+# What a name or a file's first-read bytes alone decide, built again when asked for again.
+_RECENT_ANSWERS = 4096
+
+
+class _RecentFacts(OrderedDict[str, FileFacts]):
+    """The facts of the files used last. Readers take no lock, so a file another thread just evicted
+    is simply not moved."""
+
+    def __setitem__(self, file: str, facts: FileFacts) -> None:
+        super().__setitem__(file, facts)
+        self.move_to_end(file)
+        while len(self) > FACT_FILES_IN_MEMORY:
+            self.popitem(last=False)
+
+    def get(self, file: str, default: FileFacts | None = None) -> FileFacts | None:
+        facts = super().get(file, default)
+        if facts is not default:
+            with suppress(KeyError):
+                self.move_to_end(file)
+        return facts
+
 
 class CodeIndex:
     def __init__(
@@ -133,7 +160,8 @@ class CodeIndex:
             self.root, self._unavailable, LINE_CACHE_FILES, _held_weakly(self._standing_first_read)
         )
         self._unparsed = Unparsed()
-        self._facts: dict[str, FileFacts] = {}
+        self._facts = _RecentFacts()
+        self._facts_read: set[str] = set()
         self._facts_lock = threading.RLock()
         self._fact_cache = FactCache(fact_cache_dir)
         self._listed_blobs = {
@@ -376,9 +404,10 @@ class CodeIndex:
         return Nesting(self.functions_in(file))
 
     def known_enclosing_symbol(self, file: str, line: int) -> Span | None:
-        """``enclosing_symbol`` from the facts already in memory, or None while there are none: it
-        never parses or loads a file, so a caller that only labels a place starts no work."""
-        facts = self._facts.get(file)
+        """``enclosing_symbol`` from the facts already known, or None while there are none: it never
+        parses a file or loads one it has not loaded, so a caller that only labels a place starts no
+        work."""
+        facts = self._known_facts(file)
         return None if facts is None else _innermost(facts.structure.functions, line)
 
     def functions_in(self, file: str) -> tuple[Span, ...]:
@@ -419,7 +448,14 @@ class CodeIndex:
             self._require_in_scope(file)
         self._ensure_facts(files)
         self._reached.update(files)
-        return {file: self._facts[file] for file in files if file in self._facts}
+        found = {}
+        for file in files:
+            if file not in self._facts:
+                self._ensure_facts((file,))
+            facts = self._facts.get(file)
+            if facts is not None:
+                found[file] = facts
+        return found
 
     def read_language(self, file: str) -> str | None:
         """The language ``file``'s facts were read as, so every later scan of the file reads it with
@@ -734,7 +770,7 @@ class CodeIndex:
             return None
         return own[0]
 
-    @memoized
+    @memoized_recent(_RECENT_ANSWERS)
     def _read_local_bindings(self, file: str) -> dict[str, tuple[LocalName, ...]]:
         bindings: dict[str, list[LocalName]] = {}
         for local in self._file_structure(file).local_names:
@@ -751,7 +787,7 @@ class CodeIndex:
         definition_files = (span.file for span in self.find_definition(name))
         self._ensure_facts(tuple(dict.fromkeys((*uses, *definition_files))))
 
-    @memoized
+    @memoized_recent(_RECENT_ANSWERS)
     def _nameable_definitions(self, name: str, role: str | None) -> tuple[tuple[Span, ...], tuple[Span, ...]]:
         """The definitions of ``name`` a use in ``role`` can name, and those of them their module's
         scope names. Neither depends on where the use sits, so every use of a name shares them."""
@@ -772,7 +808,7 @@ class CodeIndex:
         """The words on the lines of ``file`` that its ERROR nodes span; the whole file's words while
         its facts are still being recorded, or when the parser refused it."""
         lines = self._lines_of(file)
-        known = self._facts.get(file) or (self._entries or {}).get(file)
+        known = self._known_facts(file) or (self._entries or {}).get(file)
         stretches = known.unparsed_lines if known is not None else ((1, len(lines)),)
         text = "\n".join(line for start, end in stretches for line in lines[start - 1 : end])
         return frozenset(_WORD.findall(text))
@@ -783,7 +819,7 @@ class CodeIndex:
             return _NO_STRUCTURE
         return self._facts_in(file).structure
 
-    @memoized
+    @memoized_recent(_RECENT_ANSWERS)
     def _definitions_by_name(self, name: str) -> tuple[Span, ...]:
         definitions = {
             Span(file, row.start, row.end, name): None
@@ -877,10 +913,19 @@ class CodeIndex:
             self._blobs[file] = git_blob_id(content)
         return self._blobs[file]
 
+    def _known_facts(self, file: str) -> FileFacts | None:
+        """``file``'s facts if the index has read them, reloading them if they left memory."""
+        facts = self._facts.get(file)
+        if facts is None and file in self._facts_read:
+            self._ensure_facts((file,))
+            facts = self._facts.get(file)
+        return facts
+
     def _remember_facts(self, file: str, facts: FileFacts) -> None:
         """Keeps ``file``'s facts in memory and queues its rows for the name table. A file the parse
         guard refused never gets here, so it has no rows."""
         self._facts[file] = facts
+        self._facts_read.add(file)
         blob = self._blob_of(file)
         if blob is not None:
             self._unwritten[blob] = facts
@@ -903,10 +948,11 @@ class CodeIndex:
 
     def _ensure_facts(self, files: Sequence[str]) -> None:
         with self._facts_lock:
-            contents = self._load_cached_facts(files)
-            if contents:
-                self._parse(contents)
-            self._write_names()
+            for start in range(0, len(files), FACT_PARSE_FILES):
+                contents = self._load_cached_facts(files[start : start + FACT_PARSE_FILES])
+                if contents:
+                    self._parse(contents)
+                self._write_names()
 
     def _parse(self, contents: Mapping[str, bytes]) -> None:
         """Parses the files whose bytes are ``contents``; the caller holds the facts lock."""
@@ -962,7 +1008,7 @@ class CodeIndex:
                     raise
                 files = available
 
-    @memoized
+    @memoized_recent(_RECENT_ANSWERS)
     def _module_scope_spans(self, file: str) -> frozenset[Span]:
         """Symbols and declarations that ``file``'s module scope names; the scan decides it for
         symbols from the syntax tree."""
@@ -1151,7 +1197,7 @@ class CodeIndex:
         own_names = {name: frozenset((name,)) for name in (*facts.export_names, *facts.exported_values)}
         return own_names | {exported: frozenset(owns) for exported, owns in renamed.items()}
 
-    @memoized
+    @memoized_recent(_RECENT_ANSWERS)
     def _read_exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
         ``name`` from that exports it or may hide it (see ``_hides``), with the evidence for each."""
@@ -1212,7 +1258,7 @@ class CodeIndex:
         source, comments = self._source_and_comments(file)
         return reexported_names(source, file, comment_ranges=comments)
 
-    @memoized
+    @memoized_recent(_RECENT_ANSWERS)
     def _read_imported_names(self, file: str) -> dict[str, ImportedName]:
         source, comments = self._source_and_comments(file)
         return imported_names(source, file, comment_ranges=comments)
