@@ -960,7 +960,7 @@ class CodeIndex:
         """Parses the files whose bytes are ``contents``; the caller holds the facts lock."""
         scanned = self._run_scan("facts", lambda: self._scan_available_facts(contents), len(contents))
         for file, facts in scanned.items():
-            if self._read_bytes(file) is None and file not in self._facts_read:
+            if self._read_bytes(file) is None:
                 continue
             if facts.refusal is not None:
                 self._refused[file] = facts.refusal
@@ -984,7 +984,9 @@ class CodeIndex:
                 continue
             cached = self._fact_cache.load(file, content)
             if cached is None:
-                to_parse[file] = content
+                # A scan reads the disk, so a file edited since its first read cannot be parsed again.
+                if file not in self._facts_read or self._read_bytes(file) is not None:
+                    to_parse[file] = content
                 continue
             self._remember_facts(file, cached)
             if cached.incomplete:

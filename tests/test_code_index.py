@@ -1469,3 +1469,24 @@ def test_a_file_edited_after_its_facts_left_memory_keeps_the_answers_of_its_firs
     # Assert
     assert [span.name for span in first_answer] == ["original"]
     assert later_answer == first_answer
+
+
+def test_a_file_edited_after_its_facts_left_the_index_and_the_cache_is_not_parsed_as_its_first_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a read file, edited on disk, whose facts are neither in memory nor in the fact cache
+    monkeypatch.setattr(code_index_module, "FACT_FILES_IN_MEMORY", 1)
+    original = b"def original():\n    return 1\n"
+    commit_files(tmp_path, {"a.py": original.decode(), "b.py": "def other():\n    return 2\n"})
+    index = CodeIndex.from_git(tmp_path)
+    index.functions_in("a.py")
+    index.functions_in("b.py")
+    (tmp_path / "a.py").write_text("def edited():\n    return 3\n")
+    index._fact_cache._path("a.py", original).unlink()
+
+    # Act
+    answer = index.functions_in("a.py")
+
+    # Assert
+    assert answer == ()
+    assert index._fact_cache.load("a.py", original) is None
