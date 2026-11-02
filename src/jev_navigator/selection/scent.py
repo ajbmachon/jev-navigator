@@ -13,14 +13,18 @@ from __future__ import annotations
 
 import heapq
 import math
+import os
 import re
+import sqlite3
 import threading
 import weakref
 from array import array
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import closing
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 from ..index.code_index import CodeIndex
 from ..index.imports import without_comments
@@ -111,10 +115,32 @@ def uncommented_scent_document(
     )
 
 
+class _SavedPostings:
+    """One table of a saved index, read a term at a time, so its postings cost memory only while a query
+    holds the ones it matched. Each thread reads on its own connection."""
+
+    def __init__(self, path: Path, table: str, connections: threading.local) -> None:
+        self._path, self._connections = path, connections
+        self._query = f"SELECT numbers FROM {table} WHERE term = ?"
+
+    def get(self, term: str, default: tuple[()] = ()) -> array[int] | tuple[()]:
+        connection = getattr(self._connections, "connection", None)
+        if connection is None:
+            connection = self._connections.connection = sqlite3.connect(
+                f"file:{quote(str(self._path))}?mode=ro&immutable=1", uri=True
+            )
+        row = connection.execute(self._query, (term,)).fetchone()
+        if row is None:
+            return default
+        numbers = array("I")
+        numbers.frombytes(row[0])
+        return numbers
+
+
 class ScentIndex:
     """An inverted index of compact counts, built from ``documents`` one at a time and keeping none of
     them. Each term's postings are one flat array of document numbers and counts. Query cost follows
-    matched terms, not source bytes."""
+    matched terms, not source bytes. ``save`` and ``load`` keep the postings in a file."""
 
     def __init__(self, documents: Iterable[ScentDocument], *, k1: float = 1.2, b: float = 0.75):
         if k1 <= 0 or not 0 <= b <= 1:
@@ -123,8 +149,8 @@ class ScentIndex:
         self.ids: list[str] = []
         self.tests = bytearray()
         self.lengths = array("I")
-        self.postings: dict[str, array[int]] = {}
-        self.filenames: dict[str, array[int]] = {}
+        self.postings: dict[str, array[int]] | _SavedPostings = {}
+        self.filenames: dict[str, array[int]] | _SavedPostings = {}
         for document in documents:
             number = len(self.ids)
             self.ids.append(document.id)
@@ -135,6 +161,50 @@ class ScentIndex:
             for term, count in document.filename_terms.items():
                 self.filenames.setdefault(term, array("I")).extend((number, count))
         self.average_length = sum(self.lengths) / max(1, len(self.lengths))
+
+    def save(self, path: Path) -> None:
+        """Write this index to ``path``, which appears only once it is complete."""
+        partial = path.with_name(path.name + ".partial")
+        partial.unlink(missing_ok=True)
+        with closing(sqlite3.connect(partial)) as database, database:
+            database.execute("PRAGMA journal_mode = OFF")
+            database.execute("CREATE TABLE settings (k1 REAL, b REAL)")
+            database.execute("INSERT INTO settings VALUES (?, ?)", (self.k1, self.b))
+            database.execute(
+                "CREATE TABLE documents (number INTEGER PRIMARY KEY, id TEXT, test INTEGER, length INTEGER)"
+            )
+            database.executemany(
+                "INSERT INTO documents VALUES (?, ?, ?, ?)",
+                (
+                    (number, *row)
+                    for number, row in enumerate(zip(self.ids, self.tests, self.lengths, strict=True))
+                ),
+            )
+            for table, postings in (("postings", self.postings), ("filenames", self.filenames)):
+                database.execute(f"CREATE TABLE {table} (term TEXT PRIMARY KEY, numbers BLOB) WITHOUT ROWID")
+                database.executemany(
+                    f"INSERT INTO {table} VALUES (?, ?)",
+                    ((term, postings[term].tobytes()) for term in sorted(postings)),
+                )
+        os.replace(partial, path)
+
+    @classmethod
+    def load(cls, path: Path) -> ScentIndex:
+        """The index ``save`` wrote to ``path``, answering as the saved one did. Its documents are in
+        memory; its postings stay in the file, which must outlive the index."""
+        path = path.resolve()
+        index = cls.__new__(cls)
+        with closing(sqlite3.connect(f"file:{quote(str(path))}?mode=ro&immutable=1", uri=True)) as database:
+            index.k1, index.b = database.execute("SELECT k1, b FROM settings").fetchone()
+            rows = database.execute("SELECT id, test, length FROM documents ORDER BY number").fetchall()
+        index.ids = [row[0] for row in rows]
+        index.tests = bytearray(row[1] for row in rows)
+        index.lengths = array("I", (row[2] for row in rows))
+        index.average_length = sum(index.lengths) / max(1, len(index.lengths))
+        connections = threading.local()
+        index.postings = _SavedPostings(path, "postings", connections)
+        index.filenames = _SavedPostings(path, "filenames", connections)
+        return index
 
     def signals(self, text: str) -> tuple[dict[str, float], dict[str, float]]:
         """BM25 and IDF-weighted file-name matches. Absent matches have score zero."""

@@ -1,6 +1,8 @@
 """Selection's real contracts: visible summaries, bound graph links, ordering and oracle admission."""
 
+import pickle
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from git_repos import git, write_files
@@ -242,3 +244,69 @@ def test_template_scent_distinguishes_nested_strings_and_expression_comments(pat
     index = ScentIndex([scent_document("unit", path, "describe", source)])
     assert index.scores("billing policy")["unit"] > 0
     assert index.scores("hidden comment")["unit"] == 0
+
+
+def test_saved_scent_index_answers_as_the_built_one(tmp_path):
+    index = ScentIndex(
+        [
+            scent_document("owner", "order_policy.py", "limit", "def limit(): return 10", test=False),
+            scent_document("body", "other.py", "describe", 'def describe(): return "order"', test=True),
+            scent_document("empty", "empty.py", "", ""),
+        ],
+        k1=1.5,
+        b=0.5,
+    )
+    path = tmp_path / "scent file.sqlite"
+    index.save(path)
+    assert not list(tmp_path.glob("*.partial"))
+    saved = ScentIndex.load(path)
+    assert (saved.ids, saved.tests, saved.lengths, saved.average_length, saved.k1, saved.b) == (
+        index.ids,
+        index.tests,
+        index.lengths,
+        index.average_length,
+        index.k1,
+        index.b,
+    )
+    for text in ("order policy", "limit describe", "unmentionedToken", ""):
+        assert saved.signals(text) == index.signals(text)
+        assert saved.scores(text) == index.scores(text)
+
+
+def test_saved_scent_index_named_relatively_keeps_reading_after_the_directory_changes(tmp_path, monkeypatch):
+    index = ScentIndex([scent_document("owner", "order_policy.py", "limit", "def limit(): return 10")])
+    index.save(tmp_path / "scent.sqlite")
+    monkeypatch.chdir(tmp_path)
+    saved = ScentIndex.load(Path("scent.sqlite"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert saved.signals("limit") == index.signals("limit")
+
+
+def test_compact_graph_answers_as_the_plain_one():
+    edges = [
+        GraphEdge("a", "b", "call"),
+        GraphEdge("c", "a", "call", 2.5),
+        GraphEdge("b", "c", "reference"),
+        GraphEdge("a", "b", "reference", 0.5),
+        GraphEdge("a", "file:x", "same_file"),
+    ]
+    plain = CodeGraph(["a", "b", "c", "alone"], edges)
+    compact = CodeGraph(["a", "b", "c", "alone"], edges)
+    compact.compact()
+    assert list(compact.adjacency) == list(plain.adjacency)
+    for node, neighbours in plain.adjacency.items():
+        assert list(compact.adjacency[node].items()) == list(neighbours.items())
+        assert dict(compact.adjacency[node]) == neighbours
+    assert "file:x" in compact.adjacency and "missing" not in compact.adjacency
+    assert compact.adjacency["a"]["c"] == 2.5
+    assert "b" in compact.adjacency["a"] and "alone" not in compact.adjacency["a"]
+    assert compact.adjacency.get("missing", {}) == {}
+    assert compact.degrees() == plain.degrees()
+    assert random_walk(compact, {"a": 1}) == random_walk(plain, {"a": 1})
+    assert pickle.loads(pickle.dumps(compact)).degrees() == plain.degrees()
+    with pytest.raises(AttributeError):
+        compact.add(GraphEdge("a", "alone", "call"))
+    with pytest.raises(TypeError):
+        compact.degrees()["a"] = 100

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
+from threading import Thread
 
 import pytest
-from git_repos import commit_all, git, refuse_ownership, write_files
+from git_repos import commit_all, commit_files, git, refuse_ownership, write_files
 
 from jev_navigator.index import code_index as code_index_module
 from jev_navigator.index import tools
@@ -1419,3 +1421,72 @@ def test_a_commit_outside_the_index_folder_is_no_co_change_of_a_file_named_alike
     index = CodeIndex.from_git(tmp_path / "pkg")
 
     assert index.co_changed_files("package.json") == (("README.md", 1),)
+
+
+def test_a_file_keeps_its_facts_when_another_thread_reads_a_file_just_after_they_are_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: room for one file's facts, and a second thread reading another file the moment the first
+    # thread has read its file. It waits a moment for that thread, which the facts lock may hold back.
+    monkeypatch.setattr(code_index_module, "FACT_FILES_IN_MEMORY", 1)
+    commit_files(tmp_path, {"a.py": "def in_a():\n    return 1\n", "b.py": "def in_b():\n    return 2\n"})
+    index = CodeIndex.from_git(tmp_path)
+    read_facts = index._ensure_facts
+    other_reader = Thread(target=index.functions_in, args=("b.py",))
+
+    def read_facts_then_let_the_other_thread_read(files: Sequence[str]) -> None:
+        read_facts(files)
+        if tuple(files) == ("a.py",) and other_reader.ident is None:
+            other_reader.start()
+            other_reader.join(0.3)
+
+    monkeypatch.setattr(index, "_ensure_facts", read_facts_then_let_the_other_thread_read)
+
+    # Act
+    answer = index.functions_in("a.py")
+    other_reader.join()
+
+    # Assert
+    assert [span.name for span in answer] == ["in_a"]
+
+
+def test_a_file_edited_after_its_facts_left_memory_keeps_the_answers_of_its_first_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a read file, edited on disk, whose facts another file's read pushes out of memory
+    monkeypatch.setattr(code_index_module, "FACT_FILES_IN_MEMORY", 1)
+    commit_files(
+        tmp_path, {"a.py": "def original():\n    return 1\n", "b.py": "def other():\n    return 2\n"}
+    )
+    index = CodeIndex.from_git(tmp_path)
+    first_answer = index.functions_in("a.py")
+    (tmp_path / "a.py").write_text("def edited():\n    return 3\n")
+    index.functions_in("b.py")
+
+    # Act
+    later_answer = index.functions_in("a.py")
+
+    # Assert
+    assert [span.name for span in first_answer] == ["original"]
+    assert later_answer == first_answer
+
+
+def test_a_file_edited_after_its_facts_left_the_index_and_the_cache_is_not_parsed_as_its_first_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a read file, edited on disk, whose facts are neither in memory nor in the fact cache
+    monkeypatch.setattr(code_index_module, "FACT_FILES_IN_MEMORY", 1)
+    original = b"def original():\n    return 1\n"
+    commit_files(tmp_path, {"a.py": original.decode(), "b.py": "def other():\n    return 2\n"})
+    index = CodeIndex.from_git(tmp_path)
+    index.functions_in("a.py")
+    index.functions_in("b.py")
+    (tmp_path / "a.py").write_text("def edited():\n    return 3\n")
+    index._fact_cache._path("a.py", original).unlink()
+
+    # Act
+    answer = index.functions_in("a.py")
+
+    # Assert
+    assert answer == ()
+    assert index._fact_cache.load("a.py", original) is None

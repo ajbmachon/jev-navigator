@@ -486,7 +486,11 @@ and turns each match into its fact as ast-grep prints it, so memory holds the fa
 parser's output, and no command line outgrows the system's argument limit. Calls are ordered by
 where they start in the file, and of two calls starting at one place (`new Foo(a).bar()` and
 `new Foo(a)`) the outer comes first, so every run returns them in the same order; symbols spanning
-the same lines keep the order they start in.
+the same lines keep the order they start in. An index keeps the facts, units and name answers it used
+last and rebuilds the others from the fact cache and the name table when asked, so what it holds does
+not grow with its scope; it reads a long list of files a few hundred at a time for the same reason. A
+finished `CodeGraph` can `compact` into flat arrays, and a `ScentIndex` can `save` to a file and `load` with
+its postings left there, so a host that keeps a repository's ranking parts for long holds little of them.
 Exact-name lookups (definitions, callers, call counts and references) read the persistent name table
 in `$XDG_CACHE_HOME/jev-navigator/names`, which ties every name to the lines it sits on in each file
 content. A file's content is identified by its git blob id, taken from the Git listing for a clean
