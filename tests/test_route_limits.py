@@ -11,6 +11,7 @@ from conftest import BudgetedClient
 from git_repos import commit_files
 from system_one_stand_in import stand_in
 
+from jev_navigator.adapters.drex_wire import drex_wire
 from jev_navigator.adapters.routes import (
     DREX_CONCURRENCY,
     DREX_INPUT_LIMITS,
@@ -26,7 +27,7 @@ from jev_navigator.directives.places import place_for_line
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError, InputLimits
 from jev_navigator.judgments.judge import Judge
-from jev_navigator.judgments.questions import Check, Criterion
+from jev_navigator.judgments.questions import Check, Criterion, serialized_chars
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.thresholds import Thresholds
 
@@ -43,6 +44,13 @@ KEY = {
     "SYSTEM_ONE_DECIDER_API_KEY": "local-decider-key",
 }
 ONE_ROUND = SearchBudget(max_calls=4, beam_width=1, max_depth=1)
+QUOTING = Check(
+    name="sets_flag",
+    instructions="Does `{item}.code` set the flag `doc.sentence` names?",
+    yes=Criterion('It assigns "on", as in `flags["dark"] = "on"`.'),
+    no=Criterion('It only reads the flag, as in `if flags["dark"] == "on":`.'),
+)
+"""A check whose criteria quote code, so Drex's text form of them is longer than the request as built."""
 
 
 def _items(count: int, code_chars: int) -> list[dict]:
@@ -62,7 +70,7 @@ def test_a_judge_packs_batches_to_the_box_its_client_declares() -> None:
     assert sorted(len(state["items"]) for state, _ in client.requests) == [2, 2]
 
 
-def test_the_routed_client_declares_the_tightest_limits_of_its_routes() -> None:
+def test_the_routed_client_declares_the_tightest_limits_of_its_routes_measured_as_drex_receives() -> None:
     # Arrange
     pytest.importorskip("typesafe_sdk")
     environment = {**KEY, "SYSTEM_ONE_ROUTES": "drex,jev", "SYSTEM_ONE_DREX": "1", "SYSTEM_ONE_JEV": "1"}
@@ -74,8 +82,46 @@ def test_the_routed_client_declares_the_tightest_limits_of_its_routes() -> None:
     try:
         assert [route.client.input_limits for route in routed.routes] == [DREX_INPUT_LIMITS, JEV_INPUT_LIMITS]
         assert routed.input_limits == InputLimits(DREX_INPUT_LIMITS.box_chars, JEV_INPUT_LIMITS.request_chars)
+        assert [route.client.input_limits.wire for route in routed.routes] == [drex_wire, None]
+        assert routed.input_limits.wire is drex_wire
     finally:
         routed.close()
+
+
+def test_limits_with_a_wire_measure_the_request_as_the_server_receives_it() -> None:
+    # Arrange: a request that fills a box exactly as built
+    state, questions = SHARED, {"sets_flag": QUOTING.to_question()}
+    built = serialized_chars(state) + serialized_chars(questions["sets_flag"])
+    sent_state, sent_questions = drex_wire(state, questions)
+    sent = serialized_chars(sent_state) + serialized_chars(sent_questions["sets_flag"])
+
+    # Act and Assert: in Drex's form it no longer fits that box, and fits one as large as it is
+    assert sent > built
+    assert not InputLimits(built).exceeded_by(state, questions)
+    assert InputLimits(built, wire=drex_wire).exceeded_by(state, questions)
+    assert not InputLimits(sent, wire=drex_wire).exceeded_by(state, questions)
+
+
+def test_a_batch_that_overflows_only_in_drexs_form_is_split_before_sending() -> None:
+    # Arrange: the box two items fill exactly as built
+    items = _items(2, code_chars=200)
+    probe = BudgetedClient(JEV_INPUT_LIMITS.box_chars)
+    Judge(probe).check_each(QUOTING, items, SHARED)
+    ((state, questions),) = probe.requests
+    box = serialized_chars(state) + max(serialized_chars(question) for question in questions.values())
+    as_built, as_sent = BudgetedClient(JEV_INPUT_LIMITS.box_chars), BudgetedClient(JEV_INPUT_LIMITS.box_chars)
+    as_built.input_limits = InputLimits(box)
+    as_sent.input_limits = InputLimits(box, wire=drex_wire)
+
+    # Act
+    Judge(as_built).check_each(QUOTING, items, SHARED)
+    Judge(as_sent).check_each(QUOTING, items, SHARED)
+
+    # Assert: measured as built, both go in one request Drex would get too large; measured as sent,
+    # each goes alone, and every request sent fits the box in Drex's form
+    assert [len(sent["items"]) for sent, _ in as_built.requests] == [2]
+    assert sorted(len(sent["items"]) for sent, _ in as_sent.requests) == [1, 1]
+    assert not any(as_sent.input_limits.exceeded_by(sent, asked) for sent, asked in as_sent.requests)
 
 
 def test_a_custom_route_without_its_input_tokens_is_refused_naming_the_setting() -> None:
