@@ -19,7 +19,6 @@ from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
-from .. import memory_limit
 from . import listing, tools
 from .bindings import (
     Binding,
@@ -970,14 +969,13 @@ class CodeIndex:
 
     def _load_cached_facts(self, files: Sequence[str]) -> dict[str, bytes]:
         """Remembers persisted facts; returns the bytes of files still to parse. The host owns
-        loaded facts' memory; the shared JVN slot is reserved before loading them.
+        loaded facts' memory, so loading them holds no JVN memory slot.
 
         The caller holds the facts lock."""
         to_parse: dict[str, bytes] = {}
         for file in files:
             if language_of(file) is None or file in self._facts or file in self._refused:
                 continue
-            memory_limit.check()
             # A file edited after its facts left memory keeps the answers of its first read.
             content = self._sources.first_read(file) if file in self._facts_read else self._read_bytes(file)
             if content is None:

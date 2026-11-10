@@ -2,11 +2,12 @@
 
 Every process JVN starts is started through ``started``: the index's ast-grep, ripgrep and git, the
 git call that records a pack's source revision (``cli``), and a model step's command-line connector
-(``connectors``). The first started process takes one of the machine's memory slots, waiting up to
-``wait_seconds`` for room. The process keeps the slot until it exits, and the operating system releases
-the lock then, however the process ends, so no slot outlives its holder. The ceiling holds
-``ceiling_mb // allowance_mb`` slots, one ``flock``-ed file each, in a folder that no HOME setting
-moves.
+(``connectors``). A host holds one of the machine's memory slots only while a process it started runs
+or an ast-grep scan of it is open (``parsing``), waiting up to ``wait_seconds`` for room, and lets the
+slot go when the last of them ends, so an idle host holds none. A host that waits logs the holders
+once, and how long it waited once it has a slot. The operating system releases a lock when its holder
+ends, however it ends, so no slot outlives its holder. The ceiling holds ``ceiling_mb // allowance_mb``
+slots, one ``flock``-ed file each, in a folder that no HOME setting moves.
 
 While a started process runs, a watchdog thread measures the physical footprint of every process
 JVN started, every ``SAMPLE_SECONDS``. Over the allowance it kills those processes, and each affected
@@ -28,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import fcntl
+import logging
 import os
 import stat
 import subprocess
@@ -85,6 +87,8 @@ hands it to JVN's git. A model step's command-line connector passes the host's w
 itself, because the model CLI needs its credentials."""
 
 _MB = 2**20
+
+_logger = logging.getLogger(__name__)
 
 
 class MemoryLimitReachedError(RuntimeError):
@@ -170,17 +174,13 @@ def started(arguments: Sequence[str], **options) -> Iterator[subprocess.Popen]:
     return process_guard().started(arguments, **options)
 
 
-def check() -> None:
-    """``MemoryGuard.check`` of this process's guard."""
-    process_guard().check()
-
-
 @contextmanager
 def parsing() -> Iterator[None]:
     """This process's one parse at a time. ``parse_threads`` and ``single_parse_mb`` each spend the
     whole allowance on one ast-grep, so a scan in another thread waits for this one to finish instead
-    of both running and the allowance stopping every scan."""
-    with _ONE_PARSE:
+    of both running and the allowance stopping every scan. A scan starts ast-grep several times, so it
+    holds the process's slot from start to end and never waits for room between two of them."""
+    with _ONE_PARSE, process_guard()._holding_slot():
         yield
 
 
@@ -189,50 +189,71 @@ class MemoryGuard:
         self.limit = limit
         self.directory = directory
         self._lock = threading.Lock()
-        self._slot_lock = threading.Lock()
+        self._slot_lock = threading.Lock()  # one thread takes a slot at a time, holding this while it waits
+        self._users_lock = threading.Lock()  # guards _slot and _users, never held while waiting
         self._slot: _Slot | None = None
+        self._users = 0
         self._children: set[subprocess.Popen] = set()
         self._stopped: dict[subprocess.Popen, str] = {}
-
-    def check(self) -> None:
-        """Reserve this host's child-process allowance in the shared ceiling."""
-        self._hold_slot()
 
     @contextmanager
     def started(self, arguments: Sequence[str], **options) -> Iterator[subprocess.Popen]:
         """The process ``subprocess.Popen(arguments, **options)``, watched until the block ends. Without an
         ``env`` option it gets ``child_environment()``. On leaving the block the process has ended: it is
         killed if the block raised, and waited for otherwise. A process the watchdog stopped raises
-        ``MemoryLimitReachedError`` here, never its partial output."""
-        self.check()
-        process = subprocess.Popen(list(arguments), **{"env": child_environment(), **options})
-        done = self._watch(process)
-        try:
-            yield process
-        except BaseException:
-            process.kill()
-            raise
-        finally:
-            _close_streams(process)
-            process.wait()
-            reason = self._unwatch(process, done)
-            if reason is not None:
-                raise MemoryLimitReachedError(reason)
+        ``MemoryLimitReachedError`` here, never its partial output. The host holds its slot until the
+        process has ended."""
+        with self._holding_slot():
+            process = subprocess.Popen(list(arguments), **{"env": child_environment(), **options})
+            done = self._watch(process)
+            try:
+                yield process
+            except BaseException:
+                process.kill()
+                raise
+            finally:
+                _close_streams(process)
+                process.wait()
+                reason = self._unwatch(process, done)
+                if reason is not None:
+                    raise MemoryLimitReachedError(reason)
 
     @property
     def _allowance_bytes(self) -> int:
         return self.limit.allowance_mb * _MB
 
+    @contextmanager
+    def _holding_slot(self) -> Iterator[None]:
+        """This host's slot, held while any such block is open and let go when the last one ends."""
+        self._hold_slot()
+        try:
+            yield
+        finally:
+            self._let_go()
+
     def _hold_slot(self) -> None:
-        """Take a slot, replacing a deleted slot file. Waiting holds only the slot lock, so the
-        watchdog keeps watching running children."""
+        """Count one more user of the slot, taking one first when the host holds none or its slot file
+        was deleted. Waiting holds only the slot lock, so the watchdog keeps watching running children
+        and other users still let go."""
         with self._slot_lock:
-            if self._slot is not None and self._slot.still_ours():
-                return
-            if self._slot is not None:
+            with self._users_lock:
+                if self._slot is not None and self._slot.still_ours():
+                    self._users += 1
+                    return
+            slot = _take_slot(self.directory, self.limit)
+            with self._users_lock:
+                if self._slot is not None:
+                    self._slot.file.close()
+                self._slot = slot
+                self._users += 1
+
+    def _let_go(self) -> None:
+        """Count one user out; the last one closes the slot's file, which releases its lock."""
+        with self._users_lock:
+            self._users -= 1
+            if self._users == 0:
                 self._slot.file.close()
                 self._slot = None
-            self._slot = _take_slot(self.directory, self.limit)
 
     def _watch(self, process: subprocess.Popen) -> threading.Event:
         with self._lock:
@@ -293,10 +314,13 @@ class _Slot:
 
 
 def _take_slot(directory: Path, limit: MemoryLimit) -> _Slot:
-    """One of the ceiling's slots, locked for as long as this process lives, waiting up to the limit's
-    wait for one to free."""
+    """One of the ceiling's slots, locked until its file is closed or this process ends, waiting up to
+    the limit's wait for one to free. A wait is logged once, naming the holders, and once more with its
+    length when it ends in a slot."""
     _make_private(directory)
-    deadline = time.monotonic() + limit.wait_seconds
+    began = time.monotonic()
+    deadline = began + limit.wait_seconds
+    waited = False
     while True:
         holders = []
         for number in range(limit.slots):
@@ -306,11 +330,28 @@ def _take_slot(directory: Path, limit: MemoryLimit) -> _Slot:
                 slot.file.truncate(0)
                 slot.file.write(f"{os.getpid()}\n".encode())
                 slot.file.flush()
+                if waited:
+                    _logger.warning(
+                        "process %d took JVN memory slot %s after waiting %.1f s",
+                        os.getpid(),
+                        path,
+                        time.monotonic() - began,
+                    )
                 return slot
             holders.append(_holder(path))
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise MemoryLimitReachedError(_ceiling_full(directory, limit, holders))
+        if not waited:
+            waited = True
+            _logger.warning(
+                "JVN's shared memory ceiling of %s MB is full: %s in %s. Process %d waits up to %g s for one",
+                f"{limit.ceiling_mb:,}",
+                _held(limit, holders),
+                directory,
+                os.getpid(),
+                limit.wait_seconds,
+            )
         time.sleep(min(SLOT_POLL_SECONDS, remaining))
 
 
@@ -346,18 +387,20 @@ def _holder(path: Path) -> str:
         return ""
 
 
-def _ceiling_full(directory: Path, limit: MemoryLimit, holders: Sequence[str]) -> str:
+def _held(limit: MemoryLimit, holders: Sequence[str]) -> str:
     named = [holder for holder in holders if holder]
     if len(holders) == 1:
-        held = f"process {named[0] if named else 'unknown'} holds its one slot of {limit.allowance_mb:,} MB"
-    else:
-        held = (
-            f"processes {_listed(named) if named else 'unknown'} hold its {len(holders)} slots of "
-            f"{limit.allowance_mb:,} MB each"
-        )
+        return f"process {named[0] if named else 'unknown'} holds its one slot of {limit.allowance_mb:,} MB"
     return (
-        f"JVN's shared memory ceiling of {limit.ceiling_mb:,} MB is full: {held} in {directory}. "
-        f"Waited {limit.wait_seconds:g} s. Resume once one of them ends, or raise "
+        f"processes {_listed(named) if named else 'unknown'} hold its {len(holders)} slots of "
+        f"{limit.allowance_mb:,} MB each"
+    )
+
+
+def _ceiling_full(directory: Path, limit: MemoryLimit, holders: Sequence[str]) -> str:
+    return (
+        f"JVN's shared memory ceiling of {limit.ceiling_mb:,} MB is full: {_held(limit, holders)} "
+        f"in {directory}. Waited {limit.wait_seconds:g} s. Resume once one of them ends, or raise "
         f"{ENVIRONMENT_NAMES['ceiling_mb']}"
     )
 
