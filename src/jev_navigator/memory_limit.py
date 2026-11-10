@@ -213,7 +213,7 @@ class MemoryGuard:
                 raise
             finally:
                 _close_streams(process)
-                process.wait()
+                _wait_or_kill(process)
                 reason = self._unwatch(process, done)
                 if reason is not None:
                     raise MemoryLimitReachedError(reason)
@@ -409,6 +409,17 @@ def _listed(items: Sequence[str]) -> str:
     return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
+def _wait_or_kill(process: subprocess.Popen) -> None:
+    """Waits for the process to end. An interrupt during the wait kills and reaps it first, so it never
+    runs on after its slot is let go."""
+    try:
+        process.wait()
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+
+
 def _close_streams(process: subprocess.Popen) -> None:
     for stream in (process.stdin, process.stdout, process.stderr):
         if stream is not None:
@@ -476,3 +487,16 @@ else:
 _GUARDS: dict[tuple[MemoryLimit, Path], MemoryGuard] = {}
 _GUARDS_LOCK = threading.Lock()
 _ONE_PARSE = threading.Lock()
+
+
+def _forget_slots_in_forked_child() -> None:
+    """A forked child shares its parent's slot locks through the files it inherited, and would keep a slot
+    locked after its parent lets it go. It closes its copies, never unlocking them, which would free the
+    parent's slot, and starts with no guard of its own."""
+    for guard in _GUARDS.values():
+        if guard._slot is not None:
+            guard._slot.file.close()
+    _GUARDS.clear()
+
+
+os.register_at_fork(after_in_child=_forget_slots_in_forked_child)
