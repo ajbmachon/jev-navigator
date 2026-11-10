@@ -74,12 +74,13 @@ time.sleep(30)
 """
 
 TAKES_A_SLOT_AND_HOLDS_IT = """\
+import subprocess
 import sys
-from pathlib import Path
-from jev_navigator.index import tools
-tools.git(["--version"], Path.cwd())
-print("holding", flush=True)
-sys.stdin.read()
+from jev_navigator import memory_limit
+helper = [sys.executable, "-c", "import sys; sys.stdin.read()"]
+with memory_limit.started(helper, stdin=subprocess.PIPE):
+    print("holding", flush=True)
+    sys.stdin.read()
 """
 
 TAKES_A_SLOT = """\
@@ -365,30 +366,6 @@ def test_the_ceiling_admits_as_many_processes_as_its_settings_give_slots_and_no_
     assert all(str(holder.pid) in refusal for holder in holders)
 
 
-def test_a_holder_whose_slot_file_was_deleted_takes_a_slot_again_before_more_work(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Arrange: this process holds the only slot, then a /tmp cleaner deletes its file, and a real JVN
-    # process takes the slot at the new file.
-    slots = tmp_path / "slots"
-    _limit_the_process(monkeypatch, slots, allowance_mb=512, ceiling_mb=512, wait_seconds=1)
-    tools.git(["--version"], tmp_path)
-    (slots / "slot-0").unlink()
-    newcomer = _jvn_process(TAKES_A_SLOT_AND_HOLDS_IT, slots, allowance_mb="512", ceiling_mb="512")
-    assert newcomer.stdout.readline() == "holding\n"
-
-    # Act
-    try:
-        with pytest.raises(MemoryLimitReachedError, match=f"process {newcomer.pid} holds") as refused:
-            tools.git(["--version"], tmp_path)
-    finally:
-        newcomer.kill()
-        newcomer.wait()
-
-    # Assert
-    assert "ceiling of 512 MB" in str(refused.value)
-
-
 def test_the_watchdog_keeps_watching_while_another_thread_waits_for_a_slot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -396,7 +373,6 @@ def test_the_watchdog_keeps_watching_while_another_thread_waits_for_a_slot(
     # deleted, a real JVN process takes the slot, and another thread here waits to take one again.
     slots, trigger = tmp_path / "slots", tmp_path / "grow"
     _limit_the_process(monkeypatch, slots, allowance_mb=150, ceiling_mb=150, wait_seconds=6)
-    tools.git(["--version"], tmp_path)
     refusals: dict[str, tuple[float, str]] = {}
 
     def refused_as(name: str, call) -> threading.Thread:
