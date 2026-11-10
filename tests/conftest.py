@@ -227,8 +227,8 @@ def private_memory_slots(
 ) -> Path:
     """The suite's JVN processes take their memory slots in a folder of their own, never the
     machine's, so no test waits for a live JVN run and no test makes one wait. It runs after
-    ``no_developer_settings`` has dropped every ``JEV_NAVIGATOR_`` variable. The folder lasts the whole
-    session, because a process keeps its slot in a folder for as long as it lives."""
+    ``no_developer_settings`` has dropped every ``JEV_NAVIGATOR_`` variable. One folder serves the whole
+    session."""
     monkeypatch.setenv(SLOTS_DIR_VARIABLE, str(memory_slots_folder))
     return memory_slots_folder
 

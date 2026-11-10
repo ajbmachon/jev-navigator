@@ -233,10 +233,12 @@ machine share a ceiling. This covers both the `jvn` command and library consumer
   take turns instead of outgrowing the allowance together. A file too big to parse beside others is
   parsed alone on one thread, up to the child-process allowance less 270 MB of parser headroom (754 MB at the default);
   a file estimated above that is refused and named.
-- **Ceiling:** 8,192 MB, so eight slots of 1,024 MB. A process takes a slot when it first starts a
-  tool and keeps it until it exits. When every slot is held, it waits up to 120 seconds for one, then
-  raises `MemoryLimitReachedError`, which names the processes holding the slots. The slots are files
-  in `/tmp/jev-navigator-memory-<uid>`, and the operating system frees a slot when its process ends,
+- **Ceiling:** 8,192 MB, so eight slots of 1,024 MB. A process holds a slot only while a tool it
+  started runs or one of its ast-grep scans is open, and lets it go when the last of them ends, so an
+  idle process holds none. When every slot is held, it logs the processes holding them once and waits
+  up to 120 seconds for one, then raises `MemoryLimitReachedError`, which names those processes; once
+  it gets a slot after waiting, it logs how long it waited. The slots are files in
+  `/tmp/jev-navigator-memory-<uid>`, and the operating system frees a slot when its process ends,
   however it ends.
 - **What a refusal does:** during a Find, its entry selection or Find All's enumeration, the search
   ends `failed` with resume state, and `--resume` continues it once there is room. A refusal before

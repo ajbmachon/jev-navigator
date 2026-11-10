@@ -137,7 +137,8 @@ the official SDK for live calls; set `TYPESAFE_API_KEY`. Everything else, includ
 offline.
 
 JVN limits the child processes it starts. Each host reserves 1,024 MB for its ast-grep, ripgrep,
-git and command-line connector processes together, with an 8,192 MB shared child-process ceiling.
+git and command-line connector processes together while they run, with an 8,192 MB shared
+child-process ceiling.
 It waits up to two minutes for room, then raises `MemoryLimitReachedError`. The embedding host or
 CLI launcher owns the Python process's total memory, including indexes and other caches. JVN cannot
 attribute a shared process's footprint to individual libraries. See
