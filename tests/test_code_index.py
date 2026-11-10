@@ -1410,6 +1410,65 @@ def test_a_path_list_past_the_argument_limit_still_lists_every_file(tmp_path: Pa
     assert index.not_indexed_files[missing[-1]]
 
 
+# A requested path beside the file its name would match as a glob: a Next.js route, a name with a star
+# and a name with a question mark.
+_GLOB_NAMED = (("app/[id].ts", "app/i.ts"), ("app/all*.ts", "app/allX.ts"), ("app/q?.ts", "app/qz.ts"))
+
+
+def _commit_glob_named_files(root: Path) -> None:
+    names = ["app/b.ts", *(name for pair in _GLOB_NAMED for name in pair)]
+    commit_files(root, {name: "export const value = 1;\n" for name in names})
+
+
+@pytest.mark.parametrize(("requested", "matched_as_glob"), _GLOB_NAMED)
+def test_a_requested_path_names_that_file_and_never_a_glob(
+    tmp_path: Path, requested: str, matched_as_glob: str
+) -> None:
+    _commit_glob_named_files(tmp_path)
+
+    index = CodeIndex.from_git(tmp_path, [requested, "app/b.ts"])
+    working = CodeIndex.from_directory(tmp_path, [requested, "app/b.ts"])
+
+    assert sorted(index.files) == sorted(working.files) == sorted([requested, "app/b.ts"])
+    assert matched_as_glob not in index.files + working.files
+
+
+@pytest.mark.parametrize(("requested", "matched_as_glob"), _GLOB_NAMED)
+def test_a_changed_file_the_requested_name_would_match_as_a_glob_is_no_change_in_scope(
+    tmp_path: Path, requested: str, matched_as_glob: str
+) -> None:
+    _commit_glob_named_files(tmp_path)
+    (tmp_path / matched_as_glob).write_text("export const value = 2;\n")
+
+    index = CodeIndex.from_git(tmp_path, [requested])
+
+    index.require_commit(index.commit)
+
+
+@pytest.mark.parametrize(("requested", "matched_as_glob"), _GLOB_NAMED)
+def test_a_commit_snapshot_of_a_requested_path_holds_only_that_file(
+    tmp_path: Path, requested: str, matched_as_glob: str
+) -> None:
+    _commit_glob_named_files(tmp_path)
+
+    with CodeIndex.at_commit(tmp_path, "HEAD", [requested]) as snapshot:
+        assert snapshot.files == (requested,)
+
+
+def test_a_directory_prefix_still_lists_every_file_under_it(tmp_path: Path) -> None:
+    _commit_glob_named_files(tmp_path)
+    write_files(tmp_path, {"web/page.ts": "export const page = 1;\n"})
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "web")
+    app = {"app/b.ts", *(name for pair in _GLOB_NAMED for name in pair)}
+
+    for prefix in ("app/", "app"):
+        assert set(CodeIndex.from_git(tmp_path, [prefix]).files) == app
+        assert set(CodeIndex.from_directory(tmp_path, [prefix]).files) == app
+        with CodeIndex.at_commit(tmp_path, "HEAD", [prefix]) as snapshot:
+            assert set(snapshot.files) == app
+
+
 def test_a_commit_outside_the_index_folder_is_no_co_change_of_a_file_named_alike(tmp_path: Path) -> None:
     write_files(tmp_path, {name: "one\n" for name in ("README.md", "package.json")})
     write_files(tmp_path, {f"pkg/{name}": "one\n" for name in ("README.md", "package.json")})

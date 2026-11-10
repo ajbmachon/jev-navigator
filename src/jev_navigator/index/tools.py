@@ -568,10 +568,14 @@ def git(
 
 def git_over_paths(arguments: Sequence[str], paths: Sequence[str], cwd: Path) -> str:
     """Git's NUL-separated output for ``paths``, however many commands the argument limit splits them
-    into; no paths ask about the whole tree."""
+    into; no paths ask about the whole tree. A path is a file or a folder, never a pattern: git
+    otherwise reads ``app/[id].ts`` as a glob that also matches ``app/i.ts``."""
     if not paths:
         return git(arguments, cwd)
-    return "".join(git([*arguments, "--", *chunk], cwd) for chunk in file_chunks(paths, bytes_only=True))
+    return "".join(
+        git(["--literal-pathspecs", *arguments, "--", *chunk], cwd)
+        for chunk in file_chunks(paths, bytes_only=True)
+    )
 
 
 def git_lines(arguments: Sequence[str], cwd: Path) -> Iterator[str]:
