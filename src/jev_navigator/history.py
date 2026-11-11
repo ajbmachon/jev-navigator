@@ -21,7 +21,8 @@ parallel.
 
 A judge holds the selected state, together with the shared state beside it, within what its
 client's box for ``state`` plus the longest question (``InputLimits.box_chars``) leaves after the
-longest question actually asked, and within the history's own ``budget_chars`` when it sets one.
+longest question actually asked, within the history's own ``budget_chars`` when it sets one, and
+within ``Judge.fits``, which measures the request as it is sent (masked, in its route's form).
 The docs also warn that accuracy falls as unrelated state grows,
 so select only the sections a check needs, and measure with ``ceiling_curve``.
 
@@ -199,24 +200,29 @@ class History:
         question_chars: int = 0,
         *,
         box_chars: int | None = None,
+        request_fits: Callable[[dict], bool] | None = None,
     ) -> dict:
         """Exactly the selected sections, each within its limit; ``self.evictions`` lists what this
         call trimmed. Measured together with the ``shared`` state that travels next to them, they stay
         within ``budget_chars`` and within what ``box_chars``, a client's box for the state plus the
         longest question, leaves after the question of ``question_chars`` that reads them; unbounded
-        when neither is set."""
+        when neither is set. ``request_fits``, when given, must also accept the whole state, so a
+        judge can measure the request as it sends it (``Judge.fits``: masked, in its route's form)."""
         self._require_known(names)
         room = None if box_chars is None else box_chars - question_chars
         limit = min((bound for bound in (self.budget_chars, room) if bound is not None), default=None)
 
         def fits(steps: list[HistoryStep]) -> bool:
-            return limit is None or self.size({**(shared or {}), **self._build(names, steps)}) <= limit
+            state = {**(shared or {}), **self._build(names, steps)}
+            within = limit is None or self.size(state) <= limit
+            return within and (request_fits is None or request_fits(state))
 
         reads_code = bool(_SECTIONS_WITH_CODE & set(names))
         kept, self.evictions = self.evict(self.steps, fits) if reads_code else (self.steps, [])
         if not fits(kept):
+            bound = f"{limit} characters" if limit is not None else "the judge's input limits"
             raise HistoryTooLargeError(
-                f"the selected sections, the shared state and the question need more than {limit} characters"
+                f"the selected sections, the shared state and the question need more than {bound}"
             )
         return self._build(names, kept)
 
@@ -384,7 +390,7 @@ def _grouped(
     for name, entry in checks.items():
         by_sections.setdefault(entry.sections, {})[name] = entry.check
     return [
-        _Group(sections, _state(history, sections, shared, grouped, judge.input_limits.box_chars), grouped)
+        _Group(sections, _state(judge, history, sections, shared, grouped), grouped)
         for sections, grouped in by_sections.items()
     ]
 
@@ -416,13 +422,21 @@ def _judged(
 
 
 def _state(
-    history: History, sections: tuple[str, ...], shared: Mapping, checks: Mapping[str, Check], box_chars: int
+    judge: Judge, history: History, sections: tuple[str, ...], shared: Mapping, checks: Mapping[str, Check]
 ) -> dict:
     overlap = set(sections) & set(shared)
     if overlap:
         raise ValueError(f"shared state and history sections both use {sorted(overlap)}")
-    longest_question = max(serialized_chars(check.to_question()) for check in checks.values())
-    return {**shared, **history.state_for(sections, shared, longest_question, box_chars=box_chars)}
+    questions = {check.question_id: check.to_question() for check in checks.values()}
+    longest_question = max(serialized_chars(question) for question in questions.values())
+    built = history.state_for(
+        sections,
+        shared,
+        longest_question,
+        box_chars=judge.input_limits.box_chars,
+        request_fits=lambda state: judge.fits(state, questions),
+    )
+    return {**shared, **built}
 
 
 def _judgment(
