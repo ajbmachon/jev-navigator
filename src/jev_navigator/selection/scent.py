@@ -29,7 +29,7 @@ from urllib.parse import quote
 from ..index.code_index import CodeIndex
 from ..index.imports import without_comments
 from ..index.languages import split_lines
-from ..index.units import LineAnchor, Unit, list_units
+from ..index.units import LineAnchor, Unit, items_to_judge, list_units
 from ..mentions import spelling_variants
 
 DEFAULT_MAX_UNITS = 25_000
@@ -39,7 +39,7 @@ _WHOLE_UNITS = 2**31 - 1
 """Room per unit large enough that the listing cuts no unit: a document is a whole unit."""
 
 _TOKEN = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
-_ACRONYM = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_ACRONYM = re.compile(r"(?<![A-Z])([A-Z]+)([A-Z][a-z])")
 _STOP = frozenset(
     [
         "a",
@@ -278,15 +278,17 @@ def _built(index: CodeIndex, max_units: int) -> UnitScent:
             f"{max_units:,}; narrow the CodeIndex's scope or raise max_units"
         )
     starts = {unit.id: LineAnchor(unit.path, unit.start) for unit in units}
-    return UnitScent(ScentIndex(_documents(index, units)), starts)
+    return UnitScent(ScentIndex(scent_documents(index, units)), starts)
 
 
-def _documents(index: CodeIndex, units: Sequence[Unit]) -> Iterator[ScentDocument]:
-    """One document per unit, from its lines of its file's comment-free source; units come in file
-    order, so only one file's lines are held at a time."""
+def scent_documents(index: CodeIndex, units: Sequence[Unit]) -> Iterator[ScentDocument]:
+    """One document per unit, from its judged lines of its file's comment-free source; units come in
+    file order, so only one file's lines are held at a time."""
     file, lines = "", ()
     for unit in units:
         if unit.path != file:
             file, lines = unit.path, split_lines(index.source_without_comments(unit.path))
-        code = "\n".join("\n".join(lines[start - 1 : end]) for start, end in unit.ranges)
+        code = "\n".join(
+            "\n".join(lines[start - 1 : end]) for item in items_to_judge(unit) for start, end in item.ranges
+        )
         yield uncommented_scent_document(unit.id, unit.path, unit.symbol, code, test=unit.test)

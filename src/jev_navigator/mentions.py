@@ -10,7 +10,7 @@ from operator import itemgetter
 
 from .index.languages import LANGUAGE_BY_SUFFIX, SCHEMA_SUFFIX
 
-PATH_TOKEN = re.compile(r"[\w./-]*[\w-]\.[A-Za-z0-9]{1,8}")
+PATH_TOKEN = re.compile(r"(?<![\w./-])[\w./-]*[\w-]\.[A-Za-z0-9]{1,8}")
 """A file name with a suffix of one to eight letters or digits, perhaps under folders: ``ci.yml``,
 ``jobs/sweep.py``. A word without a suffix, such as ``Makefile``, is not a path token."""
 _LEADING_RELATIVE = re.compile(r"^(?:\.{1,2}/|/)+")
@@ -30,7 +30,7 @@ _SNAKE_CASE = re.compile(r"\b([a-z]+(?:_[a-z0-9]+)+)\b")
 BARE_NAME_RULES = (_CALL, _CAMEL_CASE, _SCREAMING_CASE, _SNAKE_CASE)
 """The shapes of a word a text names code by without backticks; snake_case is its own rule."""
 _DOTTED_MODULE = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
-_INTERPRETER_OPTION = r"-(?:[WX]\s*[^\s-]\S*|[A-Za-z]\w*)"
+_INTERPRETER_OPTION = r"-(?:[WX]\s*+[^\s-]\S*+|(?![WX])[A-Za-z]\w*+)"
 """An option before ``-m``: ``-u``, or ``-W`` and ``-X`` with their value (``-W ignore``, ``-X dev``)."""
 _PYTHON_MODULE_RUN = re.compile(rf"\bpython[\d.]*(?:\s+{_INTERPRETER_OPTION})*\s+-m\s*({_DOTTED_MODULE})")
 _IDENTIFIER = re.compile(r"[A-Za-z_$][\w$]*")

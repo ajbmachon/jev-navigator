@@ -119,3 +119,27 @@ def test_names_from_text_keeps_paths_whole_beside_plain_identifiers() -> None:
     names = names_from_text("copy_sandbox_tree calls copySandbox; `pyproject.toml` and docs/run_all.md")
     assert names.code == ("copy_sandbox_tree", "copySandbox", "run_all")
     assert names.paths == ("pyproject.toml", "docs/run_all.md")
+
+
+def test_a_long_run_of_path_characters_without_a_suffix_scans_in_linear_time() -> None:
+    from time import perf_counter
+
+    blob = "a/" * 25_000 + " valid/orders.py"
+    started = perf_counter()
+    paths = paths_in(blob)
+    elapsed = perf_counter() - started
+
+    assert paths == ["valid/orders.py"]
+    assert elapsed < 0.2
+
+
+def test_repeated_warning_and_x_options_without_a_module_scan_in_linear_time() -> None:
+    from time import perf_counter
+
+    command = "python " + "-Werror -Xdev " * 15 + "script.py && python -Werror -Xdev -m app.worker"
+    started = perf_counter()
+    modules = python_modules_in(command)
+    elapsed = perf_counter() - started
+
+    assert modules == ["app.worker"]
+    assert elapsed < 0.2

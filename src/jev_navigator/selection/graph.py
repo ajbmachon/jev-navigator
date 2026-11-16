@@ -14,7 +14,7 @@ from types import MappingProxyType
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import Span
-from ..index.units import Unit
+from ..index.units import Unit, items_to_judge
 from ..mentions import paths_in
 
 
@@ -185,7 +185,11 @@ def graph_from_index(index: CodeIndex, units: Sequence[Unit], *, cochange_limit:
         if language_of(path):
             _bound_edges(index, graph, path, by_file)
         for unit in file_units:
-            source = "\n".join(index.read_slice(Span(path, start, end)).text for start, end in unit.ranges)
+            source = "\n".join(
+                index.read_slice(Span(path, start, end)).text
+                for item in items_to_judge(unit)
+                for start, end in item.ranges
+            )
             for named in dict.fromkeys(paths_in(source)):
                 candidates = [named] if named in by_file else filenames.get(PurePosixPath(named).name, [])
                 if len(candidates) == 1 and candidates[0] != path:

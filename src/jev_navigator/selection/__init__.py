@@ -4,7 +4,7 @@ from .active import ActivePolicy, ActiveResult, Observation, active_search, norm
 from .graph import CodeGraph, GraphEdge, graph_from_index, random_walk
 from .outline import FileOutline, OutlineLimits, outline, outline_choice, selected_file
 from .rank import RankFeatures, RankWeights, rank, rank_features
-from .scent import ScentDocument, ScentIndex, scent_document, words
+from .scent import ScentDocument, ScentIndex, scent_document, scent_documents, words
 
 __all__ = [
     "ActivePolicy",
@@ -28,6 +28,7 @@ __all__ = [
     "rank_features",
     "reranked",
     "scent_document",
+    "scent_documents",
     "selected_file",
     "words",
 ]

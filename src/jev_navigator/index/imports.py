@@ -22,14 +22,14 @@ from .tsconfig import ScriptPaths, normalised
 COMMENT_RANGE_RECORD = struct.Struct("<qI")
 """A signed byte-start delta and unsigned byte length, compressed in cached file facts."""
 
-_PYTHON_FROM = re.compile(r"^[ \t]*from\s+(\.*[\w.]*)\s+import\s+(\([^)]*\)|[^\n]*)", re.M)
+_PYTHON_FROM = re.compile(r"^[ \t]*+from\s++([\w.]++)\s++import\s++(\([^)]*\)|[^\n]*)", re.M)
 _PYTHON_IMPORT = re.compile(
     r"^[ \t]*import[ \t]+([\w.]+(?:[ \t]+as[ \t]+\w+)?(?:[ \t]*,[ \t]*[\w.]+(?:[ \t]+as[ \t]+\w+)?)*)", re.M
 )
 _PYTHON_IMPORTED_MODULE = re.compile(r"([\w.]+)(?:[ \t]+as[ \t]+(\w+))?")
 _SCRIPT_FROM = re.compile(
-    r"""^[ \t]*(import|export)\s+(?:type\s+)?"""
-    r"""((?:(?!\n[ \t]*(?:import|export)\b)[\w$*\s{},])*?)\s*from\s*['"]([^'"]+)['"]""",
+    r"""^[ \t]*+(import|export)\s++(?:type(?!\s+from\s*['"])\s++)?"""
+    r"""((?:(?!\n[ \t]*+(?:import|export)\b)[\w$*\s{},])*?)\bfrom\s*['"]([^'"]+)['"]""",
     re.M,
 )
 _SCRIPT_SIDE_EFFECT_IMPORT = re.compile(r"""^[ \t]*import\s*['"][^'"]+['"][ \t]*;?[ \t]*$""", re.M)
@@ -72,6 +72,8 @@ def imported_modules(
     source: str, path: str, *, comment_ranges: Sequence[tuple[int, int]] | bytes | None = None
 ) -> list[str]:
     """The module specifiers a file imports, in source order, each once."""
+    if languages.language_of(path) is None:
+        return []
     source = without_comments(source, path, comment_ranges=comment_ranges)
     if path.endswith(".py"):
         found = [(match.start(), match.group(1)) for match in _PYTHON_FROM.finditer(source)]
@@ -88,6 +90,8 @@ def module_imports(
     """Each module specifier the source imports, re-exports or requires, in source order, with the
     names it takes by name as that module exports them; ``None`` when it takes the whole module (a
     namespace or default import, ``export *``, ``require``, a dynamic or bare import, ``import m``)."""
+    if languages.language_of(path) is None:
+        return ()
     source = without_comments(source, path, comment_ranges=comment_ranges)
     if path.endswith(".py"):
         found = [
@@ -290,6 +294,8 @@ def imported_names(
     parenthesised over several lines; ``import { a as b } from "m"`` and ``import a from "m"``, also
     over several lines; ``const { a, b: c } = require("m")``). Type-only names are included;
     namespace imports are not."""
+    if languages.language_of(path) is None:
+        return {}
     source = without_comments(source, path, comment_ranges=comment_ranges)
     if path.endswith(".py"):
         return {
@@ -333,6 +339,8 @@ def reexported_names(
     ``from m import *``). A Python module passes on what it imports by name, as a package's
     ``__init__.py`` does; a name it imports under another name is left out, since its module exports
     it under the first."""
+    if languages.language_of(path) is None:
+        return ()
     source = without_comments(source, path, comment_ranges=comment_ranges)
     if path.endswith(".py"):
         return _python_reexports(source)
@@ -416,6 +424,8 @@ def import_lines(
     """The 1-based lines import statements cover; an import over several lines covers every line it
     spans. A script's ``require`` counts only as a whole statement (``const x = require("x")``),
     never inside other code."""
+    if languages.language_of(path) is None:
+        return frozenset()
     statements = _PYTHON_IMPORT_STATEMENTS if path.endswith(".py") else _SCRIPT_IMPORT_STATEMENTS
     return frozenset(
         _lines_matched(without_comments(source, path, comment_ranges=comment_ranges), statements)
