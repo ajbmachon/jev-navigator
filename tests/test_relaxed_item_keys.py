@@ -101,6 +101,20 @@ def test_the_relaxed_key_hashes_the_item_before_masking(tmp_path: Path) -> None:
     assert store.by_item(relaxed_item_key(DESCRIBES, secret_item, SHARED), MODEL) is not None
 
 
+def test_the_relaxed_key_hashes_the_shared_state_before_masking(tmp_path: Path) -> None:
+    # Arrange: the masker hides the value in the shared state as it is sent
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    secret_shared = {"doc": {"sentence": 'the check that rejects password = "hunter2go"'}}
+    client = ScriptedJevClient()
+
+    # Act
+    Judge(client, store=store).check_each(DESCRIBES, PAIR[:1], secret_shared)
+
+    # Assert
+    assert "hunter2go" not in str(client.requests)
+    assert store.by_item(relaxed_item_key(DESCRIBES, PAIR[0], secret_shared), MODEL) is not None
+
+
 def test_production_lookups_stay_on_the_strict_key(judged_pair: AnswerStore) -> None:
     # Arrange
     alone = ScriptedJevClient()
