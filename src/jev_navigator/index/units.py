@@ -519,8 +519,10 @@ class UnitReader:
         unlisted |= _left_out(self._index, [file for file in files if file in in_scope], self._reading)
         read_files = tuple(file for file in files if file in in_scope and file not in unlisted)
         self._index.functions_in_files(tuple(file for file in read_files if language_of(file)))
-        units = tuple(unit for file in read_files for unit in self._source(file).listed)
         unlisted |= {file: reason for file, reason in self._index.unavailable_files.items() if file in files}
+        units = tuple(
+            unit for file in read_files if file not in unlisted for unit in self._source(file).listed
+        )
         return UnitListing(units, unlisted)
 
     def resolve(self, anchor: Anchor) -> tuple[tuple[Unit, ...], str]:
@@ -530,6 +532,12 @@ class UnitReader:
         problem = self._lines_problem(anchor.file, start, end)
         if problem:
             return (), problem
+        if (
+            language_of(anchor.file)
+            and not self._index.functions_in(anchor.file)
+            and (refused := self._index.unavailable_files.get(anchor.file))
+        ):
+            return (), refused
         units = self._units_touching(anchor.file, start, end)
         if not units:
             return (), f"{_lines_named(anchor.file, start, end)}: blank and outside every function"

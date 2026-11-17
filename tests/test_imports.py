@@ -945,3 +945,34 @@ def test_comment_parser_failure_is_visible_to_the_caller(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "AST_GREP", str(tmp_path / "missing-parser"))
     with pytest.raises(FileNotFoundError):
         without_comments('value = "#kept" # removed\n', "a.py")
+
+
+def test_unterminated_imports_and_non_code_files_scan_in_linear_time() -> None:
+    from time import perf_counter
+
+    from jev_navigator.index.imports import import_lines
+
+    script_source = (
+        "export" + "\n" * 5_000 + "!\n"
+        "import type from './default_type';\n"
+        "import type { Kind } from './kind';\n"
+    )
+    python_source = "from" + " " * 20_000 + "!\nfrom ..pkg.mod import run\n"
+
+    started = perf_counter()
+    script_mods = imported_modules(script_source, "src/p.ts", comment_ranges=())
+    script_taken = imported_names(script_source, "src/p.ts", comment_ranges=())
+    py_mods = imported_modules(python_source, "src/p.py", comment_ranges=())
+    non_code = imported_modules(script_source, "docs/notes.md")
+    non_code_lines = import_lines(script_source, "docs/notes.md")
+    elapsed = perf_counter() - started
+
+    assert script_mods == ["./default_type", "./kind"]
+    assert script_taken == {
+        "type": ImportedName("./default_type", None),
+        "Kind": ImportedName("./kind", "Kind"),
+    }
+    assert py_mods == ["..pkg.mod"]
+    assert non_code == []
+    assert non_code_lines == frozenset()
+    assert elapsed < 0.2

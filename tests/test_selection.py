@@ -26,6 +26,7 @@ from jev_navigator.selection import (
     random_walk,
     rank,
     scent_document,
+    scent_documents,
     selected_file,
     words,
 )
@@ -310,3 +311,44 @@ def test_compact_graph_answers_as_the_plain_one():
         compact.add(GraphEdge("a", "alone", "call"))
     with pytest.raises(TypeError):
         compact.degrees()["a"] = 100
+
+
+def test_long_uppercase_runs_split_acronyms_in_linear_time():
+    from time import perf_counter
+
+    token = "A" * 20_000 + "_HttpRequest"
+    started = perf_counter()
+    extracted = words(token)
+    elapsed = perf_counter() - started
+
+    assert {"http", "request"} <= set(extracted)
+    assert elapsed < 0.2
+
+
+def test_scent_documents_and_graph_skip_pieces_too_large_to_judge_and_non_code_imports(tmp_path):
+    steps = "".join(f"    step_{number} = {number}\n" for number in range(58))
+    oversized_line = "    blob = '" + ("oversized_omega app/decoy.py " * 200) + "'\n"
+    write_files(
+        tmp_path,
+        {
+            "app/caller.py": (
+                "def call():\n" + steps + "    return 'judged_alpha app/target.py'\n" + oversized_line
+            ),
+            "app/target.py": "def target():\n    return 1\n",
+            "app/decoy.py": "def decoy():\n    return 2\n",
+            "docs/guide.md": "# Guide\n\nimport { target } from '../app/target.py'\n",
+        },
+    )
+    index = CodeIndex(tmp_path, ["app/caller.py", "app/target.py", "app/decoy.py", "docs/guide.md"])
+    units = list_units(index, index.files, box_chars=3_000, reading=Reading.MIXED).units
+    caller = next(unit for unit in units if unit.path == "app/caller.py")
+    assert caller.judged_pieces and caller.too_large_pieces
+
+    scent = ScentIndex(scent_documents(index, units))
+    graph = graph_from_index(index, units, cochange_limit=0)
+
+    assert scent.scores("judged alpha")[caller.id] > 0
+    assert scent.scores("oversized omega")[caller.id] == 0
+    assert "file:app/target.py" in graph.adjacency[caller.id]
+    assert "file:app/decoy.py" not in graph.adjacency[caller.id]
+    assert graph.edge_counts["import"] == 0

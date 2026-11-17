@@ -1247,7 +1247,7 @@ class CodeIndex:
         self._require_in_scope(file)
         content = self._sources.first_read(file) or b""
         facts = self._facts.get(file) or self._fact_cache.load(file, content)
-        comments = None if facts is None else facts.comment_ranges
+        comments = b"" if file in self._refused else None if facts is None else facts.comment_ranges
         return content.decode(errors="replace"), comments
 
     def source_without_comments(self, file: str) -> str:
@@ -1361,6 +1361,8 @@ class CodeIndex:
     @memoized
     def imports(self, file: str) -> tuple[str, ...]:
         """The scope files ``file`` imports, read once per index from the file as the index first read it."""
+        if not language_of(file):
+            return ()
         source, comments = self._source_and_comments(file)
         script_paths = self._script_paths(file)
         packages = self._read_packages()

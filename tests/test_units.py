@@ -1107,3 +1107,26 @@ def test_an_anchor_outside_the_scope_or_its_file_is_reported_before_any_parse(
         "the range 7-5 ends before it starts",
     ]
     assert scans == []
+
+
+def test_a_file_refused_by_the_parser_lists_no_unit_and_reports_its_refusal_reason(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    statement = "export function launch(){return 1};"
+    write_files(
+        root,
+        {
+            "src/kept.py": "def kept():\n    return 1\n",
+            "src/bundle.js": (statement * (200_000 // len(statement) + 1))[:200_000],
+        },
+    )
+    commit_all(root)
+    index = CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+    listing = list_units(index, index.files, box_chars=JEV_BOX)
+    resolved = resolve_anchors(index, (LineAnchor("src/bundle.js", 1),), box_chars=JEV_BOX, listed_only=True)
+
+    assert [unit.id for unit in listing.units] == ["src/kept.py:1-2"]
+    assert listing.unlisted["src/bundle.js"].startswith("too large to parse:")
+    assert resolved.units == ()
+    assert len(resolved.unresolved) == 1
+    assert resolved.unresolved[0].problem.startswith("too large to parse:")
